@@ -1,0 +1,1 @@
+ALTER TABLE `teamMembers` DROP INDEX `teamMembers_jobId_vcFirm_name_unique`;

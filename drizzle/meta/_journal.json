@@ -1,0 +1,111 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1764534115771,
+      "tag": "0000_natural_mole_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1764534152612,
+      "tag": "0001_pink_otto_octavius",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1764724358578,
+      "tag": "0002_odd_jazinda",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1765151100968,
+      "tag": "0003_wide_true_believers",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1768518077497,
+      "tag": "0004_new_polaris",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "5",
+      "when": 1768783109244,
+      "tag": "0005_faithful_overlord",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "5",
+      "when": 1768943345338,
+      "tag": "0006_thankful_zemo",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "5",
+      "when": 1769015161419,
+      "tag": "0007_motionless_mole_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "5",
+      "when": 1769015184938,
+      "tag": "0008_acoustic_mach_iv",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "5",
+      "when": 1769030577394,
+      "tag": "0009_silky_satana",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "5",
+      "when": 1769096956231,
+      "tag": "0010_zippy_captain_midlands",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "5",
+      "when": 1769129803245,
+      "tag": "0011_orange_quicksilver",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "5",
+      "when": 1769191297671,
+      "tag": "0012_thick_mach_iv",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "5",
+      "when": 1769320163125,
+      "tag": "0013_empty_tomorrow_man",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "5",
+      "when": 1770747820057,
+      "tag": "0014_outgoing_rockslide",
+      "breakpoints": true
+    }
+  ]
+}

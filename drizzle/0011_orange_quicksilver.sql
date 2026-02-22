@@ -1,0 +1,1 @@
+ALTER TABLE `teamMembers` ADD `portfolioCompanies` text;

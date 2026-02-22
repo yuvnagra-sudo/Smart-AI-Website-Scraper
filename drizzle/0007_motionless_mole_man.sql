@@ -1,0 +1,1 @@
+ALTER TABLE `teamMembers` ADD CONSTRAINT `teamMembers_jobId_vcFirm_name_unique` UNIQUE(`jobId`,`vcFirm`,`name`);
