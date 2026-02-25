@@ -5,22 +5,19 @@ import { nanoid } from "nanoid";
 import path from "path";
 
 export async function setupVite(app: Express, server: Server) {
-  // Dynamic imports so vite devDependencies are NOT required in production builds.
-  // setupVite is only called when NODE_ENV === "development", so these imports
-  // never execute in production and won't cause "Cannot find module" crashes.
-  const [{ createServer: createViteServer }, { default: viteConfig }] =
-    await Promise.all([import("vite"), import("../../vite.config")]);
-
-  const serverOptions = {
-    middlewareMode: true,
-    hmr: { server },
-    allowedHosts: true as const,
-  };
+  // Dynamic import so vite devDependency is NOT required in production builds.
+  // setupVite is only called when NODE_ENV === "development".
+  // Do NOT import vite.config.ts here — esbuild inlines local files at bundle time,
+  // which would pull in devDependency imports (tailwindcss, react plugin, etc.) into
+  // dist/index.js and crash production. Let Vite auto-discover vite.config.ts instead.
+  const { createServer: createViteServer } = await import("vite");
 
   const vite = await createViteServer({
-    ...viteConfig,
-    configFile: false,
-    server: serverOptions,
+    server: {
+      middlewareMode: true,
+      hmr: { server },
+      allowedHosts: true as const,
+    },
     appType: "custom",
   });
 
