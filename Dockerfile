@@ -1,32 +1,52 @@
 # Multi-stage build for Railway deployment
+#
+# Stage 1 (builder): installs all deps and builds:
+#   - Vite frontend  → dist/public/
+#   - Web server     → dist/index.js
+#   - Background worker → dist/worker.js
+#
+# Stage 2 (production): minimal image with Chrome for Puppeteer,
+#   copies built artefacts and runs start.sh (web + worker).
+
+# ---------------------------------------------------------------------------
 # Stage 1: Builder
+# ---------------------------------------------------------------------------
 FROM node:22-slim AS builder
 
 WORKDIR /app
 
-# Install build dependencies
+# Native build tools for node-gyp
 RUN apt-get update && apt-get install -y \
   python3 \
   make \
   g++ \
   && rm -rf /var/lib/apt/lists/*
 
-# Copy package files and patches
-COPY package.json pnpm-lock.yaml ./
+# Install pnpm
+RUN npm install -g pnpm
+
+# Copy package manifests and install dependencies
+COPY package.json pnpm-lock.yaml tsconfig.json vite.config.ts ./
 COPY patches ./patches
+RUN pnpm install --no-frozen-lockfile
 
-# Install dependencies
-RUN npm install -g pnpm && pnpm install --frozen-lockfile
+# Copy all source
+COPY client ./client
+COPY server ./server
+COPY shared ./shared
+COPY drizzle ./drizzle
 
-# Copy source code
-COPY . .
+# Build frontend (dist/public/) + web server (dist/index.js) + worker (dist/worker.js)
+RUN pnpm build
 
+# ---------------------------------------------------------------------------
 # Stage 2: Production
+# ---------------------------------------------------------------------------
 FROM node:22-slim
 
 WORKDIR /app
 
-# Install Chrome and dependencies for Puppeteer
+# Install Chrome and its dependencies for Puppeteer
 RUN apt-get update && apt-get install -y \
   wget \
   gnupg \
@@ -54,29 +74,34 @@ RUN apt-get update && apt-get install -y \
   && apt-get install -y google-chrome-stable \
   && rm -rf /var/lib/apt/lists/*
 
-# Set Chrome path for Puppeteer
+# Tell Puppeteer to use the system Chrome instead of downloading its own
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
 
-# Copy package files and patches
+# Install pnpm and production dependencies only
+RUN npm install -g pnpm
 COPY package.json pnpm-lock.yaml ./
 COPY patches ./patches
+RUN pnpm install --no-frozen-lockfile --prod
 
-# Install all dependencies (tsx needed for runtime)
-RUN npm install -g pnpm && pnpm install --frozen-lockfile
-
-# Copy application from builder
-COPY --from=builder /app/server ./server
+# Copy built output from builder stage
+COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/drizzle ./drizzle
-COPY --from=builder /app/shared ./shared
 
-# Create non-root user for security (use different UID to avoid conflict)
+# Copy startup script
+COPY start.sh ./start.sh
+RUN chmod +x ./start.sh
+
+# Non-root user for security
 RUN useradd -m -u 1001 worker && chown -R worker:worker /app
 USER worker
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD node -e "console.log('healthy')" || exit 1
+# Health check — web server listens on $PORT (Railway injects this)
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:' + (process.env.PORT || 3000) + '/api/trpc/health', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"
 
-# Start the worker using tsx executable directly (no --loader or --import flags)
-CMD ["npx", "tsx", "server/worker.ts"]
+# Expose the port Railway will route traffic to
+EXPOSE 3000
+
+# Run both the web server and background worker
+CMD ["./start.sh"]
