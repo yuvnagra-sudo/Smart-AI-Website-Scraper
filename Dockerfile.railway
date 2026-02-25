@@ -28,7 +28,7 @@ RUN npm install -g pnpm
 # Copy package manifests and install dependencies
 COPY package.json pnpm-lock.yaml tsconfig.json vite.config.ts ./
 COPY patches ./patches
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --no-frozen-lockfile
 
 # Copy all source
 COPY client ./client
@@ -82,7 +82,7 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/google-chrome-stable
 RUN npm install -g pnpm
 COPY package.json pnpm-lock.yaml ./
 COPY patches ./patches
-RUN pnpm install --frozen-lockfile --prod
+RUN pnpm install --no-frozen-lockfile --prod
 
 # Copy built output from builder stage
 COPY --from=builder /app/dist ./dist

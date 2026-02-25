@@ -3,10 +3,14 @@ import fs from "fs";
 import { type Server } from "http";
 import { nanoid } from "nanoid";
 import path from "path";
-import { createServer as createViteServer } from "vite";
-import viteConfig from "../../vite.config";
 
 export async function setupVite(app: Express, server: Server) {
+  // Dynamic imports so vite devDependencies are NOT required in production builds.
+  // setupVite is only called when NODE_ENV === "development", so these imports
+  // never execute in production and won't cause "Cannot find module" crashes.
+  const [{ createServer: createViteServer }, { default: viteConfig }] =
+    await Promise.all([import("vite"), import("../../vite.config")]);
+
   const serverOptions = {
     middlewareMode: true,
     hmr: { server },
