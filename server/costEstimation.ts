@@ -147,8 +147,13 @@ export function estimateEnrichmentCost(
     scaledPortfolioOutput +
     TOKEN_ESTIMATES.waterfallRetry.output * 2 * 0.3;
 
-  // Duration estimate — 50 concurrent workers, wall-clock time is ceil(N/50) batches × 28s each
-  const totalSeconds = Math.ceil(firmCount / 50) * 28;
+  // Duration estimate — 50 concurrent workers at 1,000 RPM Gemini Tier 2
+  // LLM bottleneck: (firmCount × 6 calls) / (1000 RPM / 60) seconds
+  // Scraping bottleneck: ceil(firmCount / 50) × 25s per batch
+  // Wall-clock = max of the two (they run in parallel)
+  const llmSeconds      = (firmCount * 6) / (1000 / 60);
+  const scrapingSeconds = Math.ceil(firmCount / 50) * 25;
+  const totalSeconds    = Math.max(llmSeconds, scrapingSeconds);
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const estimatedDuration = hours > 0

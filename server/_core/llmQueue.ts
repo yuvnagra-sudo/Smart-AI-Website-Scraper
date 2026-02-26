@@ -120,8 +120,8 @@ export class LLMRequestQueue {
         request.reject(error as Error);
       }
       
-      // 8ms between requests → ~7,500 RPM effective throughput (capped at 8,000 RPM below)
-      await new Promise(resolve => setTimeout(resolve, 8));
+      // 67ms between requests → ~895 RPM effective throughput (capped at 1,000 RPM below)
+      await new Promise(resolve => setTimeout(resolve, 67));
     }
     
     this.processing = false;
@@ -176,7 +176,8 @@ export class LLMRequestQueue {
 // Global singleton instance
 // 8,000 RPM cap — safe below OpenAI Tier 4 / Gemini Paid Tier 1 (10K RPM limit)
 // At 8ms inter-request delay, effective throughput = ~7,500 RPM (delay is the real limiter)
-export const llmQueue = new LLMRequestQueue(8000);
+// 1,000 RPM — matches Gemini Tier 2 cap (your account limit)
+export const llmQueue = new LLMRequestQueue(1000);
 
 /**
  * Convenience function to enqueue LLM requests
