@@ -102,6 +102,10 @@ export async function runMigrations(): Promise<void> {
     { name: "totalCostUSD",       sql: "ALTER TABLE enrichmentJobs ADD COLUMN totalCostUSD DECIMAL(10,4) DEFAULT 0" },
     { name: "totalInputTokens",   sql: "ALTER TABLE enrichmentJobs ADD COLUMN totalInputTokens INT DEFAULT 0" },
     { name: "totalOutputTokens",  sql: "ALTER TABLE enrichmentJobs ADD COLUMN totalOutputTokens INT DEFAULT 0" },
+    // Agentic extraction columns
+    { name: "sectionsJson",       sql: "ALTER TABLE enrichmentJobs ADD COLUMN sectionsJson TEXT" },
+    { name: "systemPrompt",       sql: "ALTER TABLE enrichmentJobs ADD COLUMN systemPrompt TEXT" },
+    { name: "objective",          sql: "ALTER TABLE enrichmentJobs ADD COLUMN objective TEXT" },
   ];
 
   for (const migration of migrations) {

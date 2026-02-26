@@ -1,5 +1,6 @@
 import * as XLSX from "xlsx";
 import axios from "axios";
+import { parse as csvParse } from "csv-parse/sync";
 
 export interface VCFirmInput {
   companyName: string;
@@ -86,23 +87,28 @@ export async function parseInputExcel(fileUrl: string): Promise<VCFirmInput[]> {
 
   // Detect file type from URL or content
   const isCsv = fileUrl.toLowerCase().endsWith('.csv');
-  
-  // Parse file (supports both Excel and CSV)
-  const workbook = XLSX.read(buffer, { 
-    type: "buffer", 
-    cellDates: false, 
-    cellText: true,
-    // For CSV files, XLSX will auto-detect and parse correctly
-  });
-  
-  const sheetName = workbook.SheetNames[0];
-  if (!sheetName) throw new Error("No sheets found in file");
 
-  const sheet = workbook.Sheets[sheetName];
-  if (!sheet) throw new Error("Sheet not found");
+  let data: any[];
 
-  // Use raw: false to get text values and prevent Excel auto-formatting
-  const data = XLSX.utils.sheet_to_json(sheet, { raw: false, defval: "" }) as any[];
+  if (isCsv) {
+    // Use csv-parse for reliability on large files (2000+ rows)
+    // XLSX v0.18.x truncates large CSVs at ~800 rows with cellText:true
+    const text = buffer.toString('utf-8');
+    data = csvParse(text, {
+      columns: true,
+      skip_empty_lines: true,
+      trim: true,
+      relax_column_count: true,
+    }) as any[];
+  } else {
+    // XLSX for .xlsx files — drop cellText:true (causes large-file truncation)
+    const workbook = XLSX.read(buffer, { type: "buffer", cellDates: false });
+    const sheetName = workbook.SheetNames[0];
+    if (!sheetName) throw new Error("No sheets found in file");
+    const sheet = workbook.Sheets[sheetName];
+    if (!sheet) throw new Error("Sheet not found");
+    data = XLSX.utils.sheet_to_json(sheet, { raw: false, defval: "" }) as any[];
+  }
 
   if (data.length === 0) {
     throw new Error("File is empty or has no data rows");
@@ -214,6 +220,7 @@ export async function parseInputExcel(fileUrl: string): Promise<VCFirmInput[]> {
 }
 
 import type { InvestmentThesisSummary } from "./investmentThesisAnalyzer";
+import type { AgentSection, DirectoryEntry } from "./agentScraper";
 
 export interface ProcessingSummaryData {
   firmName: string;
@@ -293,12 +300,63 @@ export function createOutputExcel(
   }
 
   // Write to buffer with proper options to prevent corruption
-  const buffer = XLSX.write(workbook, { 
-    type: "buffer", 
+  const buffer = XLSX.write(workbook, {
+    type: "buffer",
     bookType: "xlsx",
     compression: true, // Enable compression
     bookSST: false, // Disable shared string table for better compatibility
   });
-  
+
   return buffer;
+}
+
+/**
+ * Create output Excel for agentic extraction jobs.
+ * - "Results" sheet: one row per profile entity, one column per custom section
+ * - "Collected URLs" sheet: entries gathered from directory pages
+ */
+export function createAgentOutputExcel(
+  sections: AgentSection[],
+  profileResults: Array<Record<string, string>>,
+  collectedUrls: DirectoryEntry[],
+): Buffer {
+  const workbook = XLSX.utils.book_new();
+
+  // Sheet 1: Results (profile extractions)
+  if (profileResults.length > 0) {
+    const rows = profileResults.map((r) => {
+      const row: Record<string, string> = {
+        "Company Name": r["Company Name"] ?? "",
+        "Website": r["Website"] ?? "",
+      };
+      for (const s of sections) {
+        row[s.label] = r[s.key] ?? "";
+      }
+      return row;
+    });
+    const sheet = XLSX.utils.json_to_sheet(rows);
+    XLSX.utils.book_append_sheet(workbook, sheet, "Results");
+  } else {
+    // Empty placeholder sheet
+    const sheet = XLSX.utils.aoa_to_sheet([["No profile results found"]]);
+    XLSX.utils.book_append_sheet(workbook, sheet, "Results");
+  }
+
+  // Sheet 2: Collected URLs (from directory pages)
+  if (collectedUrls.length > 0) {
+    const urlRows = collectedUrls.map((e) => ({
+      "Company Name": e.name,
+      "Directory URL": e.directoryUrl,
+      "Native URL": e.nativeUrl ?? "",
+    }));
+    const urlSheet = XLSX.utils.json_to_sheet(urlRows);
+    XLSX.utils.book_append_sheet(workbook, urlSheet, "Collected URLs");
+  }
+
+  return XLSX.write(workbook, {
+    type: "buffer",
+    bookType: "xlsx",
+    compression: true,
+    bookSST: false,
+  });
 }

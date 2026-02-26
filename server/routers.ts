@@ -10,7 +10,8 @@ import { createEnrichmentJob, getEnrichmentJob, getUserEnrichmentJobs, updateEnr
 import { getDb } from "./db";
 import { enrichedFirms, teamMembers, portfolioCompanies, investmentThesis } from "../drizzle/schema";
 import { eq, and, like, count } from "drizzle-orm";
-import { parseInputExcel, createOutputExcel, type EnrichedVCData, type TeamMemberData, type PortfolioCompanyData, type ProcessingSummaryData } from "./excelProcessor";
+import { parseInputExcel, createOutputExcel, createAgentOutputExcel, type EnrichedVCData, type TeamMemberData, type PortfolioCompanyData, type ProcessingSummaryData } from "./excelProcessor";
+import { scrapeUrl, type AgentSection, type DirectoryEntry as AgentDirectoryEntry } from "./agentScraper";
 import { generateInvestmentThesisSummaries } from "./investmentThesisAnalyzer";
 import { generateResultsFile } from "./generateResultsService";
 import { createCSVExport } from "./csvExporter";
@@ -107,6 +108,10 @@ export const appRouter = router({
           maxTeamProfiles: z.number().optional().default(200),
           template: z.string().optional().default("vc"),
           avgDescriptionLength: z.number().optional().default(200),
+          // Agentic extraction fields
+          sectionsJson: z.string().optional(),
+          systemPrompt: z.string().optional(),
+          objective: z.string().optional(),
         }),
       )
       .mutation(async ({ ctx, input }) => {
@@ -126,14 +131,118 @@ export const appRouter = router({
           maxTeamProfiles: input.maxTeamProfiles || 200,
           template: input.template || "vc",
           estimatedCostUSD: String(estimate.totalCost),
+          sectionsJson: input.sectionsJson,
+          systemPrompt: input.systemPrompt,
+          objective: input.objective,
         });
 
-        // Start processing in background
-        processEnrichmentJob(jobId).catch((error) => {
-          console.error(`Error processing job ${jobId}:`, error);
-        });
+        // Route to agentic job processor if custom sections are present
+        if (input.sectionsJson) {
+          processAgentJob(jobId).catch((error) => {
+            console.error(`Error processing agent job ${jobId}:`, error);
+          });
+        } else {
+          processEnrichmentJob(jobId).catch((error) => {
+            console.error(`Error processing job ${jobId}:`, error);
+          });
+        }
 
         return { jobId, firmCount: input.firmCount };
+      }),
+
+    // Generate AI extraction plan from user description
+    generateExtractionPlan: protectedProcedure
+      .input(z.object({ description: z.string().min(10) }))
+      .mutation(async ({ input }) => {
+        const { queuedLLMCall } = await import("./_core/llmQueue");
+
+        const systemMsg = `You are a web data extraction architect. Parse the user's intent into a structured extraction plan.
+
+Rules for sections:
+- 3-8 sections total
+- Each section key: snake_case, max 40 chars
+- Each section label: 2-4 words, suitable as a CSV column header
+- Each section desc: 1-2 sentence research instruction
+
+Return ONLY valid JSON (no markdown, no code fences):
+{
+  "objective": "one concise sentence describing what to find",
+  "sections": [{"key":"snake_case_key","label":"Display Name","desc":"Research instruction"}],
+  "systemPrompt": "Complete extraction prompt. Start with 'You are a [role]. Extract the following fields from the provided page content:' followed by numbered **Bold** sections with instructions. Include {companyName} and {websiteUrl} as placeholders."
+}`;
+
+        try {
+          const response = await queuedLLMCall({
+            messages: [
+              { role: "system", content: systemMsg },
+              { role: "user", content: input.description.trim() },
+            ],
+            response_format: {
+              type: "json_schema",
+              json_schema: {
+                name: "extraction_plan",
+                strict: true,
+                schema: {
+                  type: "object",
+                  properties: {
+                    objective: { type: "string" },
+                    sections: {
+                      type: "array",
+                      items: {
+                        type: "object",
+                        properties: {
+                          key: { type: "string" },
+                          label: { type: "string" },
+                          desc: { type: "string" },
+                        },
+                        required: ["key", "label", "desc"],
+                        additionalProperties: false,
+                      },
+                    },
+                    systemPrompt: { type: "string" },
+                  },
+                  required: ["objective", "sections", "systemPrompt"],
+                  additionalProperties: false,
+                },
+              },
+            },
+          });
+
+          const raw = response.choices[0]?.message?.content ?? "{}";
+          const parsed = JSON.parse(typeof raw === "string" ? raw : "{}");
+
+          // Validate + clean sections
+          const sections: AgentSection[] = (parsed.sections ?? [])
+            .slice(0, 15)
+            .map((s: any) => ({
+              key: String(s.key ?? "")
+                .toLowerCase()
+                .replace(/[^a-z0-9_]/g, "_")
+                .slice(0, 40),
+              label: String(s.label ?? "Section"),
+              desc: String(s.desc ?? ""),
+            }))
+            .filter((s: AgentSection) => s.key && s.label);
+
+          if (sections.length === 0) {
+            throw new TRPCError({
+              code: "INTERNAL_SERVER_ERROR",
+              message: "AI did not generate any sections. Try a more descriptive request.",
+            });
+          }
+
+          return {
+            objective: String(parsed.objective ?? input.description),
+            sections,
+            systemPrompt: String(parsed.systemPrompt ?? ""),
+          };
+        } catch (err: any) {
+          if (err instanceof TRPCError) throw err;
+          throw new TRPCError({
+            code: "INTERNAL_SERVER_ERROR",
+            message: `Generation failed: ${err.message ?? "Unknown error"}`,
+          });
+        }
       }),
 
     // Get job status
@@ -628,6 +737,114 @@ export async function processEnrichmentJob(jobId: number) {
     });
   } finally {
     // Stop keep-alive when job completes or fails
+    keepAlive.stop();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Agentic job processor (custom sections mode)
+// ---------------------------------------------------------------------------
+
+export async function processAgentJob(jobId: number) {
+  const keepAlive = new ConnectionKeepAlive();
+
+  try {
+    const job = await getEnrichmentJob(jobId);
+    if (!job) throw new Error(`Job ${jobId} not found`);
+
+    await updateEnrichmentJob(jobId, { status: "processing", startedAt: new Date() });
+
+    const sections: AgentSection[] = JSON.parse(job.sectionsJson ?? "[]");
+    const systemPrompt = job.systemPrompt ?? "";
+    const objective = job.objective ?? "";
+
+    const firms = await parseInputExcel(job.inputFileUrl);
+    console.log(`[processAgentJob] Job ${jobId}: ${firms.length} URLs, ${sections.length} sections`);
+
+    const profileResults: Array<Record<string, string>> = [];
+    const collectedUrls: AgentDirectoryEntry[] = [];
+    let processed = 0;
+
+    const CONCURRENCY = 50;
+    const firmQueue = [...firms];
+
+    const runWorker = async () => {
+      while (firmQueue.length > 0) {
+        const firm = firmQueue.shift();
+        if (!firm) break;
+
+        // Use per-row objective (Description column) if present, else global objective
+        const rowObjective = firm.description?.trim() || objective;
+
+        try {
+          const result = await scrapeUrl(
+            firm.websiteUrl,
+            rowObjective,
+            sections,
+            systemPrompt,
+            5,
+          );
+
+          if (result.type === "directory") {
+            collectedUrls.push(...result.entries);
+          } else {
+            profileResults.push({
+              "Company Name": firm.companyName,
+              "Website": firm.websiteUrl,
+              ...result.data,
+            });
+          }
+        } catch (err) {
+          console.error(`[processAgentJob] Error processing ${firm.websiteUrl}:`, err);
+          // Add empty row on error so we don't lose the firm from the output
+          const emptyRow: Record<string, string> = {
+            "Company Name": firm.companyName,
+            "Website": firm.websiteUrl,
+          };
+          for (const s of sections) emptyRow[s.key] = "";
+          profileResults.push(emptyRow);
+        }
+
+        processed++;
+        await updateJobProgressSafely(jobId, {
+          processedCount: processed,
+          currentFirmName: firm.companyName,
+          activeFirmsJson: null,
+        });
+      }
+    };
+
+    await Promise.allSettled(
+      Array.from({ length: Math.min(CONCURRENCY, firms.length) }, runWorker),
+    );
+
+    // Generate output Excel and upload to S3
+    const excelBuffer = createAgentOutputExcel(sections, profileResults, collectedUrls);
+    const outputKey = `enrichment/${job.userId}/${jobId}-results.xlsx`;
+    const { url: outputUrl } = await storagePut(
+      outputKey,
+      excelBuffer,
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+
+    await updateEnrichmentJob(jobId, {
+      status: "completed",
+      outputFileUrl: outputUrl,
+      outputFileKey: outputKey,
+      processedCount: processed,
+      completedAt: new Date(),
+    });
+
+    console.log(
+      `[processAgentJob] ✅ Job ${jobId} complete. ${profileResults.length} profiles + ${collectedUrls.length} directory entries.`,
+    );
+  } catch (error) {
+    console.error(`[processAgentJob] Job ${jobId} failed:`, error);
+    await updateEnrichmentJob(jobId, {
+      status: "failed",
+      errorMessage: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
     keepAlive.stop();
   }
 }

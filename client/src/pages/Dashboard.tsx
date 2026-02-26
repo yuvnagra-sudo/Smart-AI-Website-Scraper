@@ -3,38 +3,38 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Badge } from "@/components/ui/badge";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
+import { Textarea } from "@/components/ui/textarea";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { trpc } from "@/lib/trpc";
 import { getLoginUrl } from "@/const";
 import {
   Bot, Download, Upload, Clock, CheckCircle, XCircle, Loader2, LogOut,
   FileSpreadsheet, Table2, DollarSign, TrendingUp, Building2, Users,
-  HeartPulse, ShoppingCart, Home, MapPin, Info,
+  HeartPulse, ShoppingCart, Home, MapPin, Info, Sparkles, X, Plus,
 } from "lucide-react";
 import { useState, useRef } from "react";
 import { toast } from "sonner";
 import { Link } from "wouter";
 import ResultsSheet from "@/components/ResultsSheet";
-import { ALL_TEMPLATES, getTemplate, type Template } from "@/lib/templates";
+import { ALL_TEMPLATES, getTemplate } from "@/lib/templates";
 
 // ---------------------------------------------------------------------------
-// Icon map for templates (lucide-react components by template id)
+// Icon map for templates
 // ---------------------------------------------------------------------------
-const TEMPLATE_ICONS: Record<string, React.ReactNode> = {
-  vc:          <TrendingUp className="h-5 w-5" />,
-  b2b:         <Building2 className="h-5 w-5" />,
-  people:      <Users className="h-5 w-5" />,
-  healthcare:  <HeartPulse className="h-5 w-5" />,
-  ecommerce:   <ShoppingCart className="h-5 w-5" />,
-  realestate:  <Home className="h-5 w-5" />,
-  local:       <MapPin className="h-5 w-5" />,
+const TEMPLATE_ICONS: Record<string, any> = {
+  vc:          <TrendingUp className="h-4 w-4" />,
+  b2b:         <Building2 className="h-4 w-4" />,
+  people:      <Users className="h-4 w-4" />,
+  healthcare:  <HeartPulse className="h-4 w-4" />,
+  ecommerce:   <ShoppingCart className="h-4 w-4" />,
+  realestate:  <Home className="h-4 w-4" />,
+  local:       <MapPin className="h-4 w-4" />,
 };
 
-// Tailwind bg + text classes per template color
 const TEMPLATE_COLORS: Record<string, { bg: string; text: string; border: string }> = {
   vc:          { bg: "bg-violet-50",  text: "text-violet-700",  border: "border-violet-400" },
   b2b:         { bg: "bg-blue-50",    text: "text-blue-700",    border: "border-blue-400" },
@@ -44,6 +44,26 @@ const TEMPLATE_COLORS: Record<string, { bg: string; text: string; border: string
   realestate:  { bg: "bg-teal-50",    text: "text-teal-700",    border: "border-teal-400" },
   local:       { bg: "bg-green-50",   text: "text-green-700",   border: "border-green-400" },
 };
+
+// Pre-fills the textarea with a good starting objective per template
+const TEMPLATE_OBJECTIVES: Record<string, string> = {
+  vc:         "Research investor type, investment stages, focus niches, team members, and portfolio companies for each VC firm",
+  b2b:        "Find organization type, industry, size, key decision makers, and contact info for each company",
+  people:     "Find each person's current role, company, professional background, skills, and contact information",
+  healthcare: "Find facility type, specialties, key staff, services offered, and contact information for each healthcare provider",
+  ecommerce:  "Find product categories, pricing strategy, customer reviews, shipping options, and market positioning for each store",
+  realestate: "Find property types, listing prices, agent information, neighborhood details, and market positioning",
+  local:      "Find business hours, services, customer reviews, pricing, and contact details for each local business",
+};
+
+const SUGGESTION_CHIPS = [
+  { label: "VC due diligence",   text: "Research investor type, investment stages, focus sectors, team members, and portfolio companies for each VC firm" },
+  { label: "B2B outreach",       text: "Find pain points, recent triggers, decision makers, and personalization hooks for cold email outreach" },
+  { label: "Competitor analysis",text: "Find pricing, market positioning, key features, strengths and weaknesses, and recent moves" },
+  { label: "Recruiting intel",   text: "Find open roles, hiring velocity, key departments, culture, and employer brand signals" },
+  { label: "Website audit",      text: "Audit website quality, SEO health, technical issues, and improvement opportunities" },
+  { label: "Market research",    text: "Find target customers, competitive landscape, growth trajectory, and recent trends" },
+];
 
 // ---------------------------------------------------------------------------
 // Types
@@ -67,6 +87,15 @@ interface PreviewData {
   }>;
 }
 
+interface AgentSection {
+  key: string;
+  label: string;
+  desc: string;
+}
+
+type WizardStep = "idle" | "configure" | "review";
+type WizardMode = "ai" | "template";
+
 // ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
@@ -74,10 +103,20 @@ export default function Dashboard() {
   const { user, loading: authLoading, logout } = useAuth();
   const [uploading, setUploading] = useState(false);
   const [previewData, setPreviewData] = useState<PreviewData | null>(null);
-  const [showPreview, setShowPreview] = useState(false);
+
+  // Wizard state
+  const [wizardStep, setWizardStep]           = useState<WizardStep>("idle");
+  const [wizardMode, setWizardMode]           = useState<WizardMode>("ai");
+  const [description, setDescription]         = useState("");
+  const [wizardSections, setWizardSections]   = useState<AgentSection[]>([]);
+  const [wizardSystemPrompt, setWizardSystemPrompt] = useState("");
+  const [wizardObjective, setWizardObjective] = useState("");
+
+  // Template mode state
   const [selectedTemplate, setSelectedTemplate] = useState<string>("vc");
   const [tierFilter, setTierFilter] = useState<"tier1" | "tier1-2" | "all">("all");
-  const [viewResultsJob, setViewResultsJob] = useState<{ id: number; template: string } | null>(null);
+
+  const [viewResultsJob, setViewResultsJob] = useState<{ id: number; template: string; sectionsJson?: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { data: jobs, isLoading: jobsLoading, refetch } = trpc.enrichment.listJobs.useQuery(undefined, {
@@ -87,9 +126,8 @@ export default function Dashboard() {
 
   const uploadMutation = trpc.enrichment.uploadAndPreview.useMutation({
     onSuccess: (data) => {
-      // Compute avg description length from preview (approximation)
       const avgLen = data.preview.length > 0
-        ? data.preview.reduce((s, f) => s + f.descriptionPreview.length, 0) / data.preview.length * 3 // rough x3 since preview is truncated at 150 chars
+        ? data.preview.reduce((s, f) => s + f.descriptionPreview.length, 0) / data.preview.length * 3
         : 200;
       setPreviewData({
         ...data,
@@ -100,7 +138,9 @@ export default function Dashboard() {
           totalCostHigh: (data.costEstimate as any).totalCostHigh,
         },
       });
-      setShowPreview(true);
+      setWizardStep("configure");
+      setWizardSections([]);
+      setDescription("");
       setUploading(false);
     },
     onError: (error) => {
@@ -109,11 +149,27 @@ export default function Dashboard() {
     },
   });
 
+  const generatePlanMutation = trpc.enrichment.generateExtractionPlan.useMutation({
+    onSuccess: (data) => {
+      setWizardSections(data.sections);
+      setWizardSystemPrompt(data.systemPrompt);
+      setWizardObjective(data.objective);
+      toast.success(`Generated ${data.sections.length} extraction sections`);
+    },
+    onError: (error) => {
+      toast.error(`Failed to generate plan: ${error.message}`);
+    },
+  });
+
   const confirmMutation = trpc.enrichment.confirmAndStart.useMutation({
     onSuccess: (data) => {
       toast.success(`Extraction started! Processing ${data.firmCount} entries.`);
-      setShowPreview(false);
+      setWizardStep("idle");
       setPreviewData(null);
+      setWizardSections([]);
+      setDescription("");
+      setWizardObjective("");
+      setWizardSystemPrompt("");
       refetch();
       if (fileInputRef.current) fileInputRef.current.value = "";
     },
@@ -156,6 +212,7 @@ export default function Dashboard() {
 
   const handleConfirmEnrichment = () => {
     if (!previewData) return;
+    const isAgentMode = wizardMode === "ai" && wizardSections.length > 0;
     confirmMutation.mutate({
       fileUrl: previewData.fileUrl,
       fileKey: previewData.fileKey,
@@ -163,7 +220,20 @@ export default function Dashboard() {
       tierFilter: selectedTemplate === "vc" ? tierFilter : "all",
       template: selectedTemplate,
       avgDescriptionLength: previewData.avgDescriptionLength,
+      ...(isAgentMode ? {
+        sectionsJson: JSON.stringify(wizardSections),
+        systemPrompt: wizardSystemPrompt,
+        objective: wizardObjective,
+      } : {}),
     });
+  };
+
+  const handleCancelWizard = () => {
+    setWizardStep("idle");
+    setPreviewData(null);
+    setWizardSections([]);
+    setDescription("");
+    if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   // -------------------------------------------------------------------------
@@ -227,7 +297,7 @@ export default function Dashboard() {
               Upload your list
             </CardTitle>
             <CardDescription>
-              Excel (.xlsx) or CSV with 3 columns: <strong>Name</strong>, <strong>Website URL</strong>, <strong>Description</strong> (optional).
+              Excel (.xlsx) or CSV with columns: <strong>Name</strong>, <strong>Website URL</strong>, <strong>Description</strong> (optional — use as per-URL objective override).
               The scraper will visit each URL and extract structured data automatically.
             </CardDescription>
           </CardHeader>
@@ -238,10 +308,10 @@ export default function Dashboard() {
                 type="file"
                 accept=".xlsx,.xls,.csv"
                 onChange={handleFileUpload}
-                disabled={uploading}
+                disabled={uploading || wizardStep !== "idle"}
                 className="flex-1"
               />
-              <Button disabled={uploading}>
+              <Button disabled={uploading || wizardStep !== "idle"}>
                 {uploading ? (
                   <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Uploading...</>
                 ) : (
@@ -253,10 +323,342 @@ export default function Dashboard() {
         </Card>
 
         {/* Capability notice */}
-        <div className="flex items-start gap-2 text-sm text-muted-foreground mb-8 px-1">
+        <div className="flex items-start gap-2 text-sm text-muted-foreground mb-6 px-1">
           <Info className="h-4 w-4 mt-0.5 shrink-0" />
           <span>Works best on public websites. Social media profiles and login-protected pages have limited support.</span>
         </div>
+
+        {/* ── Step 2: Configure ── */}
+        {wizardStep === "configure" && previewData && (
+          <Card className="mb-6 border-2 border-primary/30">
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-lg">Configure Extraction</CardTitle>
+                <Button variant="ghost" size="sm" onClick={handleCancelWizard}>
+                  <X className="h-4 w-4 mr-1" /> Cancel
+                </Button>
+              </div>
+              <CardDescription>
+                {previewData.firmCount} entries ready · Choose how to extract data from each page
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <Tabs value={wizardMode} onValueChange={(v) => setWizardMode(v as WizardMode)}>
+                <TabsList className="mb-4">
+                  <TabsTrigger value="ai">
+                    <Sparkles className="h-4 w-4 mr-2" />
+                    AI Custom Extraction
+                  </TabsTrigger>
+                  <TabsTrigger value="template">Use Template</TabsTrigger>
+                </TabsList>
+
+                {/* ── AI Custom tab ── */}
+                <TabsContent value="ai" className="space-y-5">
+                  {/* Template preset pills */}
+                  <div>
+                    <p className="text-xs font-medium text-muted-foreground mb-2">Quick-fill from a template:</p>
+                    <div className="flex flex-wrap gap-2">
+                      {ALL_TEMPLATES.map((tpl) => (
+                        <button
+                          key={tpl.id}
+                          onClick={() => setDescription(TEMPLATE_OBJECTIVES[tpl.id] ?? "")}
+                          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-medium transition-colors
+                            ${description === TEMPLATE_OBJECTIVES[tpl.id]
+                              ? `${TEMPLATE_COLORS[tpl.id]?.bg} ${TEMPLATE_COLORS[tpl.id]?.border} ${TEMPLATE_COLORS[tpl.id]?.text}`
+                              : "border-border hover:bg-muted/50 text-muted-foreground"
+                            }`}
+                        >
+                          {TEMPLATE_ICONS[tpl.id]}
+                          {tpl.name}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Suggestion chips */}
+                  <div>
+                    <p className="text-xs font-medium text-muted-foreground mb-2">Or pick a use case:</p>
+                    <div className="flex flex-wrap gap-2">
+                      {SUGGESTION_CHIPS.map((chip) => (
+                        <button
+                          key={chip.label}
+                          onClick={() => setDescription(chip.text)}
+                          className={`px-3 py-1 rounded-full border text-xs font-medium transition-colors
+                            ${description === chip.text
+                              ? "border-primary bg-primary/5 text-primary"
+                              : "border-border hover:bg-muted/50 text-muted-foreground"
+                            }`}
+                        >
+                          {chip.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Objective textarea */}
+                  <div className="space-y-2">
+                    <Label htmlFor="description">What do you want to extract?</Label>
+                    <Textarea
+                      id="description"
+                      value={description}
+                      onChange={(e) => setDescription(e.target.value)}
+                      placeholder="e.g. Find each VC firm's investment focus, portfolio companies, and key team members. Include check size range and geographic focus..."
+                      rows={4}
+                      className="resize-none"
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Be specific — mention the fields you want as columns in the output.
+                    </p>
+                  </div>
+
+                  {/* Generate button */}
+                  <Button
+                    onClick={() => generatePlanMutation.mutate({ description })}
+                    disabled={description.trim().length < 10 || generatePlanMutation.isPending}
+                    className="w-full sm:w-auto"
+                  >
+                    {generatePlanMutation.isPending ? (
+                      <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Generating plan...</>
+                    ) : (
+                      <><Sparkles className="h-4 w-4 mr-2" />Generate Extraction Plan</>
+                    )}
+                  </Button>
+
+                  {/* Generated sections */}
+                  {wizardSections.length > 0 && (
+                    <div className="space-y-3 pt-2">
+                      <div className="flex items-center justify-between">
+                        <p className="text-sm font-semibold">
+                          Extraction Sections
+                          <span className="ml-2 text-muted-foreground font-normal">
+                            ({wizardSections.length} output columns)
+                          </span>
+                        </p>
+                        <button
+                          className="text-xs text-muted-foreground hover:text-foreground"
+                          onClick={() => generatePlanMutation.mutate({ description })}
+                          disabled={generatePlanMutation.isPending}
+                        >
+                          Regenerate
+                        </button>
+                      </div>
+
+                      <div className="space-y-2">
+                        {wizardSections.map((section, i) => (
+                          <div
+                            key={i}
+                            className="flex items-start gap-2 p-3 rounded-lg border bg-muted/20"
+                          >
+                            <div className="flex-1 min-w-0">
+                              <p className="font-medium text-sm">{section.label}</p>
+                              <p className="text-xs text-muted-foreground mt-0.5 leading-snug">{section.desc}</p>
+                            </div>
+                            <button
+                              onClick={() => setWizardSections(wizardSections.filter((_, j) => j !== i))}
+                              className="text-muted-foreground hover:text-destructive mt-0.5 shrink-0"
+                              title="Remove section"
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          </div>
+                        ))}
+                        <AddSectionRow onAdd={(s) => setWizardSections([...wizardSections, s])} />
+                      </div>
+
+                      <div className="flex justify-end pt-1">
+                        <Button onClick={() => setWizardStep("review")}>
+                          Next →
+                        </Button>
+                      </div>
+                    </div>
+                  )}
+                </TabsContent>
+
+                {/* ── Template tab ── */}
+                <TabsContent value="template" className="space-y-5">
+                  <div>
+                    <Label className="text-sm font-semibold mb-3 block">Select Template</Label>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+                      {ALL_TEMPLATES.map((tpl) => {
+                        const isSelected = selectedTemplate === tpl.id;
+                        const colors = TEMPLATE_COLORS[tpl.id] ?? TEMPLATE_COLORS.vc;
+                        return (
+                          <button
+                            key={tpl.id}
+                            onClick={() => setSelectedTemplate(tpl.id)}
+                            className={`flex flex-col items-center gap-1.5 p-3 rounded-lg border-2 text-center transition-all ${
+                              isSelected
+                                ? `${colors.bg} ${colors.border} ${colors.text}`
+                                : "border-border hover:border-muted-foreground/40 hover:bg-muted/30"
+                            }`}
+                          >
+                            <span className={isSelected ? colors.text : "text-muted-foreground"}>
+                              {TEMPLATE_ICONS[tpl.id]}
+                            </span>
+                            <span className="text-xs font-medium leading-tight">{tpl.name}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-2">
+                      {getTemplate(selectedTemplate).description}
+                    </p>
+                  </div>
+
+                  {/* What will be extracted */}
+                  <div>
+                    <Label className="text-sm font-semibold mb-3 block">What will be extracted</Label>
+                    <Accordion type="single" collapsible defaultValue={getTemplate(selectedTemplate).sheets[0]?.key}>
+                      {getTemplate(selectedTemplate).sheets.map((sheet) => (
+                        <AccordionItem key={sheet.key} value={sheet.key}>
+                          <AccordionTrigger className="text-sm font-medium">
+                            {sheet.label}
+                            <Badge variant="secondary" className="ml-2 text-xs">{sheet.fields.length} fields</Badge>
+                          </AccordionTrigger>
+                          <AccordionContent>
+                            <div className="flex flex-wrap gap-1 pt-1">
+                              {sheet.fields.map((f) => (
+                                <Badge key={f.key} variant="outline" className="text-xs">{f.label}</Badge>
+                              ))}
+                            </div>
+                          </AccordionContent>
+                        </AccordionItem>
+                      ))}
+                    </Accordion>
+                  </div>
+
+                  {/* Team Coverage — VC template only */}
+                  {selectedTemplate === "vc" && (
+                    <div className="space-y-3">
+                      <Label className="text-sm font-semibold">Team Coverage</Label>
+                      <RadioGroup value={tierFilter} onValueChange={(v: any) => setTierFilter(v)}>
+                        {[
+                          { value: "tier1",   label: "Decision Makers Only", desc: "Managing Partners, GPs, Investment Partners" },
+                          { value: "tier1-2", label: "Decision Makers + Influencers (Recommended)", desc: "Partners, Principals, Senior Associates" },
+                          { value: "all",     label: "Full Team", desc: "All investment-facing team members" },
+                        ].map((opt) => (
+                          <div key={opt.value} className="flex items-start space-x-3 space-y-0">
+                            <RadioGroupItem value={opt.value} id={opt.value} />
+                            <Label htmlFor={opt.value} className="font-normal cursor-pointer">
+                              <p className="font-medium">{opt.label}</p>
+                              <p className="text-sm text-muted-foreground">{opt.desc}</p>
+                            </Label>
+                          </div>
+                        ))}
+                      </RadioGroup>
+                    </div>
+                  )}
+
+                  <div className="flex justify-end pt-1">
+                    <Button onClick={() => setWizardStep("review")}>
+                      Next →
+                    </Button>
+                  </div>
+                </TabsContent>
+              </Tabs>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* ── Step 3: Review & Start ── */}
+        {wizardStep === "review" && previewData && (
+          <Card className="mb-6 border-2 border-primary/40">
+            <CardHeader>
+              <CardTitle className="text-lg">Review & Start</CardTitle>
+              <CardDescription>
+                Confirm your extraction settings before processing begins
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {/* Stats row */}
+              <div className="grid grid-cols-3 gap-4">
+                <div>
+                  <p className="text-sm font-medium text-muted-foreground">Entries</p>
+                  <p className="text-2xl font-bold">{previewData.firmCount}</p>
+                </div>
+                <div>
+                  <p className="text-sm font-medium text-muted-foreground">Estimated Cost</p>
+                  {previewData.costEstimate.totalCostLow != null && previewData.costEstimate.totalCostHigh != null ? (
+                    <>
+                      <p className="text-xl font-bold text-green-700">
+                        ${previewData.costEstimate.totalCostLow.toFixed(2)} – ${previewData.costEstimate.totalCostHigh.toFixed(2)}
+                      </p>
+                      <p className="text-xs text-muted-foreground">${previewData.costEstimate.perFirmCost.toFixed(4)}/site</p>
+                    </>
+                  ) : (
+                    <p className="text-2xl font-bold">${previewData.costEstimate.totalCost.toFixed(2)}</p>
+                  )}
+                </div>
+                <div>
+                  <p className="text-sm font-medium text-muted-foreground">Est. Duration</p>
+                  <p className="text-2xl font-bold">{previewData.costEstimate.estimatedDuration}</p>
+                </div>
+              </div>
+
+              {/* Extraction configuration summary */}
+              {wizardMode === "ai" && wizardSections.length > 0 ? (
+                <div>
+                  <p className="text-sm font-semibold mb-2">
+                    AI Custom Extraction · {wizardSections.length} sections
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {wizardSections.map((s) => (
+                      <Badge key={s.key} variant="outline" className="text-xs">{s.label}</Badge>
+                    ))}
+                  </div>
+                  {wizardObjective && (
+                    <p className="text-xs text-muted-foreground mt-2 italic">
+                      Objective: {wizardObjective}
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div>
+                  <p className="text-sm font-semibold">
+                    Template: {getTemplate(selectedTemplate).name}
+                  </p>
+                  {selectedTemplate === "vc" && (
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Team coverage: {tierFilter === "tier1" ? "Decision makers only" : tierFilter === "tier1-2" ? "Decision makers + influencers" : "Full team"}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* Preview rows */}
+              {previewData.preview.length > 0 && (
+                <div>
+                  <p className="text-sm font-semibold mb-2">Preview (first {previewData.preview.length} rows)</p>
+                  <div className="space-y-2">
+                    {previewData.preview.map((row, i) => (
+                      <div key={i} className="p-3 rounded-lg border bg-muted/20">
+                        <p className="font-medium text-sm">{row.companyName}</p>
+                        <p className="text-xs text-muted-foreground">{row.websiteUrl}</p>
+                        {row.descriptionPreview && (
+                          <p className="text-xs text-muted-foreground mt-1 opacity-75">{row.descriptionPreview}</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Action buttons */}
+              <div className="flex items-center justify-between pt-2">
+                <Button variant="outline" onClick={() => setWizardStep("configure")}>
+                  ← Back
+                </Button>
+                <Button onClick={handleConfirmEnrichment} disabled={confirmMutation.isPending} size="lg">
+                  {confirmMutation.isPending ? (
+                    <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Starting...</>
+                  ) : (
+                    "Start Extraction"
+                  )}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Jobs List */}
         <Card>
@@ -279,6 +681,7 @@ export default function Dashboard() {
                   const jobTemplate = (job as any).template || "vc";
                   const tpl = getTemplate(jobTemplate);
                   const colors = TEMPLATE_COLORS[jobTemplate] ?? TEMPLATE_COLORS.vc;
+                  const isAgentJob = !!(job as any).sectionsJson;
 
                   return (
                     <Card key={job.id} className="border-2">
@@ -291,9 +694,16 @@ export default function Dashboard() {
                               {job.status === "processing" && <Loader2 className="h-5 w-5 animate-spin text-blue-600" />}
                               {job.status === "pending"    && <Clock className="h-5 w-5 text-gray-600" />}
                               <span className="font-semibold capitalize">{job.status}</span>
-                              <Badge variant="outline" className={`text-xs ${colors.text}`}>
-                                {tpl.name}
-                              </Badge>
+                              {isAgentJob ? (
+                                <Badge variant="outline" className="text-xs text-violet-700">
+                                  <Sparkles className="h-3 w-3 mr-1" />
+                                  AI Custom
+                                </Badge>
+                              ) : (
+                                <Badge variant="outline" className={`text-xs ${colors.text}`}>
+                                  {tpl.name}
+                                </Badge>
+                              )}
                             </div>
                             <p className="text-sm text-muted-foreground">
                               {job.firmCount} entries · {new Date(job.createdAt).toLocaleDateString()}
@@ -331,7 +741,7 @@ export default function Dashboard() {
                                 <Button
                                   size="sm"
                                   variant="outline"
-                                  onClick={() => setViewResultsJob({ id: job.id, template: jobTemplate })}
+                                  onClick={() => setViewResultsJob({ id: job.id, template: jobTemplate, sectionsJson: (job as any).sectionsJson ?? undefined })}
                                 >
                                   <Table2 className="h-4 w-4 mr-2" />
                                   View Results
@@ -401,12 +811,12 @@ export default function Dashboard() {
                   <OnboardingStep
                     step={1}
                     title="Prepare your file"
-                    description="Create a spreadsheet with 3 columns: Name, Website URL, and an optional Description for each entry."
+                    description="Create a spreadsheet with columns: Name, Website URL, and an optional Description for per-URL objective override."
                   />
                   <OnboardingStep
                     step={2}
-                    title="Upload & choose a template"
-                    description="Upload your file above, then pick an industry template that matches what you're researching."
+                    title="Describe what to extract"
+                    description="Type your research goal and let AI generate a custom extraction plan, or pick from ready-made templates."
                   />
                   <OnboardingStep
                     step={3}
@@ -428,7 +838,7 @@ export default function Dashboard() {
                       <tr className="border-b border-muted">
                         <td className="py-1 pr-4">Acme Corp</td>
                         <td className="py-1 pr-4">https://acme.com</td>
-                        <td className="py-1 text-muted-foreground">B2B SaaS company</td>
+                        <td className="py-1 text-muted-foreground">Focus on their pricing and team</td>
                       </tr>
                       <tr>
                         <td className="py-1 pr-4">Beta Inc</td>
@@ -451,154 +861,9 @@ export default function Dashboard() {
           open={viewResultsJob !== null}
           onClose={() => setViewResultsJob(null)}
           template={viewResultsJob.template}
+          sectionsJson={viewResultsJob.sectionsJson}
         />
       )}
-
-      {/* Confirmation Dialog */}
-      <Dialog open={showPreview} onOpenChange={setShowPreview}>
-        <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Configure Extraction</DialogTitle>
-            <DialogDescription>
-              Choose a template and review the details before starting.
-            </DialogDescription>
-          </DialogHeader>
-
-          {previewData && (
-            <div className="space-y-6">
-              {/* Stats row */}
-              <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <p className="text-sm font-medium text-muted-foreground">Entries</p>
-                  <p className="text-2xl font-bold">{previewData.firmCount}</p>
-                </div>
-                <div>
-                  <p className="text-sm font-medium text-muted-foreground">Estimated Cost</p>
-                  {previewData.costEstimate.totalCostLow != null && previewData.costEstimate.totalCostHigh != null ? (
-                    <>
-                      <p className="text-xl font-bold text-green-700">
-                        ${previewData.costEstimate.totalCostLow.toFixed(2)} – ${previewData.costEstimate.totalCostHigh.toFixed(2)}
-                      </p>
-                      <p className="text-xs text-muted-foreground">${previewData.costEstimate.perFirmCost.toFixed(4)}/site</p>
-                    </>
-                  ) : (
-                    <p className="text-2xl font-bold">${previewData.costEstimate.totalCost.toFixed(2)}</p>
-                  )}
-                </div>
-                <div>
-                  <p className="text-sm font-medium text-muted-foreground">Est. Duration</p>
-                  <p className="text-2xl font-bold">{previewData.costEstimate.estimatedDuration}</p>
-                </div>
-              </div>
-
-              {/* Template picker */}
-              <div>
-                <Label className="text-base font-semibold mb-3 block">Select Template</Label>
-                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
-                  {ALL_TEMPLATES.map((tpl) => {
-                    const isSelected = selectedTemplate === tpl.id;
-                    const colors = TEMPLATE_COLORS[tpl.id] ?? TEMPLATE_COLORS.vc;
-                    return (
-                      <button
-                        key={tpl.id}
-                        onClick={() => setSelectedTemplate(tpl.id)}
-                        className={`flex flex-col items-center gap-1.5 p-3 rounded-lg border-2 text-center transition-all ${
-                          isSelected
-                            ? `${colors.bg} ${colors.border} ${colors.text}`
-                            : "border-border hover:border-muted-foreground/40 hover:bg-muted/30"
-                        }`}
-                      >
-                        <span className={isSelected ? colors.text : "text-muted-foreground"}>
-                          {TEMPLATE_ICONS[tpl.id]}
-                        </span>
-                        <span className="text-xs font-medium leading-tight">{tpl.name}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-                <p className="text-xs text-muted-foreground mt-2">
-                  {getTemplate(selectedTemplate).description}
-                </p>
-              </div>
-
-              {/* What will be extracted */}
-              <div>
-                <Label className="text-base font-semibold mb-3 block">What will be extracted</Label>
-                <Accordion type="single" collapsible defaultValue={getTemplate(selectedTemplate).sheets[0]?.key}>
-                  {getTemplate(selectedTemplate).sheets.map((sheet) => (
-                    <AccordionItem key={sheet.key} value={sheet.key}>
-                      <AccordionTrigger className="text-sm font-medium">
-                        {sheet.label}
-                        <Badge variant="secondary" className="ml-2 text-xs">{sheet.fields.length} fields</Badge>
-                      </AccordionTrigger>
-                      <AccordionContent>
-                        <div className="flex flex-wrap gap-1 pt-1">
-                          {sheet.fields.map((f) => (
-                            <Badge key={f.key} variant="outline" className="text-xs">{f.label}</Badge>
-                          ))}
-                        </div>
-                      </AccordionContent>
-                    </AccordionItem>
-                  ))}
-                </Accordion>
-              </div>
-
-              {/* Team Coverage — VC template only */}
-              {selectedTemplate === "vc" && (
-                <div className="space-y-3">
-                  <Label className="text-base font-semibold">Team Coverage</Label>
-                  <RadioGroup value={tierFilter} onValueChange={(v: any) => setTierFilter(v)}>
-                    {[
-                      { value: "tier1",   label: "Decision Makers Only", desc: "Managing Partners, GPs, Investment Partners" },
-                      { value: "tier1-2", label: "Decision Makers + Influencers (Recommended)", desc: "Partners, Principals, Senior Associates" },
-                      { value: "all",     label: "Full Team", desc: "All investment-facing team members" },
-                    ].map((opt) => (
-                      <div key={opt.value} className="flex items-start space-x-3 space-y-0">
-                        <RadioGroupItem value={opt.value} id={opt.value} />
-                        <Label htmlFor={opt.value} className="font-normal cursor-pointer">
-                          <p className="font-medium">{opt.label}</p>
-                          <p className="text-sm text-muted-foreground">{opt.desc}</p>
-                        </Label>
-                      </div>
-                    ))}
-                  </RadioGroup>
-                </div>
-              )}
-
-              {/* Preview */}
-              {previewData.preview.length > 0 && (
-                <div>
-                  <Label className="text-base font-semibold mb-3 block">Preview (first {previewData.preview.length} rows)</Label>
-                  <div className="space-y-2">
-                    {previewData.preview.map((row, i) => (
-                      <Card key={i}>
-                        <CardContent className="pt-4">
-                          <p className="font-medium">{row.companyName}</p>
-                          <p className="text-sm text-muted-foreground">{row.websiteUrl}</p>
-                          {row.descriptionPreview && (
-                            <p className="text-xs text-muted-foreground mt-1">{row.descriptionPreview}</p>
-                          )}
-                        </CardContent>
-                      </Card>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setShowPreview(false)}>Cancel</Button>
-            <Button onClick={handleConfirmEnrichment} disabled={confirmMutation.isPending}>
-              {confirmMutation.isPending ? (
-                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Starting...</>
-              ) : (
-                "Start Extraction"
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }
@@ -619,7 +884,37 @@ function OnboardingStep({ step, title, description }: { step: number; title: str
   );
 }
 
-function DownloadResultsButton({ jobId, outputFileUrl }: { jobId: number; outputFileUrl: string | null }) {
+function AddSectionRow({ onAdd }: { onAdd: (s: AgentSection) => void }) {
+  const [label, setLabel] = useState("");
+
+  const submit = () => {
+    const trimmed = label.trim();
+    if (!trimmed) return;
+    onAdd({
+      key: trimmed.toLowerCase().replace(/[^a-z0-9]+/g, "_").slice(0, 40),
+      label: trimmed,
+      desc: `Extract information about ${trimmed.toLowerCase()}.`,
+    });
+    setLabel("");
+  };
+
+  return (
+    <div className="flex gap-2">
+      <Input
+        value={label}
+        onChange={(e) => setLabel(e.target.value)}
+        placeholder="Add a section (e.g. Team Size)"
+        className="text-sm"
+        onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
+      />
+      <Button variant="outline" size="sm" onClick={submit} disabled={!label.trim()}>
+        <Plus className="h-4 w-4" />
+      </Button>
+    </div>
+  );
+}
+
+function DownloadResultsButton({ jobId }: { jobId: number; outputFileUrl?: string | null }) {
   const [isGenerating, setIsGenerating] = useState(false);
   const generateMutation = trpc.enrichment.generateResults.useMutation({
     onSuccess: (data) => {

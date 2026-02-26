@@ -50,6 +50,10 @@ export const enrichmentJobs = mysqlTable("enrichmentJobs", {
   totalCostUSD: decimal("totalCostUSD", { precision: 10, scale: 4 }).default("0"),
   totalInputTokens: int("totalInputTokens").default(0),
   totalOutputTokens: int("totalOutputTokens").default(0),
+  // Agentic extraction (custom sections mode)
+  sectionsJson: text("sectionsJson"),   // JSON: [{key, label, desc}]
+  systemPrompt: text("systemPrompt"),   // LLM research prompt
+  objective:    text("objective"),      // Plain-text user objective
   errorMessage: text("errorMessage"),
   // Worker tracking fields
   workerPid: int("workerPid"), // Process ID of worker processing this job

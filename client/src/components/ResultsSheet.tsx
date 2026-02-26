@@ -5,23 +5,155 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Loader2, ChevronLeft, ChevronRight, Search } from "lucide-react";
+import { Loader2, ChevronLeft, ChevronRight, Search, Sparkles, Download } from "lucide-react";
 import { trpc } from "@/lib/trpc";
 import { getTemplate, type TemplateField } from "@/lib/templates";
 
 // Sheet keys that map to the backend query tab type
 type QueryTab = "firms" | "team" | "portfolio";
 
+interface AgentSection { key: string; label: string; desc: string; }
+
 interface Props {
   jobId: number;
   open: boolean;
   onClose: () => void;
   template?: string;
+  sectionsJson?: string; // Present for AI custom extraction jobs
 }
 
-export default function ResultsSheet({ jobId, open, onClose, template = "vc" }: Props) {
+export default function ResultsSheet({ jobId, open, onClose, template = "vc", sectionsJson }: Props) {
+  // ── Agent job (AI custom extraction) ──────────────────────────────────────
+  if (sectionsJson) {
+    return <AgentJobSheet jobId={jobId} open={open} onClose={onClose} sectionsJson={sectionsJson} />;
+  }
+
+  // ── Template job (existing VC/B2B/etc pipeline) ──────────────────────────
+  return <TemplateJobSheet jobId={jobId} open={open} onClose={onClose} template={template} />;
+}
+
+// ---------------------------------------------------------------------------
+// Agent job results view
+// ---------------------------------------------------------------------------
+
+function AgentJobSheet({ jobId, open, onClose, sectionsJson }: {
+  jobId: number;
+  open: boolean;
+  onClose: () => void;
+  sectionsJson: string;
+}) {
+  const [activeTab, setActiveTab] = useState<"results" | "urls">("results");
+  const [isDownloading, setIsDownloading] = useState(false);
+
+  let sections: AgentSection[] = [];
+  try { sections = JSON.parse(sectionsJson); } catch { /* ignore */ }
+
+  const downloadMutation = trpc.enrichment.generateResults.useMutation({
+    onSuccess: (data) => {
+      const byteChars = atob(data.fileData);
+      const bytes = new Uint8Array(byteChars.length);
+      for (let i = 0; i < byteChars.length; i++) bytes[i] = byteChars.charCodeAt(i);
+      const blob = new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = data.fileName;
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a); URL.revokeObjectURL(url);
+      setIsDownloading(false);
+    },
+    onError: () => setIsDownloading(false),
+  });
+
+  return (
+    <Sheet open={open} onOpenChange={(o) => !o && onClose()}>
+      <SheetContent side="bottom" className="h-[85vh] flex flex-col p-0">
+        <SheetHeader className="px-6 pt-6 pb-4 border-b">
+          <SheetTitle className="flex items-center gap-2">
+            <Sparkles className="h-5 w-5 text-violet-600" />
+            AI Custom Extraction — Job #{jobId}
+          </SheetTitle>
+        </SheetHeader>
+
+        <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as any)} className="flex flex-col flex-1 overflow-hidden">
+          <div className="px-6 py-3 border-b">
+            <TabsList>
+              <TabsTrigger value="results">Results</TabsTrigger>
+              <TabsTrigger value="urls">Collected URLs</TabsTrigger>
+            </TabsList>
+          </div>
+
+          <div className="flex-1 overflow-auto p-6">
+            <TabsContent value="results" className="mt-0 space-y-5">
+              <div>
+                <p className="text-sm font-semibold mb-2">
+                  {sections.length} extraction sections (output columns)
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {sections.map((s) => (
+                    <Badge key={s.key} variant="outline" className="text-xs">
+                      {s.label}
+                    </Badge>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-lg border bg-muted/30 p-5 space-y-3">
+                <p className="text-sm font-medium">Download to view full results</p>
+                <p className="text-sm text-muted-foreground">
+                  AI custom extraction results are stored in the Excel output file with one row per processed URL
+                  and one column per extraction section listed above.
+                </p>
+                <Button
+                  onClick={() => { setIsDownloading(true); downloadMutation.mutate({ jobId }); }}
+                  disabled={isDownloading || downloadMutation.isPending}
+                >
+                  {isDownloading || downloadMutation.isPending ? (
+                    <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Generating...</>
+                  ) : (
+                    <><Download className="h-4 w-4 mr-2" />Download Results Excel</>
+                  )}
+                </Button>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="urls" className="mt-0 space-y-5">
+              <div className="rounded-lg border bg-muted/30 p-5 space-y-3">
+                <p className="text-sm font-medium">Collected URLs tab</p>
+                <p className="text-sm text-muted-foreground">
+                  When the scraper detected directory pages, it collected entity URLs into a
+                  "Collected URLs" sheet in the Excel output. Each row contains the company name,
+                  directory page URL, and native company website URL (if found).
+                </p>
+                <Button
+                  onClick={() => { setIsDownloading(true); downloadMutation.mutate({ jobId }); }}
+                  disabled={isDownloading || downloadMutation.isPending}
+                >
+                  {isDownloading || downloadMutation.isPending ? (
+                    <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Generating...</>
+                  ) : (
+                    <><Download className="h-4 w-4 mr-2" />Download Results Excel</>
+                  )}
+                </Button>
+              </div>
+            </TabsContent>
+          </div>
+        </Tabs>
+      </SheetContent>
+    </Sheet>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Template job results view (existing VC/B2B/etc pipeline)
+// ---------------------------------------------------------------------------
+
+function TemplateJobSheet({ jobId, open, onClose, template }: {
+  jobId: number;
+  open: boolean;
+  onClose: () => void;
+  template: string;
+}) {
   const tpl = getTemplate(template);
-  // Default to first sheet that maps to a valid query tab
   const validSheets = tpl.sheets.filter(s => ["firms", "team", "portfolio"].includes(s.key));
   const [activeSheetKey, setActiveSheetKey] = useState<string>(validSheets[0]?.key ?? "firms");
   const [page, setPage] = useState(1);
