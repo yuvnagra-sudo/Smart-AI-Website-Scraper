@@ -163,8 +163,9 @@ export async function updateJobProgressSafely(
   jobId: number,
   updates: {
     processedCount?: number;
-    currentFirmName?: string;
-    currentTeamMemberCount?: number;
+    currentFirmName?: string | null;
+    currentTeamMemberCount?: number | null;
+    activeFirmsJson?: string | null;
   },
   maxRetries: number = 3
 ): Promise<boolean> {

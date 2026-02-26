@@ -6,12 +6,15 @@ import { Progress } from "@/components/ui/progress";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Badge } from "@/components/ui/badge";
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { trpc } from "@/lib/trpc";
 import { getLoginUrl } from "@/const";
-import { Download, Upload, Clock, CheckCircle, XCircle, Loader2, TrendingUp, LogOut, FileSpreadsheet, Users } from "lucide-react";
+import { Download, Upload, Clock, CheckCircle, XCircle, Loader2, TrendingUp, LogOut, FileSpreadsheet, Users, Table2 } from "lucide-react";
 import { useState, useRef } from "react";
 import { toast } from "sonner";
 import { Link } from "wouter";
+import ResultsSheet from "@/components/ResultsSheet";
 
 interface PreviewData {
   fileUrl: string;
@@ -35,6 +38,7 @@ export default function Dashboard() {
   const [previewData, setPreviewData] = useState<PreviewData | null>(null);
   const [showPreview, setShowPreview] = useState(false);
   const [tierFilter, setTierFilter] = useState<"tier1" | "tier1-2" | "all">("all");
+  const [viewResultsJobId, setViewResultsJobId] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { data: jobs, isLoading: jobsLoading, refetch } = trpc.enrichment.listJobs.useQuery(undefined, {
@@ -271,7 +275,17 @@ export default function Dashboard() {
                           </div>
                           <div className="flex gap-2">
                             {job.status === "completed" && (
-                              <DownloadResultsButton jobId={job.id} outputFileUrl={job.outputFileUrl} />
+                              <>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => setViewResultsJobId(job.id)}
+                                >
+                                  <Table2 className="h-4 w-4 mr-2" />
+                                  View Results
+                                </Button>
+                                <DownloadResultsButton jobId={job.id} outputFileUrl={job.outputFileUrl} />
+                              </>
                             )}
                             {job.status === "failed" && (
                               <Button 
@@ -301,18 +315,25 @@ export default function Dashboard() {
                               <span className="font-semibold">{progress}%</span>
                             </div>
                             <Progress value={progress} className="h-2" />
-                            {job.currentFirmName && (
-                              <div className="flex items-center gap-2 text-xs text-muted-foreground mt-2">
-                                <Loader2 className="h-3 w-3 animate-spin" />
-                                <span>Currently processing: <span className="font-medium">{job.currentFirmName}</span></span>
-                                {job.currentTeamMemberCount !== null && job.currentTeamMemberCount > 0 && (
-                                  <span className="flex items-center gap-1">
-                                    <Users className="h-3 w-3" />
-                                    {job.currentTeamMemberCount} members found
-                                  </span>
-                                )}
-                              </div>
-                            )}
+                            {/* Multi-firm live progress chips */}
+                            {job.activeFirmsJson && (() => {
+                              const active: string[] = (() => { try { return JSON.parse(job.activeFirmsJson!); } catch { return []; } })();
+                              return active.length > 0 ? (
+                                <div className="flex flex-wrap gap-1 mt-2">
+                                  {active.slice(0, 5).map((name) => (
+                                    <span key={name} className="inline-flex items-center gap-1 text-xs bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded-full">
+                                      <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                                      {name}
+                                    </span>
+                                  ))}
+                                  {active.length > 5 && (
+                                    <span className="text-xs text-muted-foreground px-2 py-0.5">
+                                      +{active.length - 5} more
+                                    </span>
+                                  )}
+                                </div>
+                              ) : null;
+                            })()}
                           </div>
                         )}
 
@@ -333,6 +354,15 @@ export default function Dashboard() {
           </CardContent>
         </Card>
       </main>
+
+      {/* In-App Results Sheet */}
+      {viewResultsJobId !== null && (
+        <ResultsSheet
+          jobId={viewResultsJobId}
+          open={viewResultsJobId !== null}
+          onClose={() => setViewResultsJobId(null)}
+        />
+      )}
 
       {/* Preview Dialog */}
       <Dialog open={showPreview} onOpenChange={setShowPreview}>
@@ -403,6 +433,62 @@ export default function Dashboard() {
                     </Label>
                   </div>
                 </RadioGroup>
+              </div>
+
+              {/* Output Format Preview */}
+              <div>
+                <h3 className="font-semibold mb-2">Output Format</h3>
+                <p className="text-sm text-muted-foreground mb-3">Your Excel file will contain 4 sheets with the following fields:</p>
+                <Accordion type="single" collapsible defaultValue="firms">
+                  <AccordionItem value="firms">
+                    <AccordionTrigger className="text-sm font-medium">
+                      VC Firms <Badge variant="secondary" className="ml-2 text-xs">10 fields</Badge>
+                    </AccordionTrigger>
+                    <AccordionContent>
+                      <div className="flex flex-wrap gap-1 pt-1">
+                        {["Company Name","Website URL","Investor Type","Investment Stages","Investment Niches","AUM","Geographic Focus","Sector Focus","Founded Year","Website Verified"].map(f => (
+                          <Badge key={f} variant="outline" className="text-xs">{f}</Badge>
+                        ))}
+                      </div>
+                    </AccordionContent>
+                  </AccordionItem>
+                  <AccordionItem value="team">
+                    <AccordionTrigger className="text-sm font-medium">
+                      Team Members <Badge variant="secondary" className="ml-2 text-xs">11 fields</Badge>
+                    </AccordionTrigger>
+                    <AccordionContent>
+                      <div className="flex flex-wrap gap-1 pt-1">
+                        {["Name","Title","Decision-Maker Tier","LinkedIn URL","Email","Investment Focus","Stage Preference","Check Size Range","Geographic Focus","Years Experience","Notable Investments"].map(f => (
+                          <Badge key={f} variant="outline" className="text-xs">{f}</Badge>
+                        ))}
+                      </div>
+                    </AccordionContent>
+                  </AccordionItem>
+                  <AccordionItem value="portfolio">
+                    <AccordionTrigger className="text-sm font-medium">
+                      Portfolio Companies <Badge variant="secondary" className="ml-2 text-xs">6 fields</Badge>
+                    </AccordionTrigger>
+                    <AccordionContent>
+                      <div className="flex flex-wrap gap-1 pt-1">
+                        {["VC Firm","Company Name","Investment Date","Website URL","Sector / Niche","Recency Score"].map(f => (
+                          <Badge key={f} variant="outline" className="text-xs">{f}</Badge>
+                        ))}
+                      </div>
+                    </AccordionContent>
+                  </AccordionItem>
+                  <AccordionItem value="thesis">
+                    <AccordionTrigger className="text-sm font-medium">
+                      Investment Thesis <Badge variant="secondary" className="ml-2 text-xs">7 fields</Badge>
+                    </AccordionTrigger>
+                    <AccordionContent>
+                      <div className="flex flex-wrap gap-1 pt-1">
+                        {["VC Firm","Primary Focus Areas","Emerging Interests","Preferred Stages","Avg Check Size","Team Size","Portfolio Count"].map(f => (
+                          <Badge key={f} variant="outline" className="text-xs">{f}</Badge>
+                        ))}
+                      </div>
+                    </AccordionContent>
+                  </AccordionItem>
+                </Accordion>
               </div>
 
               {/* Preview */}

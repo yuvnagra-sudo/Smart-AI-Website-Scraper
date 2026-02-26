@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import { InsertUser, users } from "../drizzle/schema";
 
@@ -86,3 +86,32 @@ export async function getUserByOpenId(openId: string) {
 }
 
 // TODO: add feature queries here as your schema grows.
+
+/**
+ * Run schema migrations for new columns.
+ * MySQL doesn't support ADD COLUMN IF NOT EXISTS, so we catch duplicate-column errors.
+ */
+export async function runMigrations(): Promise<void> {
+  const db = await getDb();
+  if (!db) return;
+
+  const migrations = [
+    {
+      name: "activeFirmsJson",
+      sql: "ALTER TABLE enrichmentJobs ADD COLUMN activeFirmsJson TEXT",
+    },
+  ];
+
+  for (const migration of migrations) {
+    try {
+      await db.execute(sql.raw(migration.sql));
+      console.log(`[Migration] Applied: ${migration.name}`);
+    } catch (e: any) {
+      if (e.message?.includes("Duplicate column name")) {
+        // Column already exists — skip silently
+      } else {
+        console.error(`[Migration] Failed (${migration.name}):`, e.message);
+      }
+    }
+  }
+}

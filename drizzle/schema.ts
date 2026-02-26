@@ -43,6 +43,7 @@ export const enrichmentJobs = mysqlTable("enrichmentJobs", {
   maxTeamProfiles: int("maxTeamProfiles").default(200).notNull(),
   currentFirmName: text("currentFirmName"),
   currentTeamMemberCount: int("currentTeamMemberCount").default(0),
+  activeFirmsJson: text("activeFirmsJson"), // JSON array of firm names currently being processed in parallel
   errorMessage: text("errorMessage"),
   // Worker tracking fields
   workerPid: int("workerPid"), // Process ID of worker processing this job

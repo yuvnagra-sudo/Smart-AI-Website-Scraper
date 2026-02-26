@@ -9,12 +9,12 @@ import { estimateEnrichmentCost } from "./costEstimation";
 import { createEnrichmentJob, getEnrichmentJob, getUserEnrichmentJobs, updateEnrichmentJob } from "./enrichmentDb";
 import { getDb } from "./db";
 import { enrichedFirms, teamMembers, portfolioCompanies, investmentThesis } from "../drizzle/schema";
-import { eq, and } from "drizzle-orm";
+import { eq, and, like, count } from "drizzle-orm";
 import { parseInputExcel, createOutputExcel, type EnrichedVCData, type TeamMemberData, type PortfolioCompanyData, type ProcessingSummaryData } from "./excelProcessor";
 import { generateInvestmentThesisSummaries } from "./investmentThesisAnalyzer";
 import { generateResultsFile } from "./generateResultsService";
 import { createCSVExport } from "./csvExporter";
-import { processBatches, DEFAULT_BATCH_CONFIG, updateJobProgressSafely } from "./batchProcessor";
+import { updateJobProgressSafely } from "./batchProcessor";
 import { ConnectionKeepAlive } from "./dbConnectionManager";
 import { VCEnrichmentService } from "./vcEnrichment";
 import { classifyDecisionMakerTier } from './decisionMakerTiers';
@@ -208,6 +208,60 @@ export const appRouter = router({
         };
       }),
 
+    // Get paginated job results for in-app table view
+    getJobResults: protectedProcedure
+      .input(z.object({
+        jobId: z.number(),
+        tab: z.enum(["firms", "team", "portfolio"]),
+        page: z.number().min(1).default(1),
+        search: z.string().optional(),
+      }))
+      .query(async ({ ctx, input }) => {
+        const job = await getEnrichmentJob(input.jobId);
+        if (!job || job.userId !== ctx.user.id) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
+        }
+
+        const db = await getDb();
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database connection failed" });
+
+        const PAGE_SIZE = 50;
+        const offset = (input.page - 1) * PAGE_SIZE;
+        const searchTerm = input.search ? `%${input.search}%` : null;
+
+        if (input.tab === "firms") {
+          const whereClause = searchTerm
+            ? and(eq(enrichedFirms.jobId, input.jobId), like(enrichedFirms.companyName, searchTerm))
+            : eq(enrichedFirms.jobId, input.jobId);
+          const [rows, totalRows] = await Promise.all([
+            db.select().from(enrichedFirms).where(whereClause).limit(PAGE_SIZE).offset(offset),
+            db.select({ total: count() }).from(enrichedFirms).where(whereClause),
+          ]);
+          return { rows, total: totalRows[0]?.total ?? 0, pages: Math.ceil((totalRows[0]?.total ?? 0) / PAGE_SIZE) };
+        }
+
+        if (input.tab === "team") {
+          const whereClause = searchTerm
+            ? and(eq(teamMembers.jobId, input.jobId), like(teamMembers.name, searchTerm))
+            : eq(teamMembers.jobId, input.jobId);
+          const [rows, totalRows] = await Promise.all([
+            db.select().from(teamMembers).where(whereClause).limit(PAGE_SIZE).offset(offset),
+            db.select({ total: count() }).from(teamMembers).where(whereClause),
+          ]);
+          return { rows, total: totalRows[0]?.total ?? 0, pages: Math.ceil((totalRows[0]?.total ?? 0) / PAGE_SIZE) };
+        }
+
+        // portfolio tab
+        const whereClause = searchTerm
+          ? and(eq(portfolioCompanies.jobId, input.jobId), like(portfolioCompanies.portfolioCompany, searchTerm))
+          : eq(portfolioCompanies.jobId, input.jobId);
+        const [rows, totalRows] = await Promise.all([
+          db.select().from(portfolioCompanies).where(whereClause).limit(PAGE_SIZE).offset(offset),
+          db.select({ total: count() }).from(portfolioCompanies).where(whereClause),
+        ]);
+        return { rows, total: totalRows[0]?.total ?? 0, pages: Math.ceil((totalRows[0]?.total ?? 0) / PAGE_SIZE) };
+      }),
+
     // Export job results as CSV
     exportCSV: protectedProcedure
       .input(z.object({ jobId: z.number() }))
@@ -290,165 +344,133 @@ export async function processEnrichmentJob(jobId: number) {
     const allTeamMembers: TeamMemberData[] = [];
     const allPortfolioCompanies: PortfolioCompanyData[] = [];
 
-    // Use batch processor for reliable large-scale processing
-    const batchConfig = {
-      ...DEFAULT_BATCH_CONFIG,
-      batchSize: 500, // Process 500 firms per batch
-      progressUpdateInterval: 10, // Update DB every 10 firms
+    // Concurrent worker queue — processes up to CONCURRENCY firms simultaneously.
+    // Node.js is single-threaded so queue.shift() and Set mutations are race-free.
+    const CONCURRENCY = 20;
+    const firmQueue = [...firms];
+    const activeFirms = new Set<string>();
+    let parallelProcessedCount = 0;
+
+    const processFirm = async (firm: typeof firms[number]) => {
+      const result = await enricher.enrichVCFirm(
+        firm.companyName,
+        firm.websiteUrl,
+        firm.description,
+        undefined,
+        {
+          deepTeamProfileScraping: job.deepTeamProfileScraping !== false,
+          maxTeamProfiles: job.maxTeamProfiles || 200,
+        }
+      );
+
+      // INCREMENTAL SAVE: persist to DB immediately
+      console.log(`[Job ${jobId}] 💾 Saving "${result.companyName}"...`);
+      const firmId = await saveFirmImmediately(jobId, result, job.tierFilter || "all");
+      if (!firmId) {
+        console.error(`[Job ${jobId}] ❌ Failed to save "${result.companyName}"`);
+        return;
+      }
+      console.log(`[Job ${jobId}] ✅ Saved "${result.companyName}" (ID: ${firmId}) with ${result.teamMembers.length} members`);
+
+      // Keep in-memory copies for investment thesis generation
+      if (!enrichedFirmsData.find(f => f.companyName === result.companyName)) {
+        enrichedFirmsData.push({
+          companyName: result.companyName,
+          websiteUrl: result.websiteUrl,
+          description: result.description,
+          websiteVerified: result.websiteVerified ? "Yes" : "No",
+          verificationMessage: result.verificationMessage,
+          investorType: result.investorType.join(", "),
+          investorTypeConfidence: result.investorTypeConfidence,
+          investorTypeSourceUrl: result.investorTypeSourceUrl,
+          investmentStages: result.investmentStages.join(", "),
+          investmentStagesConfidence: result.investmentStagesConfidence,
+          investmentStagesSourceUrl: result.investmentStagesSourceUrl,
+          investmentNiches: result.investmentNiches.join(", "),
+          nichesConfidence: result.nichesConfidence,
+          nichesSourceUrl: result.nichesSourceUrl,
+        });
+      }
+
+      const tierFilter = job.tierFilter || "all";
+      for (const member of result.teamMembers) {
+        const tierClassification = classifyDecisionMakerTier(member.title);
+        const include =
+          (tierFilter === "tier1" && tierClassification.tier === "Tier 1") ||
+          (tierFilter === "tier1-2" && ["Tier 1", "Tier 2", "Tier 3"].includes(tierClassification.tier)) ||
+          tierFilter === "all";
+        if (include) {
+          allTeamMembers.push({
+            vcFirm: result.companyName,
+            name: member.name,
+            title: member.title,
+            jobFunction: member.jobFunction,
+            specialization: member.specialization,
+            linkedinUrl: member.linkedinUrl,
+            email: member.email || "",
+            portfolioCompanies: member.portfolioCompanies || "",
+            investmentFocus: member.investmentFocus || "",
+            stagePreference: member.stagePreference || "",
+            checkSizeRange: member.checkSizeRange || "",
+            geographicFocus: member.geographicFocus || "",
+            investmentThesis: member.investmentThesis || "",
+            notableInvestments: member.notableInvestments || "",
+            yearsExperience: member.yearsExperience || "",
+            background: member.background || "",
+            dataSourceUrl: member.dataSourceUrl,
+            confidenceScore: member.confidenceScore,
+            decisionMakerTier: tierClassification.tier,
+            tierPriority: tierClassification.priority,
+          });
+        }
+      }
+
+      for (const company of result.portfolioCompanies) {
+        const { score, category } = calculateRecencyScore(company.investmentDate);
+        allPortfolioCompanies.push({
+          vcFirm: result.companyName,
+          portfolioCompany: company.companyName,
+          investmentDate: company.investmentDate,
+          websiteUrl: company.websiteUrl,
+          investmentNiche: company.investmentNiche.join(", "),
+          dataSourceUrl: company.dataSourceUrl,
+          confidenceScore: company.confidenceScore,
+          recencyScore: score,
+          recencyCategory: category,
+        });
+      }
     };
 
-    let currentFirmName = "";
-    let currentTeamMemberCount = 0;
+    const runWorker = async (): Promise<void> => {
+      while (true) {
+        const firm = firmQueue.shift();
+        if (!firm) break;
 
-    await processBatches(
-      firms,
-      async (firm) => {
-        const result = await enricher.enrichVCFirm(
-          firm.companyName,
-          firm.websiteUrl,
-          firm.description,
-          undefined, // onProgress callback
-          {
-            deepTeamProfileScraping: job.deepTeamProfileScraping !== false,
-            maxTeamProfiles: job.maxTeamProfiles || 200,
-          }
-        );
-        return result;
-      },
-      batchConfig,
-      {
-        onBatchStart: (batchIndex, batchSize) => {
-          console.log(`[Job ${jobId}] Starting batch ${batchIndex + 1}, size: ${batchSize}`);
-        },
-        onItemComplete: async (firm, result, index) => {
-          currentFirmName = result.companyName;
-          currentTeamMemberCount = result.teamMembers.length;
-          
-          // INCREMENTAL SAVE: Save firm immediately to database
-          console.log(`[Job ${jobId}] 💾 Saving "${result.companyName}" to database immediately...`);
-          const firmId = await saveFirmImmediately(jobId, result, job.tierFilter || "all");
-          
-          if (!firmId) {
-            console.error(`[Job ${jobId}] ❌ Failed to save "${result.companyName}" to database`);
-            return;
-          }
-          
-          console.log(`[Job ${jobId}] ✅ Saved "${result.companyName}" (ID: ${firmId}) with ${result.teamMembers.length} team members`);
-          
-          // Keep in-memory copy for Excel generation (but data is already safe in DB)
-          const existingFirm = enrichedFirmsData.find(f => f.companyName === result.companyName);
-          if (existingFirm) {
-            console.error(`[Job ${jobId}] ⚠️  DUPLICATE DETECTED: ${result.companyName} already in enrichedFirmsData array!`);
-            console.error(`[Job ${jobId}] Skipping duplicate to prevent database duplication`);
-            return; // Skip adding this duplicate
-          }
-          
-          console.log(`[Job ${jobId}] Adding ${result.companyName} to enrichedFirmsData (current count: ${enrichedFirmsData.length})`);
-          enrichedFirmsData.push({
-            companyName: result.companyName,
-            websiteUrl: result.websiteUrl,
-            description: result.description,
-            websiteVerified: result.websiteVerified ? "Yes" : "No",
-            verificationMessage: result.verificationMessage,
-            investorType: result.investorType.join(", "),
-            investorTypeConfidence: result.investorTypeConfidence,
-            investorTypeSourceUrl: result.investorTypeSourceUrl,
-            investmentStages: result.investmentStages.join(", "),
-            investmentStagesConfidence: result.investmentStagesConfidence,
-            investmentStagesSourceUrl: result.investmentStagesSourceUrl,
-            investmentNiches: result.investmentNiches.join(", "),
-            nichesConfidence: result.nichesConfidence,
-            nichesSourceUrl: result.nichesSourceUrl,
-          });
-
-          // Add team members with tier classification
-          console.log(`[Job ${jobId}] Firm "${result.companyName}" extracted ${result.teamMembers.length} team members`);
-          
-          for (const member of result.teamMembers) {
-            const tierClassification = classifyDecisionMakerTier(member.title);
-            console.log(`[Job ${jobId}] Team member: ${member.name} | Title: "${member.title}" | Tier: ${tierClassification.tier}`);
-            
-            // Apply tier filter based on job settings
-            const tierFilter = job.tierFilter || "all";
-            let includeMember = false;
-            
-            if (tierFilter === "tier1" && tierClassification.tier === "Tier 1") {
-              includeMember = true;
-            } else if (tierFilter === "tier1-2" && (tierClassification.tier === "Tier 1" || tierClassification.tier === "Tier 2" || tierClassification.tier === "Tier 3")) {
-              // Include Tier 3 in tier1-2 filter to be more inclusive
-              includeMember = true;
-            } else if (tierFilter === "all") {
-              // When filter is "all", include ALL team members regardless of tier classification
-              // This ensures no data loss - users can filter in Excel if needed
-              includeMember = true;
-            }
-            
-            console.log(`[Job ${jobId}] ${member.name} | Filter: ${tierFilter} | Include: ${includeMember}`);
-            
-            if (includeMember) {
-              console.log(`[Job ${jobId}] ✓ Including ${member.name} in results`);
-              allTeamMembers.push({
-                vcFirm: result.companyName,
-                name: member.name,
-                title: member.title,
-                jobFunction: member.jobFunction,
-                specialization: member.specialization,
-                linkedinUrl: member.linkedinUrl,
-                email: member.email || "",
-                portfolioCompanies: member.portfolioCompanies || "",
-                investmentFocus: member.investmentFocus || "",
-                stagePreference: member.stagePreference || "",
-                checkSizeRange: member.checkSizeRange || "",
-                geographicFocus: member.geographicFocus || "",
-                investmentThesis: member.investmentThesis || "",
-                notableInvestments: member.notableInvestments || "",
-                yearsExperience: member.yearsExperience || "",
-                background: member.background || "",
-                dataSourceUrl: member.dataSourceUrl,
-                confidenceScore: member.confidenceScore,
-                decisionMakerTier: tierClassification.tier,
-                tierPriority: tierClassification.priority,
-              });
-            } else {
-              console.log(`[Job ${jobId}] ✗ Excluding ${member.name} from results (Tier: ${tierClassification.tier}, Filter: ${tierFilter})`);
-            }
-          }
-
-          // Add portfolio companies with recency scoring
-          for (const company of result.portfolioCompanies) {
-            const { score, category } = calculateRecencyScore(company.investmentDate);
-            
-            allPortfolioCompanies.push({
-              vcFirm: result.companyName,
-              portfolioCompany: company.companyName,
-              investmentDate: company.investmentDate,
-              websiteUrl: company.websiteUrl,
-              investmentNiche: company.investmentNiche.join(", "),
-              dataSourceUrl: company.dataSourceUrl,
-              confidenceScore: company.confidenceScore,
-              recencyScore: score,
-              recencyCategory: category,
-            });
-          }
-        },
-        onItemError: (firm, error, index) => {
-          console.error(`[Job ${jobId}] Error processing firm ${index} (${firm.companyName}):`, error);
-        },
-        onProgressUpdate: async (processed, total) => {
-          // Use safe DB update with retry logic
-          // Calculate absolute processed count
-          const absoluteProcessed = processedFirmNames.length + processed;
+        activeFirms.add(firm.companyName);
+        try {
+          await processFirm(firm);
+          parallelProcessedCount++;
+        } catch (err) {
+          parallelProcessedCount++;
+          console.error(`[Job ${jobId}] Error enriching "${firm.companyName}":`, err);
+        } finally {
+          activeFirms.delete(firm.companyName);
+          const absoluteProcessed = processedFirmNames.length + parallelProcessedCount;
+          const activeFirmsList = [...activeFirms];
           await updateJobProgressSafely(jobId, {
             processedCount: absoluteProcessed,
-            currentFirmName,
-            currentTeamMemberCount,
+            currentFirmName: activeFirmsList[0] ?? null,
+            currentTeamMemberCount: null,
+            activeFirmsJson: activeFirmsList.length > 0 ? JSON.stringify(activeFirmsList) : null,
           });
-          console.log(`[Job ${jobId}] Progress: ${absoluteProcessed}/${allFirms.length} firms (${Math.round(absoluteProcessed/allFirms.length*100)}%)`);
-        },
-        onBatchComplete: (batchIndex, results) => {
-          console.log(`[Job ${jobId}] Batch ${batchIndex + 1} complete: ${results.length} firms enriched`);
-        },
+          console.log(`[Job ${jobId}] Progress: ${absoluteProcessed}/${allFirms.length} (${activeFirms.size} active)`);
+        }
       }
+    };
+
+    console.log(`[Job ${jobId}] Starting parallel enrichment: ${firms.length} firms, ${CONCURRENCY} concurrent`);
+    await Promise.allSettled(
+      Array.from({ length: Math.min(CONCURRENCY, firms.length) }, runWorker)
     );
 
     // Generate investment thesis summaries
