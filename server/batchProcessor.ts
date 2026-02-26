@@ -166,6 +166,9 @@ export async function updateJobProgressSafely(
     currentFirmName?: string | null;
     currentTeamMemberCount?: number | null;
     activeFirmsJson?: string | null;
+    totalCostUSD?: number | null;
+    totalInputTokens?: number | null;
+    totalOutputTokens?: number | null;
   },
   maxRetries: number = 3
 ): Promise<boolean> {

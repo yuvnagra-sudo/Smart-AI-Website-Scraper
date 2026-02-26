@@ -1,35 +1,51 @@
 /**
- * OpenAI-Only LLM Implementation
+ * LLM Implementation — OpenAI or Gemini (OpenAI-compatible)
  *
- * Direct OpenAI API calls without queue or hybrid complexity.
- * Model is configured via the OPENAI_MODEL env var (default: gpt-4o-mini).
- * gpt-4o-mini remains available in the OpenAI API and is cost-efficient at scale.
- * To upgrade to a newer model, set OPENAI_MODEL=gpt-4.1-mini or similar in your .env.
+ * Provider is selected at runtime:
+ *   - If GEMINI_API_KEY is set → uses Gemini 2.5 Flash (50% cheaper, faster)
+ *   - Otherwise → uses OpenAI (model via OPENAI_MODEL env var, default: gpt-4o-mini)
+ *
+ * Gemini 2.5 Flash uses Google's OpenAI-compatible endpoint so the code change is minimal.
+ * To switch providers in Railway: add/remove the GEMINI_API_KEY env var.
  */
 
 import { type InvokeParams, type InvokeResult } from "./llm";
 import { ENV } from "./env";
 
-const OPENAI_MODEL = process.env.OPENAI_MODEL ?? "gpt-4o-mini";
+const USE_GEMINI = !!process.env.GEMINI_API_KEY;
+const LLM_BASE_URL = USE_GEMINI
+  ? "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+  : "https://api.openai.com/v1/chat/completions";
+const LLM_MODEL = USE_GEMINI
+  ? (process.env.GEMINI_MODEL ?? "gemini-2.5-flash")
+  : (process.env.OPENAI_MODEL ?? "gpt-4o-mini");
+const LLM_API_KEY = USE_GEMINI
+  ? (process.env.GEMINI_API_KEY ?? "")
+  : ENV.openAiApiKey;
+// Pricing per 1M tokens for cost tracking
+const INPUT_COST_PER_1M  = USE_GEMINI ? 0.075 : 0.15;
+const OUTPUT_COST_PER_1M = USE_GEMINI ? 0.30  : 0.60;
 
 // Statistics
 let totalCalls = 0;
 let totalCost = 0;
 let totalErrors = 0;
+let totalInputTokens = 0;
+let totalOutputTokens = 0;
 
 /**
  * Invoke OpenAI API directly
  */
 export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
-  if (!ENV.openAiApiKey) {
-    throw new Error("OpenAI API key not configured");
+  if (!LLM_API_KEY) {
+    throw new Error(USE_GEMINI ? "Gemini API key not configured" : "OpenAI API key not configured");
   }
 
   const { messages, tools, response_format } = params;
 
-  // Build OpenAI request payload
+  // Build request payload
   const payload: Record<string, unknown> = {
-    model: OPENAI_MODEL,
+    model: LLM_MODEL,
     messages: messages.map(msg => ({
       role: msg.role,
       content: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content),
@@ -45,11 +61,11 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
   }
 
   try {
-    // Call OpenAI API
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    // Call LLM API (OpenAI or Gemini OpenAI-compatible endpoint)
+    const response = await fetch(LLM_BASE_URL, {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${ENV.openAiApiKey}`,
+        "Authorization": `Bearer ${LLM_API_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),
@@ -57,18 +73,20 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
 
     if (!response.ok) {
       const error = await response.text();
-      throw new Error(`OpenAI API error (${response.status}): ${error}`);
+      throw new Error(`LLM API error (${response.status}): ${error}`);
     }
 
     const data = await response.json();
 
-    // Track cost (gpt-4o-mini: $0.15 input, $0.60 output per 1M tokens)
+    // Track cost using active provider pricing
     const inputTokens = data.usage?.prompt_tokens || 0;
     const outputTokens = data.usage?.completion_tokens || 0;
-    const cost = (inputTokens * 0.15 + outputTokens * 0.60) / 1_000_000;
-    
+    const cost = (inputTokens * INPUT_COST_PER_1M + outputTokens * OUTPUT_COST_PER_1M) / 1_000_000;
+
     totalCalls++;
     totalCost += cost;
+    totalInputTokens += inputTokens;
+    totalOutputTokens += outputTokens;
 
     // Return in standard format
     return {
@@ -101,6 +119,8 @@ export function getOpenAIStats() {
     totalCost,
     totalErrors,
     errorRate: totalCalls > 0 ? (totalErrors / totalCalls * 100).toFixed(2) + '%' : '0%',
+    totalInputTokens,
+    totalOutputTokens,
   };
 }
 
@@ -111,6 +131,8 @@ export function resetOpenAIStats() {
   totalCalls = 0;
   totalCost = 0;
   totalErrors = 0;
+  totalInputTokens = 0;
+  totalOutputTokens = 0;
 }
 
 // Re-export types for consumers

@@ -10,8 +10,11 @@ export const ENV = {
   awsS3Bucket: process.env.AWS_S3_BUCKET ?? "",
   // AI / scraping
   openAiApiKey: process.env.OPENAI_API_KEY ?? "",
+  geminiApiKey: process.env.GEMINI_API_KEY ?? "",
   jinaApiKey: process.env.JINA_API_KEY ?? "",
   vayneApiKey: process.env.VAYNE_API_KEY ?? "",
+  // Optional HTTP/SOCKS proxy for browser scraping (e.g. "http://host:port")
+  proxyUrl: process.env.PROXY_URL ?? "",
 };
 
 export const env = ENV;

@@ -17,6 +17,7 @@ import { createCSVExport } from "./csvExporter";
 import { updateJobProgressSafely } from "./batchProcessor";
 import { ConnectionKeepAlive } from "./dbConnectionManager";
 import { VCEnrichmentService } from "./vcEnrichment";
+import { getOpenAIStats } from "./_core/openaiLLM";
 import { classifyDecisionMakerTier } from './decisionMakerTiers';
 import { calculateRecencyScore } from './portfolioIntelligence';
 import { canResumeJob, prepareJobForResume, getResumeProgress } from "./resumeJob";
@@ -70,7 +71,10 @@ export const appRouter = router({
         }
 
         // Return preview data (first 5 firms)
-      const costEstimate = estimateEnrichmentCost(firms.length);
+        const avgDescLength = firms.length > 0
+          ? firms.reduce((sum, f) => sum + (f.description?.length ?? 0), 0) / firms.length
+          : 200;
+        const costEstimate = estimateEnrichmentCost(firms.length, avgDescLength);
 
       return {
         fileUrl,
@@ -78,6 +82,8 @@ export const appRouter = router({
         firmCount: firms.length,
         costEstimate: {
           totalCost: costEstimate.totalCost,
+          totalCostLow: costEstimate.totalCostLow,
+          totalCostHigh: costEstimate.totalCostHigh,
           perFirmCost: costEstimate.perFirmCost,
           estimatedDuration: costEstimate.estimatedDuration,
         },
@@ -99,9 +105,15 @@ export const appRouter = router({
           tierFilter: z.enum(["tier1", "tier1-2", "all"]).optional().default("all"),
           deepTeamProfileScraping: z.boolean().optional().default(true),
           maxTeamProfiles: z.number().optional().default(200),
+          template: z.string().optional().default("vc"),
+          avgDescriptionLength: z.number().optional().default(200),
         }),
       )
       .mutation(async ({ ctx, input }) => {
+        // Compute cost estimate (using description length for accuracy)
+        const avgDescLen = input.avgDescriptionLength ?? 200;
+        const estimate = estimateEnrichmentCost(input.firmCount, avgDescLen);
+
         // Create job
         const jobId = await createEnrichmentJob({
           userId: ctx.user.id,
@@ -112,6 +124,8 @@ export const appRouter = router({
           tierFilter: input.tierFilter || "all",
           deepTeamProfileScraping: input.deepTeamProfileScraping !== false,
           maxTeamProfiles: input.maxTeamProfiles || 200,
+          template: input.template || "vc",
+          estimatedCostUSD: String(estimate.totalCost),
         });
 
         // Start processing in background
@@ -346,7 +360,7 @@ export async function processEnrichmentJob(jobId: number) {
 
     // Concurrent worker queue — processes up to CONCURRENCY firms simultaneously.
     // Node.js is single-threaded so queue.shift() and Set mutations are race-free.
-    const CONCURRENCY = 20;
+    const CONCURRENCY = 50;
     const firmQueue = [...firms];
     const activeFirms = new Set<string>();
     let parallelProcessedCount = 0;
@@ -457,16 +471,26 @@ export async function processEnrichmentJob(jobId: number) {
           activeFirms.delete(firm.companyName);
           const absoluteProcessed = processedFirmNames.length + parallelProcessedCount;
           const activeFirmsList = [...activeFirms];
+          const currentStats = getOpenAIStats();
           await updateJobProgressSafely(jobId, {
             processedCount: absoluteProcessed,
             currentFirmName: activeFirmsList[0] ?? null,
             currentTeamMemberCount: null,
             activeFirmsJson: activeFirmsList.length > 0 ? JSON.stringify(activeFirmsList) : null,
+            totalCostUSD:       Math.round((currentStats.totalCost - costBaseline) * 10000) / 10000,
+            totalInputTokens:   currentStats.totalInputTokens  - inputBaseline,
+            totalOutputTokens:  currentStats.totalOutputTokens - outputBaseline,
           });
           console.log(`[Job ${jobId}] Progress: ${absoluteProcessed}/${allFirms.length} (${activeFirms.size} active)`);
         }
       }
     };
+
+    // Snapshot LLM stats before processing so we can compute job-specific cost delta
+    const statsBaseline = getOpenAIStats();
+    const costBaseline   = statsBaseline.totalCost;
+    const inputBaseline  = statsBaseline.totalInputTokens;
+    const outputBaseline = statsBaseline.totalOutputTokens;
 
     console.log(`[Job ${jobId}] Starting parallel enrichment: ${firms.length} firms, ${CONCURRENCY} concurrent`);
     await Promise.allSettled(
@@ -588,9 +612,13 @@ export async function processEnrichmentJob(jobId: number) {
     console.log(`[processEnrichmentJob] Job ${jobId} completed. Processed ${enrichedFirmsData.length} firms with ${allTeamMembers.length} team members.`);
     console.log(`[processEnrichmentJob] File will be generated on-demand when user requests download.`);
     
+    const finalStats = getOpenAIStats();
     await updateEnrichmentJob(jobId, {
       status: "completed",
       completedAt: new Date(),
+      totalCostUSD:       String(Math.round((finalStats.totalCost - costBaseline) * 10000) / 10000),
+      totalInputTokens:   finalStats.totalInputTokens  - inputBaseline,
+      totalOutputTokens:  finalStats.totalOutputTokens - outputBaseline,
     });
   } catch (error) {
     console.error(`Error processing job ${jobId}:`, error);

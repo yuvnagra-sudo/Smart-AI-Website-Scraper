@@ -1404,17 +1404,18 @@ If you cannot determine the investment stages, return: {"stages": []}`;
       // Extract investor type, stages, niches from firm description or homepage
       if (recursiveResult.firmDescription) {
         onProgress?.(`Analyzing firm characteristics for ${companyName}`);
-        const investorTypeData = await this.extractInvestorType(websiteUrl, companyName, recursiveResult.firmDescription);
+        // Run 3 independent extractions in parallel — all need only website content, no shared state
+        const [investorTypeData, stagesData, nichesData] = await Promise.all([
+          this.extractInvestorType(websiteUrl, companyName, recursiveResult.firmDescription),
+          this.extractInvestmentStages(websiteUrl, companyName, recursiveResult.firmDescription),
+          this.extractInvestmentNiches(websiteUrl, companyName),
+        ]);
         result.investorType = investorTypeData.types;
         result.investorTypeConfidence = investorTypeData.confidence;
         result.investorTypeSourceUrl = investorTypeData.sourceUrl;
-        
-        const stagesData = await this.extractInvestmentStages(websiteUrl, companyName, recursiveResult.firmDescription);
         result.investmentStages = stagesData.stages;
         result.investmentStagesConfidence = stagesData.confidence;
         result.investmentStagesSourceUrl = stagesData.sourceUrl;
-        
-        const nichesData = await this.extractInvestmentNiches(websiteUrl, companyName);
         result.investmentNiches = nichesData.niches;
         result.nichesConfidence = nichesData.confidence;
         result.nichesSourceUrl = nichesData.sourceUrl;

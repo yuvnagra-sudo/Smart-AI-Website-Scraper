@@ -10,18 +10,53 @@ import { Badge } from "@/components/ui/badge";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { trpc } from "@/lib/trpc";
 import { getLoginUrl } from "@/const";
-import { Download, Upload, Clock, CheckCircle, XCircle, Loader2, TrendingUp, LogOut, FileSpreadsheet, Users, Table2 } from "lucide-react";
+import {
+  Bot, Download, Upload, Clock, CheckCircle, XCircle, Loader2, LogOut,
+  FileSpreadsheet, Table2, DollarSign, TrendingUp, Building2, Users,
+  HeartPulse, ShoppingCart, Home, MapPin, Info,
+} from "lucide-react";
 import { useState, useRef } from "react";
 import { toast } from "sonner";
 import { Link } from "wouter";
 import ResultsSheet from "@/components/ResultsSheet";
+import { ALL_TEMPLATES, getTemplate, type Template } from "@/lib/templates";
 
+// ---------------------------------------------------------------------------
+// Icon map for templates (lucide-react components by template id)
+// ---------------------------------------------------------------------------
+const TEMPLATE_ICONS: Record<string, React.ReactNode> = {
+  vc:          <TrendingUp className="h-5 w-5" />,
+  b2b:         <Building2 className="h-5 w-5" />,
+  people:      <Users className="h-5 w-5" />,
+  healthcare:  <HeartPulse className="h-5 w-5" />,
+  ecommerce:   <ShoppingCart className="h-5 w-5" />,
+  realestate:  <Home className="h-5 w-5" />,
+  local:       <MapPin className="h-5 w-5" />,
+};
+
+// Tailwind bg + text classes per template color
+const TEMPLATE_COLORS: Record<string, { bg: string; text: string; border: string }> = {
+  vc:          { bg: "bg-violet-50",  text: "text-violet-700",  border: "border-violet-400" },
+  b2b:         { bg: "bg-blue-50",    text: "text-blue-700",    border: "border-blue-400" },
+  people:      { bg: "bg-amber-50",   text: "text-amber-700",   border: "border-amber-400" },
+  healthcare:  { bg: "bg-rose-50",    text: "text-rose-700",    border: "border-rose-400" },
+  ecommerce:   { bg: "bg-orange-50",  text: "text-orange-700",  border: "border-orange-400" },
+  realestate:  { bg: "bg-teal-50",    text: "text-teal-700",    border: "border-teal-400" },
+  local:       { bg: "bg-green-50",   text: "text-green-700",   border: "border-green-400" },
+};
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
 interface PreviewData {
   fileUrl: string;
   fileKey: string;
   firmCount: number;
+  avgDescriptionLength: number;
   costEstimate: {
     totalCost: number;
+    totalCostLow?: number;
+    totalCostHigh?: number;
     perFirmCost: number;
     estimatedDuration: string;
   };
@@ -32,23 +67,39 @@ interface PreviewData {
   }>;
 }
 
+// ---------------------------------------------------------------------------
+// Main component
+// ---------------------------------------------------------------------------
 export default function Dashboard() {
   const { user, loading: authLoading, logout } = useAuth();
   const [uploading, setUploading] = useState(false);
   const [previewData, setPreviewData] = useState<PreviewData | null>(null);
   const [showPreview, setShowPreview] = useState(false);
+  const [selectedTemplate, setSelectedTemplate] = useState<string>("vc");
   const [tierFilter, setTierFilter] = useState<"tier1" | "tier1-2" | "all">("all");
-  const [viewResultsJobId, setViewResultsJobId] = useState<number | null>(null);
+  const [viewResultsJob, setViewResultsJob] = useState<{ id: number; template: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { data: jobs, isLoading: jobsLoading, refetch } = trpc.enrichment.listJobs.useQuery(undefined, {
     enabled: !!user,
-    refetchInterval: 3000, // Poll every 3 seconds for real-time updates
+    refetchInterval: 3000,
   });
 
   const uploadMutation = trpc.enrichment.uploadAndPreview.useMutation({
     onSuccess: (data) => {
-      setPreviewData(data);
+      // Compute avg description length from preview (approximation)
+      const avgLen = data.preview.length > 0
+        ? data.preview.reduce((s, f) => s + f.descriptionPreview.length, 0) / data.preview.length * 3 // rough x3 since preview is truncated at 150 chars
+        : 200;
+      setPreviewData({
+        ...data,
+        avgDescriptionLength: Math.round(avgLen),
+        costEstimate: {
+          ...data.costEstimate,
+          totalCostLow: (data.costEstimate as any).totalCostLow,
+          totalCostHigh: (data.costEstimate as any).totalCostHigh,
+        },
+      });
       setShowPreview(true);
       setUploading(false);
     },
@@ -60,22 +111,20 @@ export default function Dashboard() {
 
   const confirmMutation = trpc.enrichment.confirmAndStart.useMutation({
     onSuccess: (data) => {
-      toast.success(`Enrichment started! Processing ${data.firmCount} VC firms.`);
+      toast.success(`Extraction started! Processing ${data.firmCount} entries.`);
       setShowPreview(false);
       setPreviewData(null);
       refetch();
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
-      }
+      if (fileInputRef.current) fileInputRef.current.value = "";
     },
     onError: (error) => {
-      toast.error(`Failed to start enrichment: ${error.message}`);
+      toast.error(`Failed to start extraction: ${error.message}`);
     },
   });
 
   const resumeMutation = trpc.enrichment.resumeJob.useMutation({
     onSuccess: (data) => {
-      toast.success(`Job resumed! ${data.remainingCount} firms remaining.`);
+      toast.success(`Job resumed! ${data.remainingCount} entries remaining.`);
       refetch();
     },
     onError: (error) => {
@@ -87,66 +136,39 @@ export default function Dashboard() {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    // Validate file type
     const isExcel = file.name.endsWith(".xlsx") || file.name.endsWith(".xls");
-    const isCsv = file.name.endsWith(".csv");
-    
+    const isCsv   = file.name.endsWith(".csv");
     if (!isExcel && !isCsv) {
       toast.error("Please upload an Excel (.xlsx, .xls) or CSV (.csv) file");
       return;
     }
 
     setUploading(true);
-
-    try {
-      // Read file as base64
-      const reader = new FileReader();
-      reader.onload = async (e) => {
-        const base64 = e.target?.result as string;
-        const fileData = base64.split(",")[1]; // Remove data:application/... prefix
-
-        if (!fileData) {
-          toast.error("Failed to read file");
-          setUploading(false);
-          return;
-        }
-
-        uploadMutation.mutate({
-          fileData,
-          fileName: file.name,
-        });
-      };
-      reader.readAsDataURL(file);
-    } catch (error) {
-      toast.error("Failed to read file");
-      setUploading(false);
-    }
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      const base64 = e.target?.result as string;
+      const fileData = base64.split(",")[1];
+      if (!fileData) { toast.error("Failed to read file"); setUploading(false); return; }
+      uploadMutation.mutate({ fileData, fileName: file.name });
+    };
+    reader.readAsDataURL(file);
   };
 
   const handleConfirmEnrichment = () => {
     if (!previewData) return;
-
     confirmMutation.mutate({
       fileUrl: previewData.fileUrl,
       fileKey: previewData.fileKey,
       firmCount: previewData.firmCount,
-      tierFilter,
+      tierFilter: selectedTemplate === "vc" ? tierFilter : "all",
+      template: selectedTemplate,
+      avgDescriptionLength: previewData.avgDescriptionLength,
     });
   };
 
-  const getTierFilterDescription = (filter: string) => {
-    switch (filter) {
-      case "tier1":
-        return "Primary Decision Makers only (Managing Partners, General Partners, Investment Partners)";
-      case "tier1-2":
-        return "Decision Makers & Influencers (Partners, Principals, Senior Associates)";
-      case "all":
-        return "All investment team members (excludes operations, marketing, HR, etc.)";
-      default:
-        return "";
-    }
-  };
-
+  // -------------------------------------------------------------------------
+  // Auth states
+  // -------------------------------------------------------------------------
   if (authLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -157,7 +179,7 @@ export default function Dashboard() {
 
   if (!user) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 via-white to-purple-50">
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-slate-50 via-white to-blue-50">
         <Card className="max-w-md">
           <CardHeader>
             <CardTitle>Authentication Required</CardTitle>
@@ -173,15 +195,17 @@ export default function Dashboard() {
     );
   }
 
+  const hasJobs = jobs && jobs.length > 0;
+
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50">
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-blue-50">
       {/* Header */}
       <header className="border-b bg-white/80 backdrop-blur-sm sticky top-0 z-50">
         <div className="container mx-auto px-4 py-4 flex justify-between items-center">
           <Link href="/">
             <div className="flex items-center gap-2 cursor-pointer">
-              <TrendingUp className="h-8 w-8 text-primary" />
-              <h1 className="text-2xl font-bold">VC Enrichment</h1>
+              <Bot className="h-8 w-8 text-primary" />
+              <h1 className="text-2xl font-bold">Smart AI Data Scraper</h1>
             </div>
           </Link>
           <div className="flex items-center gap-4">
@@ -194,16 +218,17 @@ export default function Dashboard() {
         </div>
       </header>
 
-      <main className="container mx-auto px-4 py-8">
-        {/* Upload Section */}
-        <Card className="mb-8">
+      <main className="container mx-auto px-4 py-8 max-w-4xl">
+        {/* Upload Card */}
+        <Card className="mb-4">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Upload className="h-6 w-6" />
-              Upload VC Firms
+              Upload your list
             </CardTitle>
             <CardDescription>
-              Upload an Excel (.xlsx, .xls) or CSV (.csv) file with columns: Company Name (or Company), Company Website URL (or Corporate Website), and LinkedIn Description (or Description)
+              Excel (.xlsx) or CSV with 3 columns: <strong>Name</strong>, <strong>Website URL</strong>, <strong>Description</strong> (optional).
+              The scraper will visit each URL and extract structured data automatically.
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -218,68 +243,95 @@ export default function Dashboard() {
               />
               <Button disabled={uploading}>
                 {uploading ? (
-                  <>
-                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                    Uploading...
-                  </>
+                  <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Uploading...</>
                 ) : (
-                  <>
-                    <FileSpreadsheet className="h-4 w-4 mr-2" />
-                    Select File
-                  </>
+                  <><FileSpreadsheet className="h-4 w-4 mr-2" />Select File</>
                 )}
               </Button>
             </div>
           </CardContent>
         </Card>
 
+        {/* Capability notice */}
+        <div className="flex items-start gap-2 text-sm text-muted-foreground mb-8 px-1">
+          <Info className="h-4 w-4 mt-0.5 shrink-0" />
+          <span>Works best on public websites. Social media profiles and login-protected pages have limited support.</span>
+        </div>
+
         {/* Jobs List */}
         <Card>
           <CardHeader>
-            <CardTitle>Enrichment Jobs</CardTitle>
-            <CardDescription>Track your enrichment jobs and download results</CardDescription>
+            <CardTitle>Extraction Jobs</CardTitle>
+            <CardDescription>Track your jobs and download results</CardDescription>
           </CardHeader>
           <CardContent>
             {jobsLoading ? (
               <div className="flex items-center justify-center py-8">
                 <Loader2 className="h-8 w-8 animate-spin text-primary" />
               </div>
-            ) : jobs && jobs.length > 0 ? (
+            ) : hasJobs ? (
               <div className="space-y-4">
                 {jobs.map((job) => {
-                  const progress = job.firmCount && job.firmCount > 0 
-                    ? Math.round(((job.processedCount || 0) / job.firmCount) * 100) 
+                  const progress = job.firmCount && job.firmCount > 0
+                    ? Math.round(((job.processedCount || 0) / job.firmCount) * 100)
                     : 0;
                   const isProcessing = job.status === "processing";
-                  
+                  const jobTemplate = (job as any).template || "vc";
+                  const tpl = getTemplate(jobTemplate);
+                  const colors = TEMPLATE_COLORS[jobTemplate] ?? TEMPLATE_COLORS.vc;
+
                   return (
                     <Card key={job.id} className="border-2">
                       <CardContent className="pt-6">
-                        <div className="flex items-start justify-between mb-4">
+                        <div className="flex items-start justify-between mb-3">
                           <div className="flex-1">
-                            <div className="flex items-center gap-2 mb-2">
-                              {job.status === "completed" && <CheckCircle className="h-5 w-5 text-green-600" />}
-                              {job.status === "failed" && <XCircle className="h-5 w-5 text-red-600" />}
+                            <div className="flex items-center gap-2 mb-1">
+                              {job.status === "completed"  && <CheckCircle className="h-5 w-5 text-green-600" />}
+                              {job.status === "failed"     && <XCircle className="h-5 w-5 text-red-600" />}
                               {job.status === "processing" && <Loader2 className="h-5 w-5 animate-spin text-blue-600" />}
-                              {job.status === "pending" && <Clock className="h-5 w-5 text-gray-600" />}
+                              {job.status === "pending"    && <Clock className="h-5 w-5 text-gray-600" />}
                               <span className="font-semibold capitalize">{job.status}</span>
+                              <Badge variant="outline" className={`text-xs ${colors.text}`}>
+                                {tpl.name}
+                              </Badge>
                             </div>
                             <p className="text-sm text-muted-foreground">
-                              {job.firmCount} firms • Created {new Date(job.createdAt).toLocaleDateString()}
+                              {job.firmCount} entries · {new Date(job.createdAt).toLocaleDateString()}
                             </p>
-                            {job.tierFilter && job.tierFilter !== "all" && (
-                              <p className="text-xs text-muted-foreground mt-1">
-                                Filter: {job.tierFilter === "tier1" ? "Tier 1 Only" : "Tiers 1-2"}
-                              </p>
+
+                            {/* Live cost counter (processing) */}
+                            {isProcessing && (job as any).totalCostUSD != null && (
+                              <div className="flex items-center gap-1 text-sm text-muted-foreground mt-1">
+                                <DollarSign className="h-3.5 w-3.5" />
+                                <span className="font-mono font-medium">${Number((job as any).totalCostUSD).toFixed(4)}</span>
+                                {(job as any).estimatedCostUSD && (
+                                  <span className="text-xs opacity-70 ml-1">
+                                    / est. ${Number((job as any).estimatedCostUSD).toFixed(2)}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+
+                            {/* Actual vs estimated cost (completed) */}
+                            {job.status === "completed" && (job as any).totalCostUSD && (
+                              <div className="text-sm text-muted-foreground mt-1">
+                                Cost: <span className="font-mono font-medium">${Number((job as any).totalCostUSD).toFixed(4)}</span>
+                                {(job as any).estimatedCostUSD && (
+                                  <span className="text-xs opacity-60 ml-1">
+                                    (est. ${Number((job as any).estimatedCostUSD).toFixed(2)})
+                                  </span>
+                                )}
+                              </div>
                             )}
                           </div>
+
                           <div className="flex gap-2">
                             {job.status === "completed" && (
                               <>
                                 <Button
                                   size="sm"
                                   variant="outline"
-                                  onClick={() => setViewResultsJobId(job.id)}
+                                  onClick={() => setViewResultsJob({ id: job.id, template: jobTemplate })}
                                 >
                                   <Table2 className="h-4 w-4 mr-2" />
                                   View Results
@@ -288,8 +340,8 @@ export default function Dashboard() {
                               </>
                             )}
                             {job.status === "failed" && (
-                              <Button 
-                                size="sm" 
+                              <Button
+                                size="sm"
                                 variant="outline"
                                 onClick={() => resumeMutation.mutate({ jobId: job.id })}
                                 disabled={resumeMutation.isPending}
@@ -305,17 +357,15 @@ export default function Dashboard() {
                           </div>
                         </div>
 
-                        {/* Progress Bar for Processing Jobs */}
                         {isProcessing && (
                           <div className="space-y-2">
                             <div className="flex items-center justify-between text-sm">
                               <span className="text-muted-foreground">
-                                Progress: {job.processedCount || 0} / {job.firmCount} firms
+                                {job.processedCount || 0} / {job.firmCount} processed
                               </span>
                               <span className="font-semibold">{progress}%</span>
                             </div>
                             <Progress value={progress} className="h-2" />
-                            {/* Multi-firm live progress chips */}
                             {job.activeFirmsJson && (() => {
                               const active: string[] = (() => { try { return JSON.parse(job.activeFirmsJson!); } catch { return []; } })();
                               return active.length > 0 ? (
@@ -327,9 +377,7 @@ export default function Dashboard() {
                                     </span>
                                   ))}
                                   {active.length > 5 && (
-                                    <span className="text-xs text-muted-foreground px-2 py-0.5">
-                                      +{active.length - 5} more
-                                    </span>
+                                    <span className="text-xs text-muted-foreground px-2 py-0.5">+{active.length - 5} more</span>
                                   )}
                                 </div>
                               ) : null;
@@ -346,181 +394,206 @@ export default function Dashboard() {
                 })}
               </div>
             ) : (
-              <div className="text-center py-8 text-muted-foreground">
-                <FileSpreadsheet className="h-12 w-12 mx-auto mb-4 opacity-50" />
-                <p>No enrichment jobs yet. Upload a file to get started!</p>
+              /* Empty state onboarding */
+              <div className="py-6">
+                <h3 className="font-semibold text-lg mb-6 text-center">How it works</h3>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+                  <OnboardingStep
+                    step={1}
+                    title="Prepare your file"
+                    description="Create a spreadsheet with 3 columns: Name, Website URL, and an optional Description for each entry."
+                  />
+                  <OnboardingStep
+                    step={2}
+                    title="Upload & choose a template"
+                    description="Upload your file above, then pick an industry template that matches what you're researching."
+                  />
+                  <OnboardingStep
+                    step={3}
+                    title="Download results"
+                    description="The scraper visits each site and extracts structured data. Download the Excel when done."
+                  />
+                </div>
+                <div className="bg-muted/40 rounded-lg p-4 text-sm text-muted-foreground">
+                  <p className="font-medium text-foreground mb-1">Example file format:</p>
+                  <table className="w-full text-xs border-collapse">
+                    <thead>
+                      <tr className="border-b">
+                        <th className="text-left py-1 pr-4 font-medium">Name</th>
+                        <th className="text-left py-1 pr-4 font-medium">Website URL</th>
+                        <th className="text-left py-1 font-medium">Description (optional)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr className="border-b border-muted">
+                        <td className="py-1 pr-4">Acme Corp</td>
+                        <td className="py-1 pr-4">https://acme.com</td>
+                        <td className="py-1 text-muted-foreground">B2B SaaS company</td>
+                      </tr>
+                      <tr>
+                        <td className="py-1 pr-4">Beta Inc</td>
+                        <td className="py-1 pr-4">https://beta.io</td>
+                        <td className="py-1 text-muted-foreground"></td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
               </div>
             )}
           </CardContent>
         </Card>
       </main>
 
-      {/* In-App Results Sheet */}
-      {viewResultsJobId !== null && (
+      {/* Results Sheet */}
+      {viewResultsJob !== null && (
         <ResultsSheet
-          jobId={viewResultsJobId}
-          open={viewResultsJobId !== null}
-          onClose={() => setViewResultsJobId(null)}
+          jobId={viewResultsJob.id}
+          open={viewResultsJob !== null}
+          onClose={() => setViewResultsJob(null)}
+          template={viewResultsJob.template}
         />
       )}
 
-      {/* Preview Dialog */}
+      {/* Confirmation Dialog */}
       <Dialog open={showPreview} onOpenChange={setShowPreview}>
-        <DialogContent className="max-w-3xl max-h-[80vh] overflow-y-auto">
+        <DialogContent className="max-w-3xl max-h-[85vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>Confirm Enrichment</DialogTitle>
+            <DialogTitle>Configure Extraction</DialogTitle>
             <DialogDescription>
-              Review the details and select team member filtering options before starting enrichment.
+              Choose a template and review the details before starting.
             </DialogDescription>
           </DialogHeader>
 
           {previewData && (
             <div className="space-y-6">
-              {/* Summary */}
-              <div className="grid grid-cols-2 gap-4">
+              {/* Stats row */}
+              <div className="grid grid-cols-3 gap-4">
                 <div>
-                  <p className="text-sm font-medium text-muted-foreground">Total Firms</p>
+                  <p className="text-sm font-medium text-muted-foreground">Entries</p>
                   <p className="text-2xl font-bold">{previewData.firmCount}</p>
                 </div>
                 <div>
                   <p className="text-sm font-medium text-muted-foreground">Estimated Cost</p>
-                  <p className="text-2xl font-bold">${previewData.costEstimate.totalCost.toFixed(2)}</p>
-                  <p className="text-xs text-muted-foreground">
-                    ${previewData.costEstimate.perFirmCost.toFixed(4)} per firm
-                  </p>
+                  {previewData.costEstimate.totalCostLow != null && previewData.costEstimate.totalCostHigh != null ? (
+                    <>
+                      <p className="text-xl font-bold text-green-700">
+                        ${previewData.costEstimate.totalCostLow.toFixed(2)} – ${previewData.costEstimate.totalCostHigh.toFixed(2)}
+                      </p>
+                      <p className="text-xs text-muted-foreground">${previewData.costEstimate.perFirmCost.toFixed(4)}/site</p>
+                    </>
+                  ) : (
+                    <p className="text-2xl font-bold">${previewData.costEstimate.totalCost.toFixed(2)}</p>
+                  )}
                 </div>
                 <div>
-                  <p className="text-sm font-medium text-muted-foreground">Estimated Duration</p>
+                  <p className="text-sm font-medium text-muted-foreground">Est. Duration</p>
                   <p className="text-2xl font-bold">{previewData.costEstimate.estimatedDuration}</p>
                 </div>
               </div>
 
-              {/* Tier Filter */}
-              <div className="space-y-3">
-                <Label className="text-base font-semibold">Team Member Filter</Label>
-                <RadioGroup value={tierFilter} onValueChange={(value: any) => setTierFilter(value)}>
-                  <div className="flex items-start space-x-3 space-y-0">
-                    <RadioGroupItem value="tier1" id="tier1" />
-                    <Label htmlFor="tier1" className="font-normal cursor-pointer">
-                      <div>
-                        <p className="font-medium">Tier 1 Only (Fastest)</p>
-                        <p className="text-sm text-muted-foreground">
-                          {getTierFilterDescription("tier1")}
-                        </p>
-                      </div>
-                    </Label>
-                  </div>
-                  <div className="flex items-start space-x-3 space-y-0">
-                    <RadioGroupItem value="tier1-2" id="tier1-2" />
-                    <Label htmlFor="tier1-2" className="font-normal cursor-pointer">
-                      <div>
-                        <p className="font-medium">Tiers 1-2 (Recommended)</p>
-                        <p className="text-sm text-muted-foreground">
-                          {getTierFilterDescription("tier1-2")}
-                        </p>
-                      </div>
-                    </Label>
-                  </div>
-                  <div className="flex items-start space-x-3 space-y-0">
-                    <RadioGroupItem value="all" id="all" />
-                    <Label htmlFor="all" className="font-normal cursor-pointer">
-                      <div>
-                        <p className="font-medium">All Team Members (Most Comprehensive)</p>
-                        <p className="text-sm text-muted-foreground">
-                          {getTierFilterDescription("all")}
-                        </p>
-                      </div>
-                    </Label>
-                  </div>
-                </RadioGroup>
+              {/* Template picker */}
+              <div>
+                <Label className="text-base font-semibold mb-3 block">Select Template</Label>
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+                  {ALL_TEMPLATES.map((tpl) => {
+                    const isSelected = selectedTemplate === tpl.id;
+                    const colors = TEMPLATE_COLORS[tpl.id] ?? TEMPLATE_COLORS.vc;
+                    return (
+                      <button
+                        key={tpl.id}
+                        onClick={() => setSelectedTemplate(tpl.id)}
+                        className={`flex flex-col items-center gap-1.5 p-3 rounded-lg border-2 text-center transition-all ${
+                          isSelected
+                            ? `${colors.bg} ${colors.border} ${colors.text}`
+                            : "border-border hover:border-muted-foreground/40 hover:bg-muted/30"
+                        }`}
+                      >
+                        <span className={isSelected ? colors.text : "text-muted-foreground"}>
+                          {TEMPLATE_ICONS[tpl.id]}
+                        </span>
+                        <span className="text-xs font-medium leading-tight">{tpl.name}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="text-xs text-muted-foreground mt-2">
+                  {getTemplate(selectedTemplate).description}
+                </p>
               </div>
 
-              {/* Output Format Preview */}
+              {/* What will be extracted */}
               <div>
-                <h3 className="font-semibold mb-2">Output Format</h3>
-                <p className="text-sm text-muted-foreground mb-3">Your Excel file will contain 4 sheets with the following fields:</p>
-                <Accordion type="single" collapsible defaultValue="firms">
-                  <AccordionItem value="firms">
-                    <AccordionTrigger className="text-sm font-medium">
-                      VC Firms <Badge variant="secondary" className="ml-2 text-xs">10 fields</Badge>
-                    </AccordionTrigger>
-                    <AccordionContent>
-                      <div className="flex flex-wrap gap-1 pt-1">
-                        {["Company Name","Website URL","Investor Type","Investment Stages","Investment Niches","AUM","Geographic Focus","Sector Focus","Founded Year","Website Verified"].map(f => (
-                          <Badge key={f} variant="outline" className="text-xs">{f}</Badge>
-                        ))}
-                      </div>
-                    </AccordionContent>
-                  </AccordionItem>
-                  <AccordionItem value="team">
-                    <AccordionTrigger className="text-sm font-medium">
-                      Team Members <Badge variant="secondary" className="ml-2 text-xs">11 fields</Badge>
-                    </AccordionTrigger>
-                    <AccordionContent>
-                      <div className="flex flex-wrap gap-1 pt-1">
-                        {["Name","Title","Decision-Maker Tier","LinkedIn URL","Email","Investment Focus","Stage Preference","Check Size Range","Geographic Focus","Years Experience","Notable Investments"].map(f => (
-                          <Badge key={f} variant="outline" className="text-xs">{f}</Badge>
-                        ))}
-                      </div>
-                    </AccordionContent>
-                  </AccordionItem>
-                  <AccordionItem value="portfolio">
-                    <AccordionTrigger className="text-sm font-medium">
-                      Portfolio Companies <Badge variant="secondary" className="ml-2 text-xs">6 fields</Badge>
-                    </AccordionTrigger>
-                    <AccordionContent>
-                      <div className="flex flex-wrap gap-1 pt-1">
-                        {["VC Firm","Company Name","Investment Date","Website URL","Sector / Niche","Recency Score"].map(f => (
-                          <Badge key={f} variant="outline" className="text-xs">{f}</Badge>
-                        ))}
-                      </div>
-                    </AccordionContent>
-                  </AccordionItem>
-                  <AccordionItem value="thesis">
-                    <AccordionTrigger className="text-sm font-medium">
-                      Investment Thesis <Badge variant="secondary" className="ml-2 text-xs">7 fields</Badge>
-                    </AccordionTrigger>
-                    <AccordionContent>
-                      <div className="flex flex-wrap gap-1 pt-1">
-                        {["VC Firm","Primary Focus Areas","Emerging Interests","Preferred Stages","Avg Check Size","Team Size","Portfolio Count"].map(f => (
-                          <Badge key={f} variant="outline" className="text-xs">{f}</Badge>
-                        ))}
-                      </div>
-                    </AccordionContent>
-                  </AccordionItem>
+                <Label className="text-base font-semibold mb-3 block">What will be extracted</Label>
+                <Accordion type="single" collapsible defaultValue={getTemplate(selectedTemplate).sheets[0]?.key}>
+                  {getTemplate(selectedTemplate).sheets.map((sheet) => (
+                    <AccordionItem key={sheet.key} value={sheet.key}>
+                      <AccordionTrigger className="text-sm font-medium">
+                        {sheet.label}
+                        <Badge variant="secondary" className="ml-2 text-xs">{sheet.fields.length} fields</Badge>
+                      </AccordionTrigger>
+                      <AccordionContent>
+                        <div className="flex flex-wrap gap-1 pt-1">
+                          {sheet.fields.map((f) => (
+                            <Badge key={f.key} variant="outline" className="text-xs">{f.label}</Badge>
+                          ))}
+                        </div>
+                      </AccordionContent>
+                    </AccordionItem>
+                  ))}
                 </Accordion>
               </div>
 
-              {/* Preview */}
-              <div>
-                <h3 className="font-semibold mb-3">Preview (First 5 Firms)</h3>
-                <div className="space-y-2">
-                  {previewData.preview.map((firm, index) => (
-                    <Card key={index}>
-                      <CardContent className="pt-4">
-                        <p className="font-medium">{firm.companyName}</p>
-                        <p className="text-sm text-muted-foreground">{firm.websiteUrl}</p>
-                        <p className="text-xs text-muted-foreground mt-1">{firm.descriptionPreview}</p>
-                      </CardContent>
-                    </Card>
-                  ))}
+              {/* Team Coverage — VC template only */}
+              {selectedTemplate === "vc" && (
+                <div className="space-y-3">
+                  <Label className="text-base font-semibold">Team Coverage</Label>
+                  <RadioGroup value={tierFilter} onValueChange={(v: any) => setTierFilter(v)}>
+                    {[
+                      { value: "tier1",   label: "Decision Makers Only", desc: "Managing Partners, GPs, Investment Partners" },
+                      { value: "tier1-2", label: "Decision Makers + Influencers (Recommended)", desc: "Partners, Principals, Senior Associates" },
+                      { value: "all",     label: "Full Team", desc: "All investment-facing team members" },
+                    ].map((opt) => (
+                      <div key={opt.value} className="flex items-start space-x-3 space-y-0">
+                        <RadioGroupItem value={opt.value} id={opt.value} />
+                        <Label htmlFor={opt.value} className="font-normal cursor-pointer">
+                          <p className="font-medium">{opt.label}</p>
+                          <p className="text-sm text-muted-foreground">{opt.desc}</p>
+                        </Label>
+                      </div>
+                    ))}
+                  </RadioGroup>
                 </div>
-              </div>
+              )}
+
+              {/* Preview */}
+              {previewData.preview.length > 0 && (
+                <div>
+                  <Label className="text-base font-semibold mb-3 block">Preview (first {previewData.preview.length} rows)</Label>
+                  <div className="space-y-2">
+                    {previewData.preview.map((row, i) => (
+                      <Card key={i}>
+                        <CardContent className="pt-4">
+                          <p className="font-medium">{row.companyName}</p>
+                          <p className="text-sm text-muted-foreground">{row.websiteUrl}</p>
+                          {row.descriptionPreview && (
+                            <p className="text-xs text-muted-foreground mt-1">{row.descriptionPreview}</p>
+                          )}
+                        </CardContent>
+                      </Card>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
           <DialogFooter>
-            <Button variant="outline" onClick={() => setShowPreview(false)}>
-              Cancel
-            </Button>
+            <Button variant="outline" onClick={() => setShowPreview(false)}>Cancel</Button>
             <Button onClick={handleConfirmEnrichment} disabled={confirmMutation.isPending}>
               {confirmMutation.isPending ? (
-                <>
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  Starting...
-                </>
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Starting...</>
               ) : (
-                "Start Enrichment"
+                "Start Extraction"
               )}
             </Button>
           </DialogFooter>
@@ -530,34 +603,43 @@ export default function Dashboard() {
   );
 }
 
-// Download Results Button Component with On-Demand Generation
+// ---------------------------------------------------------------------------
+// Sub-components
+// ---------------------------------------------------------------------------
+
+function OnboardingStep({ step, title, description }: { step: number; title: string; description: string }) {
+  return (
+    <div className="flex flex-col items-center text-center p-4 bg-muted/30 rounded-lg">
+      <div className="w-8 h-8 rounded-full bg-primary text-primary-foreground flex items-center justify-center font-bold text-sm mb-3">
+        {step}
+      </div>
+      <h4 className="font-semibold text-sm mb-1">{title}</h4>
+      <p className="text-xs text-muted-foreground">{description}</p>
+    </div>
+  );
+}
+
 function DownloadResultsButton({ jobId, outputFileUrl }: { jobId: number; outputFileUrl: string | null }) {
   const [isGenerating, setIsGenerating] = useState(false);
   const generateMutation = trpc.enrichment.generateResults.useMutation({
     onSuccess: (data) => {
-      toast.success(`Results ready! ${data.firmCount} firms, ${data.teamMemberCount} team members`);
-      
-      // Convert base64 to blob and trigger download
+      toast.success(`Results ready! ${data.firmCount} entries, ${data.teamMemberCount} contacts`);
       const byteCharacters = atob(data.fileData);
       const byteNumbers = new Array(byteCharacters.length);
       for (let i = 0; i < byteCharacters.length; i++) {
         byteNumbers[i] = byteCharacters.charCodeAt(i);
       }
-      const byteArray = new Uint8Array(byteNumbers);
-      const blob = new Blob([byteArray], { 
-        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
+      const blob = new Blob([new Uint8Array(byteNumbers)], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       });
-      
-      // Create download link
       const url = window.URL.createObjectURL(blob);
-      const link = document.createElement('a');
+      const link = document.createElement("a");
       link.href = url;
       link.download = data.fileName;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       window.URL.revokeObjectURL(url);
-      
       setIsGenerating(false);
     },
     onError: (error) => {
@@ -566,28 +648,16 @@ function DownloadResultsButton({ jobId, outputFileUrl }: { jobId: number; output
     },
   });
 
-  const handleDownload = () => {
-    // Always generate file on-demand from database
-    setIsGenerating(true);
-    generateMutation.mutate({ jobId });
-  };
-
   return (
-    <Button 
-      size="sm" 
-      onClick={handleDownload}
+    <Button
+      size="sm"
+      onClick={() => { setIsGenerating(true); generateMutation.mutate({ jobId }); }}
       disabled={isGenerating || generateMutation.isPending}
     >
       {isGenerating || generateMutation.isPending ? (
-        <>
-          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-          Generating...
-        </>
+        <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Generating...</>
       ) : (
-        <>
-          <Download className="h-4 w-4 mr-2" />
-          Download Results
-        </>
+        <><Download className="h-4 w-4 mr-2" />Download Results</>
       )}
     </Button>
   );

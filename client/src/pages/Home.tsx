@@ -2,8 +2,22 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { getLoginUrl } from "@/const";
-import { Upload, Zap, CheckCircle, TrendingUp } from "lucide-react";
+import {
+  Bot, Upload, Zap, CheckCircle, Globe, Cpu, FileSpreadsheet,
+  TrendingUp, Building2, Users, HeartPulse, ShoppingCart, Home as HomeIcon, MapPin,
+  AlertTriangle,
+} from "lucide-react";
 import { Link } from "wouter";
+
+const INDUSTRIES = [
+  { id: "vc",         icon: TrendingUp,  label: "VC & Investors",       color: "bg-violet-100 text-violet-700" },
+  { id: "b2b",        icon: Building2,   label: "B2B Companies",        color: "bg-blue-100 text-blue-700" },
+  { id: "people",     icon: Users,       label: "People & Profiles",    color: "bg-amber-100 text-amber-700" },
+  { id: "healthcare", icon: HeartPulse,  label: "Healthcare",           color: "bg-rose-100 text-rose-700" },
+  { id: "ecommerce",  icon: ShoppingCart,label: "E-Commerce",           color: "bg-orange-100 text-orange-700" },
+  { id: "realestate", icon: HomeIcon,    label: "Real Estate",          color: "bg-teal-100 text-teal-700" },
+  { id: "local",      icon: MapPin,      label: "Local Businesses",     color: "bg-green-100 text-green-700" },
+];
 
 export default function Home() {
   const { user, loading } = useAuth();
@@ -11,19 +25,19 @@ export default function Home() {
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary"></div>
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary" />
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-purple-50">
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-blue-50">
       {/* Header */}
       <header className="border-b bg-white/80 backdrop-blur-sm sticky top-0 z-50">
         <div className="container mx-auto px-4 py-4 flex justify-between items-center">
           <div className="flex items-center gap-2">
-            <TrendingUp className="h-8 w-8 text-primary" />
-            <h1 className="text-2xl font-bold">VC Enrichment</h1>
+            <Bot className="h-8 w-8 text-primary" />
+            <h1 className="text-2xl font-bold">Smart AI Data Scraper</h1>
           </div>
           <div>
             {user ? (
@@ -39,20 +53,21 @@ export default function Home() {
         </div>
       </header>
 
-      {/* Hero Section */}
+      {/* Hero */}
       <section className="container mx-auto px-4 py-20">
-        <div className="max-w-4xl mx-auto text-center">
-          <h2 className="text-5xl font-bold mb-6 bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
-            AI-Powered VC Prospect Research
+        <div className="max-w-3xl mx-auto text-center">
+          <h2 className="text-5xl font-bold mb-6 bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent leading-tight">
+            Turn any website into clean, structured data
           </h2>
-          <p className="text-xl text-gray-600 mb-8">
-            Transform your Excel file of VC firms into a comprehensive database with investment niches, team member LinkedIn profiles, and portfolio company insights—all in minutes.
+          <p className="text-xl text-muted-foreground mb-10">
+            Upload a list of URLs, pick a template, and let the AI scrape and organize the data for you.
+            No coding. No APIs. Just an Excel file of results.
           </p>
           {user ? (
             <Link href="/dashboard">
               <Button size="lg" className="text-lg px-8 py-6">
                 <Upload className="mr-2 h-5 w-5" />
-                Start Enriching Data
+                Start Scraping
               </Button>
             </Link>
           ) : (
@@ -66,108 +81,132 @@ export default function Home() {
         </div>
       </section>
 
-      {/* Features */}
-      <section className="container mx-auto px-4 py-16">
-        <div className="grid md:grid-cols-3 gap-8 max-w-6xl mx-auto">
-          <Card>
-            <CardHeader>
-              <Zap className="h-12 w-12 text-blue-600 mb-4" />
-              <CardTitle>Automated Enrichment</CardTitle>
-              <CardDescription>
-                Upload your Excel file and let AI do the heavy lifting. No command line, no technical skills required.
-              </CardDescription>
-            </CardHeader>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CheckCircle className="h-12 w-12 text-green-600 mb-4" />
-              <CardTitle>Verified Data</CardTitle>
-              <CardDescription>
-                Every data point includes confidence scores and source URLs so you can verify accuracy before outreach.
-              </CardDescription>
-            </CardHeader>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <TrendingUp className="h-12 w-12 text-purple-600 mb-4" />
-              <CardTitle>Comprehensive Insights</CardTitle>
-              <CardDescription>
-                Get investment niches, team member details with LinkedIn URLs, and recent portfolio companies—all in one place.
-              </CardDescription>
-            </CardHeader>
-          </Card>
+      {/* Industry tiles */}
+      <section className="container mx-auto px-4 pb-16">
+        <p className="text-center text-sm font-medium text-muted-foreground uppercase tracking-widest mb-6">
+          Works for any industry
+        </p>
+        <div className="flex flex-wrap justify-center gap-3 max-w-3xl mx-auto">
+          {INDUSTRIES.map(({ id, icon: Icon, label, color }) => (
+            <div
+              key={id}
+              className={`flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium ${color}`}
+            >
+              <Icon className="h-4 w-4" />
+              {label}
+            </div>
+          ))}
         </div>
       </section>
 
-      {/* How It Works */}
-      <section className="container mx-auto px-4 py-16 bg-white/50 rounded-3xl my-16">
-        <div className="max-w-4xl mx-auto">
-          <h3 className="text-3xl font-bold text-center mb-12">How It Works</h3>
-          <div className="space-y-8">
-            <div className="flex gap-6 items-start">
-              <div className="flex-shrink-0 w-12 h-12 rounded-full bg-blue-600 text-white flex items-center justify-center font-bold text-lg">
-                1
+      {/* How it works */}
+      <section className="bg-white/60 py-20">
+        <div className="container mx-auto px-4 max-w-4xl">
+          <h3 className="text-3xl font-bold text-center mb-12">How it works</h3>
+          <div className="grid md:grid-cols-3 gap-8">
+            {[
+              {
+                step: 1,
+                title: "Upload your URLs",
+                desc: "Create a spreadsheet with Name, Website URL, and an optional Description column. Upload it to the dashboard.",
+              },
+              {
+                step: 2,
+                title: "Pick a template",
+                desc: "Choose from 7 pre-built templates (VC, B2B, Healthcare, and more) that define which fields to extract.",
+              },
+              {
+                step: 3,
+                title: "Download results",
+                desc: "The scraper visits each site and returns an organized Excel file — org profiles, contacts, and more.",
+              },
+            ].map(({ step, title, desc }) => (
+              <div key={step} className="flex flex-col items-center text-center">
+                <div className="w-12 h-12 rounded-full bg-primary text-primary-foreground flex items-center justify-center font-bold text-lg mb-4">
+                  {step}
+                </div>
+                <h4 className="font-semibold text-lg mb-2">{title}</h4>
+                <p className="text-muted-foreground text-sm">{desc}</p>
               </div>
-              <div>
-                <h4 className="text-xl font-semibold mb-2">Upload Your Excel File</h4>
-                <p className="text-gray-600">
-                  Prepare an Excel file with three columns: Company Name, Company Website URL, and LinkedIn Description.
-                </p>
-              </div>
-            </div>
+            ))}
+          </div>
+        </div>
+      </section>
 
-            <div className="flex gap-6 items-start">
-              <div className="flex-shrink-0 w-12 h-12 rounded-full bg-purple-600 text-white flex items-center justify-center font-bold text-lg">
-                2
-              </div>
-              <div>
-                <h4 className="text-xl font-semibold mb-2">AI Processes Your Data</h4>
-                <p className="text-gray-600">
-                  Our AI visits each VC firm's website, extracts investment niches, team members, and portfolio companies automatically.
-                </p>
-              </div>
-            </div>
+      {/* Features */}
+      <section className="container mx-auto px-4 py-20">
+        <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6 max-w-5xl mx-auto">
+          {[
+            {
+              icon: Globe,
+              color: "text-blue-600",
+              title: "JS-rendered sites",
+              desc: "Uses a real browser to handle dynamic content, SPAs, and lazy-loaded pages.",
+            },
+            {
+              icon: Cpu,
+              color: "text-indigo-600",
+              title: "Parallel processing",
+              desc: "Up to 50 concurrent workers — 1,000 sites in roughly 10 minutes.",
+            },
+            {
+              icon: Zap,
+              color: "text-amber-600",
+              title: "AI extraction",
+              desc: "LLM reads each page and fills in structured fields — no regex, no fragile selectors.",
+            },
+            {
+              icon: FileSpreadsheet,
+              color: "text-green-600",
+              title: "Flexible templates",
+              desc: "Pre-built field sets for VCs, B2B, healthcare, e-commerce, and more.",
+            },
+          ].map(({ icon: Icon, color, title, desc }) => (
+            <Card key={title}>
+              <CardHeader>
+                <Icon className={`h-10 w-10 mb-2 ${color}`} />
+                <CardTitle className="text-base">{title}</CardTitle>
+                <CardDescription>{desc}</CardDescription>
+              </CardHeader>
+            </Card>
+          ))}
+        </div>
+      </section>
 
-            <div className="flex gap-6 items-start">
-              <div className="flex-shrink-0 w-12 h-12 rounded-full bg-green-600 text-white flex items-center justify-center font-bold text-lg">
-                3
-              </div>
-              <div>
-                <h4 className="text-xl font-semibold mb-2">Download Enriched Results</h4>
-                <p className="text-gray-600">
-                  Get a comprehensive Excel file with three sheets: VC Firms, Team Members, and Portfolio Companies—ready for your outreach campaigns.
-                </p>
-              </div>
-            </div>
+      {/* Limitations banner */}
+      <section className="container mx-auto px-4 pb-16 max-w-3xl">
+        <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-lg p-4 text-sm text-amber-800">
+          <AlertTriangle className="h-5 w-5 shrink-0 mt-0.5" />
+          <div>
+            <p className="font-semibold mb-1">Honest limitations</p>
+            <p>
+              Social media profiles (LinkedIn, Twitter/X, Instagram) and login-protected pages are not supported.
+              Sites with aggressive bot-blocking may return partial data. Results are best on public-facing
+              company and directory websites.
+            </p>
           </div>
         </div>
       </section>
 
       {/* CTA */}
       <section className="container mx-auto px-4 py-20 text-center">
-        <h3 className="text-3xl font-bold mb-6">Ready to Supercharge Your VC Research?</h3>
-        <p className="text-xl text-gray-600 mb-8">
-          Join professionals who are saving hours of manual research every week.
-        </p>
+        <h3 className="text-3xl font-bold mb-4">Ready to scrape your first list?</h3>
+        <p className="text-muted-foreground mb-8">No setup. No code. Just upload and go.</p>
         {user ? (
           <Link href="/dashboard">
-            <Button size="lg" className="text-lg px-8 py-6">
-              Go to Dashboard
-            </Button>
+            <Button size="lg" className="text-lg px-8 py-6">Go to Dashboard</Button>
           </Link>
         ) : (
           <Button size="lg" className="text-lg px-8 py-6" asChild>
-            <a href={getLoginUrl()}>Sign Up Now</a>
+            <a href={getLoginUrl()}>Get Started Free</a>
           </Button>
         )}
       </section>
 
       {/* Footer */}
       <footer className="border-t bg-white/80 backdrop-blur-sm py-8">
-        <div className="container mx-auto px-4 text-center text-gray-600">
-          <p>&copy; 2025 VC Enrichment. Powered by AI.</p>
+        <div className="container mx-auto px-4 text-center text-muted-foreground text-sm">
+          <p>Smart AI Data Scraper · Powered by AI</p>
         </div>
       </footer>
     </div>

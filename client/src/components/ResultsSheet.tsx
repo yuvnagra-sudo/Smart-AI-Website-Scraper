@@ -7,23 +7,31 @@ import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Loader2, ChevronLeft, ChevronRight, Search } from "lucide-react";
 import { trpc } from "@/lib/trpc";
+import { getTemplate, type TemplateField } from "@/lib/templates";
 
-type Tab = "firms" | "team" | "portfolio";
+// Sheet keys that map to the backend query tab type
+type QueryTab = "firms" | "team" | "portfolio";
 
 interface Props {
   jobId: number;
   open: boolean;
   onClose: () => void;
+  template?: string;
 }
 
-export default function ResultsSheet({ jobId, open, onClose }: Props) {
-  const [tab, setTab] = useState<Tab>("firms");
+export default function ResultsSheet({ jobId, open, onClose, template = "vc" }: Props) {
+  const tpl = getTemplate(template);
+  // Default to first sheet that maps to a valid query tab
+  const validSheets = tpl.sheets.filter(s => ["firms", "team", "portfolio"].includes(s.key));
+  const [activeSheetKey, setActiveSheetKey] = useState<string>(validSheets[0]?.key ?? "firms");
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [searchInput, setSearchInput] = useState("");
 
+  const activeSheet = validSheets.find(s => s.key === activeSheetKey) ?? validSheets[0];
+
   const { data, isLoading } = trpc.enrichment.getJobResults.useQuery(
-    { jobId, tab, page, search: search || undefined },
+    { jobId, tab: activeSheetKey as QueryTab, page, search: search || undefined },
     { enabled: open, keepPreviousData: true }
   );
 
@@ -32,12 +40,16 @@ export default function ResultsSheet({ jobId, open, onClose }: Props) {
     setPage(1);
   };
 
-  const handleTabChange = (newTab: string) => {
-    setTab(newTab as Tab);
+  const handleTabChange = (newKey: string) => {
+    setActiveSheetKey(newKey);
     setPage(1);
     setSearch("");
     setSearchInput("");
   };
+
+  const searchPlaceholder = activeSheet
+    ? `Search ${activeSheet.label.toLowerCase()}…`
+    : "Search…";
 
   return (
     <Sheet open={open} onOpenChange={(o) => !o && onClose()}>
@@ -46,12 +58,14 @@ export default function ResultsSheet({ jobId, open, onClose }: Props) {
           <SheetTitle>Results — Job #{jobId}</SheetTitle>
         </SheetHeader>
 
-        <Tabs value={tab} onValueChange={handleTabChange} className="flex flex-col flex-1 overflow-hidden">
+        <Tabs value={activeSheetKey} onValueChange={handleTabChange} className="flex flex-col flex-1 overflow-hidden">
           <div className="flex items-center justify-between px-6 py-3 border-b gap-4">
             <TabsList>
-              <TabsTrigger value="firms">VC Firms</TabsTrigger>
-              <TabsTrigger value="team">Team Members</TabsTrigger>
-              <TabsTrigger value="portfolio">Portfolio</TabsTrigger>
+              {validSheets.map(sheet => (
+                <TabsTrigger key={sheet.key} value={sheet.key}>
+                  {sheet.label}
+                </TabsTrigger>
+              ))}
             </TabsList>
 
             <div className="flex items-center gap-2 flex-1 max-w-xs">
@@ -59,7 +73,7 @@ export default function ResultsSheet({ jobId, open, onClose }: Props) {
                 <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
                 <Input
                   className="pl-8"
-                  placeholder={tab === "firms" ? "Search firms…" : tab === "team" ? "Search members…" : "Search companies…"}
+                  placeholder={searchPlaceholder}
                   value={searchInput}
                   onChange={(e) => setSearchInput(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleSearch()}
@@ -85,17 +99,11 @@ export default function ResultsSheet({ jobId, open, onClose }: Props) {
                 No results found{search ? ` for "${search}"` : ""}.
               </div>
             ) : (
-              <>
-                <TabsContent value="firms" className="mt-0">
-                  <FirmsTable rows={data.rows as any} />
+              validSheets.map(sheet => (
+                <TabsContent key={sheet.key} value={sheet.key} className="mt-0">
+                  <DynamicTable rows={data.rows as any[]} fields={sheet.fields} />
                 </TabsContent>
-                <TabsContent value="team" className="mt-0">
-                  <TeamTable rows={data.rows as any} />
-                </TabsContent>
-                <TabsContent value="portfolio" className="mt-0">
-                  <PortfolioTable rows={data.rows as any} />
-                </TabsContent>
-              </>
+              ))
             )}
           </div>
 
@@ -129,40 +137,31 @@ export default function ResultsSheet({ jobId, open, onClose }: Props) {
   );
 }
 
-function FirmsTable({ rows }: { rows: Array<Record<string, any>> }) {
+// ---------------------------------------------------------------------------
+// Generic table driven by template field definitions
+// ---------------------------------------------------------------------------
+
+const URL_FIELDS    = new Set(["websiteUrl", "linkedinUrl", "dataSourceUrl", "investorTypeSourceUrl", "investmentStagesSourceUrl", "nichesSourceUrl"]);
+const BADGE_FIELDS  = new Set(["websiteVerified", "decisionMakerTier", "recencyCategory"]);
+
+function DynamicTable({ rows, fields }: { rows: Array<Record<string, any>>; fields: TemplateField[] }) {
   return (
     <Table>
       <TableHeader>
         <TableRow>
-          <TableHead>Company</TableHead>
-          <TableHead>Website</TableHead>
-          <TableHead>Investor Type</TableHead>
-          <TableHead>Stages</TableHead>
-          <TableHead>Niches</TableHead>
-          <TableHead>Verified</TableHead>
+          {fields.map(f => (
+            <TableHead key={f.key}>{f.label}</TableHead>
+          ))}
         </TableRow>
       </TableHeader>
       <TableBody>
-        {rows.map((row) => (
-          <TableRow key={row.id}>
-            <TableCell className="font-medium">{row.companyName}</TableCell>
-            <TableCell className="max-w-[160px] truncate">
-              {row.websiteUrl ? (
-                <a href={row.websiteUrl} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline text-sm">
-                  {row.websiteUrl}
-                </a>
-              ) : "—"}
-            </TableCell>
-            <TableCell className="text-sm">{row.investorType || "—"}</TableCell>
-            <TableCell className="text-sm max-w-[140px] truncate">{row.investmentStages || "—"}</TableCell>
-            <TableCell className="text-sm max-w-[140px] truncate">{row.investmentNiches || "—"}</TableCell>
-            <TableCell>
-              {row.websiteVerified === "Yes" ? (
-                <Badge variant="secondary" className="bg-green-100 text-green-700 text-xs">Verified</Badge>
-              ) : (
-                <Badge variant="outline" className="text-xs">Unverified</Badge>
-              )}
-            </TableCell>
+        {rows.map((row, i) => (
+          <TableRow key={row.id ?? i}>
+            {fields.map(f => (
+              <TableCell key={f.key} className="text-sm max-w-[180px] truncate">
+                <CellValue fieldKey={f.key} value={row[f.key]} />
+              </TableCell>
+            ))}
           </TableRow>
         ))}
       </TableBody>
@@ -170,98 +169,32 @@ function FirmsTable({ rows }: { rows: Array<Record<string, any>> }) {
   );
 }
 
-function TeamTable({ rows }: { rows: Array<Record<string, any>> }) {
-  return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>Name</TableHead>
-          <TableHead>Firm</TableHead>
-          <TableHead>Title</TableHead>
-          <TableHead>Tier</TableHead>
-          <TableHead>Email</TableHead>
-          <TableHead>LinkedIn</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {rows.map((row) => (
-          <TableRow key={row.id}>
-            <TableCell className="font-medium">{row.name}</TableCell>
-            <TableCell className="text-sm text-muted-foreground">{row.vcFirm}</TableCell>
-            <TableCell className="text-sm max-w-[160px] truncate">{row.title || "—"}</TableCell>
-            <TableCell>
-              {row.decisionMakerTier && (
-                <Badge
-                  variant="secondary"
-                  className={`text-xs ${
-                    row.decisionMakerTier === "Tier 1" ? "bg-purple-100 text-purple-700" :
-                    row.decisionMakerTier === "Tier 2" ? "bg-blue-100 text-blue-700" :
-                    "bg-gray-100 text-gray-600"
-                  }`}
-                >
-                  {row.decisionMakerTier}
-                </Badge>
-              )}
-            </TableCell>
-            <TableCell className="text-sm">{row.email || "—"}</TableCell>
-            <TableCell>
-              {row.linkedinUrl ? (
-                <a href={row.linkedinUrl} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline text-sm">
-                  LinkedIn
-                </a>
-              ) : "—"}
-            </TableCell>
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
-  );
-}
+function CellValue({ fieldKey, value }: { fieldKey: string; value: any }) {
+  if (value == null || value === "") return <span className="text-muted-foreground">—</span>;
 
-function PortfolioTable({ rows }: { rows: Array<Record<string, any>> }) {
-  return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>Portfolio Company</TableHead>
-          <TableHead>VC Firm</TableHead>
-          <TableHead>Investment Date</TableHead>
-          <TableHead>Sector / Niche</TableHead>
-          <TableHead>Recency</TableHead>
-          <TableHead>Website</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {rows.map((row) => (
-          <TableRow key={row.id}>
-            <TableCell className="font-medium">{row.portfolioCompany}</TableCell>
-            <TableCell className="text-sm text-muted-foreground">{row.vcFirm}</TableCell>
-            <TableCell className="text-sm">{row.investmentDate || "—"}</TableCell>
-            <TableCell className="text-sm max-w-[140px] truncate">{row.investmentNiche || "—"}</TableCell>
-            <TableCell>
-              {row.recencyCategory ? (
-                <Badge
-                  variant="secondary"
-                  className={`text-xs ${
-                    row.recencyCategory === "Recent" ? "bg-green-100 text-green-700" :
-                    row.recencyCategory === "Moderate" ? "bg-yellow-100 text-yellow-700" :
-                    "bg-gray-100 text-gray-600"
-                  }`}
-                >
-                  {row.recencyCategory}
-                </Badge>
-              ) : "—"}
-            </TableCell>
-            <TableCell>
-              {row.websiteUrl ? (
-                <a href={row.websiteUrl} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline text-sm">
-                  Visit
-                </a>
-              ) : "—"}
-            </TableCell>
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
-  );
+  if (URL_FIELDS.has(fieldKey)) {
+    return (
+      <a href={value} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
+        {fieldKey === "websiteUrl" ? value : "Link"}
+      </a>
+    );
+  }
+
+  if (BADGE_FIELDS.has(fieldKey)) {
+    const colorClass =
+      value === "Yes" || value === "Tier 1" || value === "Recent"
+        ? "bg-green-100 text-green-700"
+        : value === "Tier 2" || value === "Moderate"
+        ? "bg-blue-100 text-blue-700"
+        : value === "Tier 3"
+        ? "bg-amber-100 text-amber-700"
+        : "bg-gray-100 text-gray-600";
+    return (
+      <Badge variant="secondary" className={`text-xs ${colorClass}`}>
+        {value}
+      </Badge>
+    );
+  }
+
+  return <span>{String(value)}</span>;
 }

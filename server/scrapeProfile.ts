@@ -412,3 +412,20 @@ export function getProfile(id?: string): ScrapeProfile {
   if (!id) return VC_PROFILE;
   return BUILT_IN_PROFILES[id] ?? VC_PROFILE;
 }
+
+/**
+ * Map a UI template ID (from the Dashboard template picker) to a ScrapeProfile.
+ * Multiple templates can share the same underlying profile.
+ */
+export function getProfileForTemplate(template: string): ScrapeProfile {
+  const mapping: Record<string, ScrapeProfile> = {
+    vc:          VC_PROFILE,
+    b2b:         GENERAL_PROFILE,
+    people:      DIRECTORY_PROFILE,
+    healthcare:  HEALTHCARE_PROFILE,
+    ecommerce:   ECOMMERCE_PROFILE,
+    realestate:  GENERAL_PROFILE,
+    local:       GENERAL_PROFILE,
+  };
+  return mapping[template] ?? GENERAL_PROFILE;
+}

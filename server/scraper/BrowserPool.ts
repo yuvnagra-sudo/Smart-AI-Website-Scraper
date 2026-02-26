@@ -8,6 +8,21 @@ import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import type { Browser, Page } from "puppeteer";
 import { BrowserInstance } from "./types";
 
+// Rotate through realistic Chrome user-agent strings to reduce fingerprinting
+const USER_AGENTS = [
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+];
+
+const VIEWPORTS = [
+  { width: 1920, height: 1080 },
+  { width: 1440, height: 900 },
+  { width: 1366, height: 768 },
+  { width: 1280, height: 800 },
+];
+
 // Add stealth plugin to avoid detection
 puppeteer.use(StealthPlugin());
 
@@ -17,7 +32,7 @@ export class BrowserPool {
   private maxIdleTime: number; // milliseconds
   private cleanupInterval: NodeJS.Timeout | null = null;
 
-  constructor(maxBrowsers = 5, maxIdleTime = 5 * 60 * 1000) {
+  constructor(maxBrowsers = 15, maxIdleTime = 5 * 60 * 1000) {
     this.maxBrowsers = maxBrowsers;
     this.maxIdleTime = maxIdleTime;
     this.startCleanupTask();
@@ -67,6 +82,12 @@ export class BrowserPool {
    * Create a new browser instance
    */
   private async createBrowser(stealth: boolean): Promise<Browser> {
+    // Pick a random UA + viewport to reduce fingerprint consistency across browsers
+    const ua = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+    const vp = VIEWPORTS[Math.floor(Math.random() * VIEWPORTS.length)];
+
+    const proxyUrl = process.env.PROXY_URL;
+
     const args = [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -75,6 +96,9 @@ export class BrowserPool {
       "--no-first-run",
       "--no-zygote",
       "--disable-gpu",
+      `--user-agent=${ua}`,
+      `--window-size=${vp.width},${vp.height}`,
+      ...(proxyUrl ? [`--proxy-server=${proxyUrl}`] : []),
     ];
 
     if (stealth) {
@@ -89,6 +113,10 @@ export class BrowserPool {
       args,
       // ignoreHTTPSErrors: true,
     });
+
+    if (proxyUrl) {
+      console.log(`[BrowserPool] Proxy enabled: ${proxyUrl}`);
+    }
 
     return browser as unknown as Browser;
   }

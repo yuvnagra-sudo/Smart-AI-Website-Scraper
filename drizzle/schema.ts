@@ -1,4 +1,4 @@
-import { boolean, int, mysqlEnum, mysqlTable, text, timestamp, unique, varchar, index } from "drizzle-orm/mysql-core";
+import { boolean, decimal, int, mysqlEnum, mysqlTable, text, timestamp, unique, varchar, index } from "drizzle-orm/mysql-core";
 
 /**
  * Core user table backing auth flow.
@@ -44,6 +44,12 @@ export const enrichmentJobs = mysqlTable("enrichmentJobs", {
   currentFirmName: text("currentFirmName"),
   currentTeamMemberCount: int("currentTeamMemberCount").default(0),
   activeFirmsJson: text("activeFirmsJson"), // JSON array of firm names currently being processed in parallel
+  // Template and cost tracking
+  template: varchar("template", { length: 50 }).default("vc"),
+  estimatedCostUSD: decimal("estimatedCostUSD", { precision: 10, scale: 4 }),
+  totalCostUSD: decimal("totalCostUSD", { precision: 10, scale: 4 }).default("0"),
+  totalInputTokens: int("totalInputTokens").default(0),
+  totalOutputTokens: int("totalOutputTokens").default(0),
   errorMessage: text("errorMessage"),
   // Worker tracking fields
   workerPid: int("workerPid"), // Process ID of worker processing this job

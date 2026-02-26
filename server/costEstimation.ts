@@ -5,6 +5,8 @@
 
 export interface CostEstimate {
   totalCost: number;
+  totalCostLow: number;   // low end of range (lean sites)
+  totalCostHigh: number;  // high end of range (data-rich sites)
   perFirmCost: number;
   breakdown: {
     websiteVerification: number;
@@ -37,13 +39,14 @@ const TOKEN_ESTIMATES = {
 };
 
 /**
- * Pricing (based on gpt-4o-mini rates)
- * Input: $0.15 per 1M tokens
- * Output: $0.60 per 1M tokens
+ * Pricing — dynamic based on active provider.
+ * Gemini 2.5 Flash (when GEMINI_API_KEY is set): $0.075 input / $0.30 output per 1M tokens
+ * gpt-4o-mini (default):                         $0.15  input / $0.60 output per 1M tokens
  */
+const USE_GEMINI = !!process.env.GEMINI_API_KEY;
 const PRICING = {
-  inputPer1M: 0.15,
-  outputPer1M: 0.60,
+  inputPer1M:  USE_GEMINI ? 0.075 : 0.15,
+  outputPer1M: USE_GEMINI ? 0.30  : 0.60,
 };
 
 /**
@@ -56,10 +59,28 @@ function calculateOperationCost(inputTokens: number, outputTokens: number): numb
 }
 
 /**
- * Estimate enrichment cost for a given number of firms
+ * Estimate enrichment cost for a given number of firms.
+ *
+ * @param firmCount - Number of firms to process
+ * @param avgDescriptionLength - Average character length of descriptions in the uploaded file.
+ *   Longer descriptions signal content-rich sites (more pages, more team members, more portfolio data)
+ *   and so predict higher actual token usage. Defaults to 200 chars (neutral baseline).
  */
-export function estimateEnrichmentCost(firmCount: number): CostEstimate {
-  // Base operations (always performed)
+export function estimateEnrichmentCost(
+  firmCount: number,
+  avgDescriptionLength = 200,
+): CostEstimate {
+  // Content scale: richer descriptions → more scraped content → more tokens.
+  // Clamped to [0.7, 2.5] so we don't over-penalise bare-bones or extremely long descriptions.
+  const contentScale = Math.min(2.5, Math.max(0.7, avgDescriptionLength / 200));
+
+  // Scale the most variable operations (team + portfolio vary most with content depth)
+  const scaledTeamInput      = TOKEN_ESTIMATES.teamMembers.input      * contentScale;
+  const scaledTeamOutput     = TOKEN_ESTIMATES.teamMembers.output     * contentScale;
+  const scaledPortfolioInput = TOKEN_ESTIMATES.portfolioCompanies.input  * contentScale;
+  const scaledPortfolioOutput= TOKEN_ESTIMATES.portfolioCompanies.output * contentScale;
+
+  // Base operations (always performed, not content-scaled)
   const verificationCost = calculateOperationCost(
     TOKEN_ESTIMATES.websiteVerification.input,
     TOKEN_ESTIMATES.websiteVerification.output,
@@ -80,15 +101,8 @@ export function estimateEnrichmentCost(firmCount: number): CostEstimate {
     TOKEN_ESTIMATES.niches.output,
   );
 
-  const teamMembersCost = calculateOperationCost(
-    TOKEN_ESTIMATES.teamMembers.input,
-    TOKEN_ESTIMATES.teamMembers.output,
-  );
-
-  const portfolioCost = calculateOperationCost(
-    TOKEN_ESTIMATES.portfolioCompanies.input,
-    TOKEN_ESTIMATES.portfolioCompanies.output,
-  );
+  const teamMembersCost  = calculateOperationCost(scaledTeamInput, scaledTeamOutput);
+  const portfolioCost    = calculateOperationCost(scaledPortfolioInput, scaledPortfolioOutput);
 
   // Waterfall enrichment (assume 30% of firms need it, with 2 retries average)
   const waterfallCost = calculateOperationCost(
@@ -96,7 +110,7 @@ export function estimateEnrichmentCost(firmCount: number): CostEstimate {
     TOKEN_ESTIMATES.waterfallRetry.output,
   ) * 2 * 0.3; // 2 retries * 30% of firms
 
-  // Per-firm cost
+  // Per-firm cost (midpoint)
   const perFirmCost =
     verificationCost +
     investorTypeCost +
@@ -106,8 +120,13 @@ export function estimateEnrichmentCost(firmCount: number): CostEstimate {
     portfolioCost +
     waterfallCost;
 
-  // Total cost
+  // Total cost (midpoint)
   const totalCost = perFirmCost * firmCount;
+
+  // Cost range — team + portfolio are the most variable operations (±45%)
+  const varianceMultiplier = 0.45;
+  const totalCostLow  = Math.round(totalCost * (1 - varianceMultiplier) * 100) / 100;
+  const totalCostHigh = Math.round(totalCost * (1 + varianceMultiplier) * 100) / 100;
 
   // Token estimates
   const inputTokensPerFirm =
@@ -115,8 +134,8 @@ export function estimateEnrichmentCost(firmCount: number): CostEstimate {
     TOKEN_ESTIMATES.investorType.input +
     TOKEN_ESTIMATES.investmentStages.input +
     TOKEN_ESTIMATES.niches.input +
-    TOKEN_ESTIMATES.teamMembers.input +
-    TOKEN_ESTIMATES.portfolioCompanies.input +
+    scaledTeamInput +
+    scaledPortfolioInput +
     TOKEN_ESTIMATES.waterfallRetry.input * 2 * 0.3;
 
   const outputTokensPerFirm =
@@ -124,37 +143,36 @@ export function estimateEnrichmentCost(firmCount: number): CostEstimate {
     TOKEN_ESTIMATES.investorType.output +
     TOKEN_ESTIMATES.investmentStages.output +
     TOKEN_ESTIMATES.niches.output +
-    TOKEN_ESTIMATES.teamMembers.output +
-    TOKEN_ESTIMATES.portfolioCompanies.output +
+    scaledTeamOutput +
+    scaledPortfolioOutput +
     TOKEN_ESTIMATES.waterfallRetry.output * 2 * 0.3;
 
-  // Duration estimate (updated based on actual processing times)
-  // Portfolio extraction alone takes ~20s, full enrichment takes 60-90s per firm
-  // Processing happens sequentially due to rate limits and browser operations
-  const secondsPerFirm = 75; // More realistic estimate
-  const totalSeconds = secondsPerFirm * firmCount;
+  // Duration estimate — 50 concurrent workers, wall-clock time is ceil(N/50) batches × 28s each
+  const totalSeconds = Math.ceil(firmCount / 50) * 28;
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const estimatedDuration = hours > 0 
-    ? `${hours}h ${minutes}m` 
-    : minutes > 0 
+  const estimatedDuration = hours > 0
+    ? `${hours}h ${minutes}m`
+    : minutes > 0
       ? `${minutes}m`
-      : `${Math.ceil(totalSeconds / 60)}m`;
+      : `<1m`;
 
   return {
-    totalCost: Math.round(totalCost * 100) / 100,
-    perFirmCost: Math.round(perFirmCost * 10000) / 10000,
+    totalCost:     Math.round(totalCost * 100) / 100,
+    totalCostLow,
+    totalCostHigh,
+    perFirmCost:   Math.round(perFirmCost * 10000) / 10000,
     breakdown: {
-      websiteVerification: Math.round(verificationCost * firmCount * 100) / 100,
-      investorTypeExtraction: Math.round(investorTypeCost * firmCount * 100) / 100,
-      investmentStagesExtraction: Math.round(investmentStagesCost * firmCount * 100) / 100,
-      nichesExtraction: Math.round(nichesCost * firmCount * 100) / 100,
-      teamMemberExtraction: Math.round(teamMembersCost * firmCount * 100) / 100,
-      portfolioExtraction: Math.round(portfolioCost * firmCount * 100) / 100,
-      waterfallEnrichment: Math.round(waterfallCost * firmCount * 100) / 100,
+      websiteVerification:         Math.round(verificationCost    * firmCount * 100) / 100,
+      investorTypeExtraction:      Math.round(investorTypeCost    * firmCount * 100) / 100,
+      investmentStagesExtraction:  Math.round(investmentStagesCost* firmCount * 100) / 100,
+      nichesExtraction:            Math.round(nichesCost          * firmCount * 100) / 100,
+      teamMemberExtraction:        Math.round(teamMembersCost     * firmCount * 100) / 100,
+      portfolioExtraction:         Math.round(portfolioCost       * firmCount * 100) / 100,
+      waterfallEnrichment:         Math.round(waterfallCost       * firmCount * 100) / 100,
     },
     estimatedTokens: {
-      input: Math.round(inputTokensPerFirm * firmCount),
+      input:  Math.round(inputTokensPerFirm  * firmCount),
       output: Math.round(outputTokensPerFirm * firmCount),
     },
     estimatedDuration,
