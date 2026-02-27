@@ -29,9 +29,15 @@ export interface DirectoryEntry {
   nativeUrl?: string;
 }
 
+export interface ScrapeStats {
+  fieldsTotal: number;
+  fieldsFilled: number;
+  emptyFields: string[];
+}
+
 export type AgentScrapeResult =
   | { type: "directory"; entries: DirectoryEntry[] }
-  | { type: "profile"; data: Record<string, string> };
+  | { type: "profile"; data: Record<string, string>; stats: ScrapeStats };
 
 type PageClass = "directory" | "directory-entry" | "profile";
 
@@ -56,8 +62,8 @@ async function classifyPage(
 URL: ${url}
 User's objective: ${objective}
 
-Page content (first 6000 chars):
-${content.substring(0, 6000)}
+Page content (first 12000 chars):
+${content.substring(0, 12000)}
 
 Classify this page as ONE of:
 - "directory": A listing/index page with many individual entries (companies, people, etc.) linked from it. Examples: VC firm databases, agent directories, company lists.
@@ -72,6 +78,7 @@ Return ONLY valid JSON:
   try {
     const response = await queuedLLMCall({
       messages: [{ role: "user", content: prompt }],
+      temperature: 0,
       response_format: {
         type: "json_schema",
         json_schema: {
@@ -112,8 +119,8 @@ Return ONLY valid JSON:
 async function extractNativeUrl(content: string, pageUrl: string): Promise<string | undefined> {
   const prompt = `This is a directory entry page about a specific company/organization.
 Page URL: ${pageUrl}
-Content (first 3000 chars):
-${content.substring(0, 3000)}
+Content (first 6000 chars):
+${content.substring(0, 6000)}
 
 Find the native website URL of the company/organization this page is about.
 This is their own website (e.g. "https://acmecapital.com"), NOT a link to another directory page.
@@ -124,6 +131,7 @@ Return ONLY valid JSON: {"nativeUrl":"string or null"}`;
   try {
     const response = await queuedLLMCall({
       messages: [{ role: "user", content: prompt }],
+      temperature: 0,
       response_format: {
         type: "json_schema",
         json_schema: {
@@ -162,17 +170,33 @@ async function extractProfileFields(
     props[s.key] = { type: "string", description: `${s.label}: ${s.desc}` };
   }
 
+  // Build a brief example from the first 2 sections so the LLM sees expected format
+  const exampleObj: Record<string, string> = {};
+  for (const s of sections.slice(0, 2)) {
+    exampleObj[s.key] = `[extracted ${s.label.toLowerCase()} from page]`;
+  }
+  for (const s of sections.slice(2)) {
+    exampleObj[s.key] = "";
+  }
+  const exampleJson = JSON.stringify(exampleObj, null, 2);
+
   const userMsg = `${systemPrompt}
 
 Page content:
-${content.substring(0, 10000)}
+${content.substring(0, 25000)}
 
-Extract each field from the page content. If a field cannot be determined from the content, return an empty string "".
+Extract each field from the page content. Be specific and concrete — use actual data from the page, not summaries.
+If a field cannot be determined from the content, return an empty string "".
+
+Example output format:
+${exampleJson}
+
 Return ONLY valid JSON with these keys: ${sections.map((s) => s.key).join(", ")}`;
 
   try {
     const response = await queuedLLMCall({
       messages: [{ role: "user", content: userMsg }],
+      temperature: 0,
       response_format: {
         type: "json_schema",
         json_schema: {
@@ -260,6 +284,7 @@ Return ONLY valid JSON: {"shouldStop":boolean,"linksToFollow":["url1","url2"]}`;
   try {
     const response = await queuedLLMCall({
       messages: [{ role: "user", content: prompt }],
+      temperature: 0,
       response_format: {
         type: "json_schema",
         json_schema: {
@@ -301,11 +326,29 @@ function mergeResults(
 ): Record<string, string> {
   const merged = { ...base };
   for (const [key, val] of Object.entries(incoming)) {
-    if (val && val.trim() && (!merged[key] || !merged[key].trim())) {
-      merged[key] = val;
-    } else if (val && val.trim() && merged[key] && merged[key].trim()) {
-      // Append new information with separator if both have content
-      merged[key] = `${merged[key]}; ${val}`;
+    const incomingTrimmed = val?.trim() ?? "";
+    const existingTrimmed = merged[key]?.trim() ?? "";
+
+    if (!incomingTrimmed) continue; // incoming empty — keep existing
+    if (!existingTrimmed) { merged[key] = incomingTrimmed; continue; } // existing empty — use incoming
+
+    // Both have content — deduplicate before appending
+    const existingLower = existingTrimmed.toLowerCase();
+    const incomingLower = incomingTrimmed.toLowerCase();
+
+    // If incoming is a substring of existing, skip (already captured)
+    if (existingLower.includes(incomingLower)) continue;
+    // If existing is a substring of incoming, replace (incoming is more complete)
+    if (incomingLower.includes(existingLower)) { merged[key] = incomingTrimmed; continue; }
+
+    // Check individual semicolon-separated segments for duplicates
+    const existingSegments = existingTrimmed.split(";").map(s => s.trim().toLowerCase());
+    const newSegments = incomingTrimmed.split(";").map(s => s.trim()).filter(
+      seg => !existingSegments.includes(seg.toLowerCase())
+    );
+
+    if (newSegments.length > 0) {
+      merged[key] = `${existingTrimmed}; ${newSegments.join("; ")}`;
     }
   }
   return merged;
@@ -337,7 +380,7 @@ export async function scrapeUrl(
     if (sections.length === 0) return { type: "directory", entries: [] };
     const empty: Record<string, string> = {};
     for (const s of sections) empty[s.key] = "";
-    return { type: "profile", data: empty };
+    return { type: "profile", data: empty, stats: { fieldsTotal: sections.length, fieldsFilled: 0, emptyFields: sections.map(s => s.key) } };
   }
 
   const content = jinaResult.content;
@@ -382,7 +425,7 @@ export async function scrapeUrl(
 
   // ── PROFILE ────────────────────────────────────────────────────────────────
   if (sections.length === 0) {
-    return { type: "profile", data: {} };
+    return { type: "profile", data: {}, stats: { fieldsTotal: 0, fieldsFilled: 0, emptyFields: [] } };
   }
 
   const visitedUrls = new Set<string>([url]);
@@ -420,6 +463,12 @@ export async function scrapeUrl(
     }
   }
 
-  console.log(`[agentScraper] Profile extracted (${visitedUrls.size} pages visited)`);
-  return { type: "profile", data };
+  const emptyFields = sections.map(s => s.key).filter(k => !data[k] || data[k].trim() === "");
+  const stats: ScrapeStats = {
+    fieldsTotal: sections.length,
+    fieldsFilled: sections.length - emptyFields.length,
+    emptyFields,
+  };
+  console.log(`[agentScraper] Profile extracted (${visitedUrls.size} pages visited, ${stats.fieldsFilled}/${stats.fieldsTotal} fields filled)`);
+  return { type: "profile", data, stats };
 }

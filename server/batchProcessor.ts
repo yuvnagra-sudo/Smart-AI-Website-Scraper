@@ -3,7 +3,7 @@
  * Handles chunking, retry logic, and progress persistence
  */
 
-import { updateEnrichmentJob, getEnrichmentJob } from "./enrichmentDb";
+import { updateEnrichmentJob, getEnrichmentJob, incrementJobProcessedCount } from "./enrichmentDb";
 
 export interface BatchConfig {
   batchSize: number;
@@ -195,6 +195,30 @@ export async function updateJobProgressSafely(
   }
   
   return false;
+}
+
+/**
+ * Atomically increment processedCount for a job with connection retry.
+ * Uses SQL SET processedCount = processedCount + 1 to avoid race conditions
+ * when 50 concurrent workers each write absolute snapshots.
+ */
+export async function incrementJobProcessedCountSafely(
+  jobId: number,
+  maxRetries: number = 3
+): Promise<void> {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      await incrementJobProcessedCount(jobId);
+      return;
+    } catch (error: any) {
+      if ((error.message?.includes("ECONNRESET") || error.message?.includes("Connection")) && attempt < maxRetries) {
+        await new Promise(r => setTimeout(r, 1000 * attempt));
+        continue;
+      }
+      console.error(`[DB] Failed to increment processedCount for job ${jobId}:`, error.message);
+      return; // non-fatal
+    }
+  }
 }
 
 /**

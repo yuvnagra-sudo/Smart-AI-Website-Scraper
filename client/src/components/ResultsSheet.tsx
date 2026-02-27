@@ -42,11 +42,13 @@ function AgentJobSheet({ jobId, open, onClose, sectionsJson }: {
   onClose: () => void;
   sectionsJson: string;
 }) {
-  const [activeTab, setActiveTab] = useState<"results" | "urls">("results");
+  const [activeTab, setActiveTab] = useState<"results" | "urls" | "quality">("results");
   const [isDownloading, setIsDownloading] = useState(false);
 
   let sections: AgentSection[] = [];
   try { sections = JSON.parse(sectionsJson); } catch { /* ignore */ }
+
+  const { data: jobLogs } = trpc.enrichment.getJobLogs.useQuery({ jobId }, { enabled: open });
 
   const downloadMutation = trpc.enrichment.generateResults.useMutation({
     onSuccess: (data) => {
@@ -79,6 +81,7 @@ function AgentJobSheet({ jobId, open, onClose, sectionsJson }: {
             <TabsList>
               <TabsTrigger value="results">Results</TabsTrigger>
               <TabsTrigger value="urls">Collected URLs</TabsTrigger>
+              <TabsTrigger value="quality">Quality Report</TabsTrigger>
             </TabsList>
           </div>
 
@@ -135,6 +138,110 @@ function AgentJobSheet({ jobId, open, onClose, sectionsJson }: {
                   )}
                 </Button>
               </div>
+            </TabsContent>
+
+            <TabsContent value="quality" className="mt-0 space-y-6">
+              {!jobLogs || jobLogs.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No log data yet. Run a job to see quality analytics.</p>
+              ) : (() => {
+                const logs = jobLogs as any[];
+                const total = logs.length;
+                const success = logs.filter((l: any) => l.status === "success").length;
+                const partial = logs.filter((l: any) => l.status === "partial").length;
+                const failed = logs.filter((l: any) => l.status === "failed").length;
+
+                // Per-field fill rate across all profile logs
+                const fieldStats: Record<string, { filled: number; total: number }> = {};
+                for (const s of sections) fieldStats[s.key] = { filled: 0, total: 0 };
+                for (const log of logs) {
+                  if (!log.emptyFields) continue;
+                  let empty: string[] = [];
+                  try { empty = JSON.parse(log.emptyFields); } catch { /* */ }
+                  for (const s of sections) {
+                    fieldStats[s.key].total++;
+                    if (!empty.includes(s.key)) fieldStats[s.key].filled++;
+                  }
+                }
+
+                return (
+                  <div className="space-y-6">
+                    {/* Summary row */}
+                    <div className="grid grid-cols-4 gap-3">
+                      {[
+                        { label: "Total URLs", value: total, color: "text-foreground" },
+                        { label: "Success", value: success, color: "text-green-600" },
+                        { label: "Partial", value: partial, color: "text-amber-600" },
+                        { label: "Failed", value: failed, color: "text-red-500" },
+                      ].map((s) => (
+                        <div key={s.label} className="rounded-lg border p-4 text-center">
+                          <p className={`text-2xl font-bold ${s.color}`}>{s.value}</p>
+                          <p className="text-xs text-muted-foreground mt-1">{s.label}</p>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Fill rate per field */}
+                    {sections.length > 0 && (
+                      <div className="space-y-3">
+                        <p className="text-sm font-semibold">Fill rate per field</p>
+                        <div className="space-y-2">
+                          {sections.map((s) => {
+                            const stat = fieldStats[s.key];
+                            const pct = stat && stat.total > 0 ? Math.round((stat.filled / stat.total) * 100) : 0;
+                            return (
+                              <div key={s.key} className="flex items-center gap-3">
+                                <span className="text-xs w-40 shrink-0 truncate text-muted-foreground">{s.label}</span>
+                                <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden">
+                                  <div
+                                    className={`h-full rounded-full ${pct >= 80 ? "bg-green-500" : pct >= 40 ? "bg-amber-400" : "bg-red-400"}`}
+                                    style={{ width: `${pct}%` }}
+                                  />
+                                </div>
+                                <span className="text-xs w-10 text-right shrink-0">{pct}%</span>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* URL status table */}
+                    <div className="space-y-2">
+                      <p className="text-sm font-semibold">URL status log</p>
+                      <div className="rounded-lg border overflow-hidden">
+                        <Table>
+                          <TableHeader>
+                            <TableRow>
+                              <TableHead>Company</TableHead>
+                              <TableHead>Status</TableHead>
+                              <TableHead>Fields</TableHead>
+                              <TableHead>Error</TableHead>
+                              <TableHead className="text-right">ms</TableHead>
+                            </TableRow>
+                          </TableHeader>
+                          <TableBody>
+                            {logs.map((log: any) => (
+                              <TableRow key={log.id}>
+                                <TableCell className="max-w-[200px] truncate text-xs">{log.companyName || log.url || "—"}</TableCell>
+                                <TableCell>
+                                  <span className={`text-xs font-medium ${log.status === "success" ? "text-green-600" : log.status === "partial" ? "text-amber-600" : "text-red-500"}`}>
+                                    {log.status}
+                                  </span>
+                                </TableCell>
+                                <TableCell className="text-xs text-muted-foreground">
+                                  {log.fieldsTotal ? `${log.fieldsFilled}/${log.fieldsTotal}` : "—"}
+                                </TableCell>
+                                <TableCell className="text-xs text-red-400">{log.errorReason || "—"}</TableCell>
+                                <TableCell className="text-xs text-right text-muted-foreground">{log.durationMs ?? "—"}</TableCell>
+                              </TableRow>
+                            ))}
+                          </TableBody>
+                        </Table>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
             </TabsContent>
           </div>
         </Tabs>

@@ -6,16 +6,16 @@ import { TRPCError } from "@trpc/server";
 import { z } from "zod";
 import { storagePut } from "./storage";
 import { estimateEnrichmentCost } from "./costEstimation";
-import { createEnrichmentJob, getEnrichmentJob, getUserEnrichmentJobs, updateEnrichmentJob } from "./enrichmentDb";
+import { createEnrichmentJob, getEnrichmentJob, getUserEnrichmentJobs, getAllEnrichmentJobs, updateEnrichmentJob, insertJobLog, getJobLogs } from "./enrichmentDb";
 import { getDb } from "./db";
 import { enrichedFirms, teamMembers, portfolioCompanies, investmentThesis } from "../drizzle/schema";
 import { eq, and, like, count } from "drizzle-orm";
 import { parseInputExcel, createOutputExcel, createAgentOutputExcel, type EnrichedVCData, type TeamMemberData, type PortfolioCompanyData, type ProcessingSummaryData } from "./excelProcessor";
-import { scrapeUrl, type AgentSection, type DirectoryEntry as AgentDirectoryEntry } from "./agentScraper";
+import { scrapeUrl, type AgentSection, type DirectoryEntry as AgentDirectoryEntry, type ScrapeStats } from "./agentScraper";
 import { generateInvestmentThesisSummaries } from "./investmentThesisAnalyzer";
 import { generateResultsFile } from "./generateResultsService";
 import { createCSVExport } from "./csvExporter";
-import { updateJobProgressSafely } from "./batchProcessor";
+import { updateJobProgressSafely, incrementJobProcessedCountSafely } from "./batchProcessor";
 import { ConnectionKeepAlive } from "./dbConnectionManager";
 import { VCEnrichmentService } from "./vcEnrichment";
 import { getOpenAIStats } from "./_core/openaiLLM";
@@ -260,6 +260,21 @@ Return ONLY valid JSON (no markdown, no code fences):
     listJobs: protectedProcedure.query(async ({ ctx }) => {
       return await getUserEnrichmentJobs(ctx.user.id);
     }),
+
+    // Admin: list all jobs across all users
+    listAllJobsAdmin: protectedProcedure.query(async ({ ctx }) => {
+      if (ctx.user.role !== "admin") throw new Error("Forbidden");
+      return await getAllEnrichmentJobs();
+    }),
+
+    // Get per-URL job logs for quality report
+    getJobLogs: protectedProcedure
+      .input(z.object({ jobId: z.number() }))
+      .query(async ({ ctx, input }) => {
+        const job = await getEnrichmentJob(input.jobId);
+        if (!job || job.userId !== ctx.user.id) throw new TRPCError({ code: "NOT_FOUND" });
+        return await getJobLogs(input.jobId);
+      }),
 
     // Resume a failed job
     resumeJob: protectedProcedure
@@ -578,11 +593,10 @@ export async function processEnrichmentJob(jobId: number) {
           console.error(`[Job ${jobId}] Error enriching "${firm.companyName}":`, err);
         } finally {
           activeFirms.delete(firm.companyName);
-          const absoluteProcessed = processedFirmNames.length + parallelProcessedCount;
           const activeFirmsList = [...activeFirms];
           const currentStats = getOpenAIStats();
+          await incrementJobProcessedCountSafely(jobId);
           await updateJobProgressSafely(jobId, {
-            processedCount: absoluteProcessed,
             currentFirmName: activeFirmsList[0] ?? null,
             currentTeamMemberCount: null,
             activeFirmsJson: activeFirmsList.length > 0 ? JSON.stringify(activeFirmsList) : null,
@@ -590,7 +604,7 @@ export async function processEnrichmentJob(jobId: number) {
             totalInputTokens:   currentStats.totalInputTokens  - inputBaseline,
             totalOutputTokens:  currentStats.totalOutputTokens - outputBaseline,
           });
-          console.log(`[Job ${jobId}] Progress: ${absoluteProcessed}/${allFirms.length} (${activeFirms.size} active)`);
+          console.log(`[Job ${jobId}] Progress: ${parallelProcessedCount}/${allFirms.length} (${activeFirms.size} active)`);
         }
       }
     };
@@ -742,6 +756,22 @@ export async function processEnrichmentJob(jobId: number) {
 }
 
 // ---------------------------------------------------------------------------
+// Error classifier for job logs
+// ---------------------------------------------------------------------------
+
+function classifyAgentError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  const lower = msg.toLowerCase();
+  if (lower.includes("403") || lower.includes("blocked") || lower.includes("rate limit") || lower.includes("429")) return "scraper_blocked";
+  if (lower.includes("4") && lower.match(/\b[45]\d\d\b/)) return "http_error";
+  if (lower.includes("5") && lower.match(/\b5\d\d\b/)) return "http_error";
+  if (lower.includes("timeout") || lower.includes("econnreset") || lower.includes("econnrefused")) return "http_error";
+  if (lower.includes("no content") || lower.includes("empty page") || lower.includes("no text")) return "no_content";
+  if (lower.includes("llm") || lower.includes("openai") || lower.includes("parse")) return "llm_empty";
+  return "unknown";
+}
+
+// ---------------------------------------------------------------------------
 // Agentic job processor (custom sections mode)
 // ---------------------------------------------------------------------------
 
@@ -775,27 +805,55 @@ export async function processAgentJob(jobId: number) {
 
         // Use per-row objective (Description column) if present, else global objective
         const rowObjective = firm.description?.trim() || objective;
+        const startMs = Date.now();
+
+        // Substitute template variables in system prompt
+        const resolvedPrompt = systemPrompt
+          .replace(/\{companyName\}/g, firm.companyName)
+          .replace(/\{websiteUrl\}/g, firm.websiteUrl);
 
         try {
           const result = await scrapeUrl(
             firm.websiteUrl,
             rowObjective,
             sections,
-            systemPrompt,
+            resolvedPrompt,
             5,
           );
 
           if (result.type === "directory") {
             collectedUrls.push(...result.entries);
+            insertJobLog({ jobId, url: firm.websiteUrl, companyName: firm.companyName, status: "success", fieldsTotal: 0, fieldsFilled: 0, durationMs: Date.now() - startMs }).catch(() => {});
           } else {
             profileResults.push({
               "Company Name": firm.companyName,
               "Website": firm.websiteUrl,
               ...result.data,
             });
+            const stats: ScrapeStats = result.stats;
+            const logStatus = stats.fieldsFilled === 0 ? "failed" : stats.fieldsFilled < stats.fieldsTotal ? "partial" : "success";
+            insertJobLog({
+              jobId,
+              url: firm.websiteUrl,
+              companyName: firm.companyName,
+              status: logStatus,
+              fieldsTotal: stats.fieldsTotal,
+              fieldsFilled: stats.fieldsFilled,
+              emptyFields: JSON.stringify(stats.emptyFields),
+              durationMs: Date.now() - startMs,
+            }).catch(() => {});
           }
         } catch (err) {
           console.error(`[processAgentJob] Error processing ${firm.websiteUrl}:`, err);
+          insertJobLog({
+            jobId,
+            url: firm.websiteUrl,
+            companyName: firm.companyName,
+            status: "failed",
+            errorReason: classifyAgentError(err),
+            errorDetail: err instanceof Error ? err.message.slice(0, 500) : String(err).slice(0, 500),
+            durationMs: Date.now() - startMs,
+          }).catch(() => {});
           // Add empty row on error so we don't lose the firm from the output
           const emptyRow: Record<string, string> = {
             "Company Name": firm.companyName,
@@ -806,8 +864,8 @@ export async function processAgentJob(jobId: number) {
         }
 
         processed++;
+        await incrementJobProcessedCountSafely(jobId);
         await updateJobProgressSafely(jobId, {
-          processedCount: processed,
           currentFirmName: firm.companyName,
           activeFirmsJson: null,
         });

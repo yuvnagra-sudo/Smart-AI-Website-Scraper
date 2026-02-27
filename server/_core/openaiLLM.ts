@@ -41,7 +41,7 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
     throw new Error(USE_GEMINI ? "Gemini API key not configured" : "OpenAI API key not configured");
   }
 
-  const { messages, tools, response_format } = params;
+  const { messages, tools, response_format, temperature } = params;
 
   // Build request payload
   const payload: Record<string, unknown> = {
@@ -51,6 +51,10 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
       content: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content),
     })),
   };
+
+  if (temperature !== undefined) {
+    payload.temperature = temperature;
+  }
 
   if (tools && tools.length > 0) {
     payload.tools = tools;

@@ -205,3 +205,27 @@ export const processedFirms = mysqlTable("processedFirms", {
 
 export type ProcessedFirm = typeof processedFirms.$inferSelect;
 export type InsertProcessedFirm = typeof processedFirms.$inferInsert;
+
+/**
+ * JobLogs table - per-URL tracking for agent jobs
+ * Records success/failure, field fill rates, and error reasons for each processed URL
+ */
+export const jobLogs = mysqlTable("jobLogs", {
+  id:           int("id").autoincrement().primaryKey(),
+  jobId:        int("jobId").notNull(),
+  url:          text("url"),
+  companyName:  text("companyName"),
+  status:       varchar("status", { length: 20 }).notNull(), // "success" | "partial" | "failed"
+  fieldsTotal:  int("fieldsTotal"),
+  fieldsFilled: int("fieldsFilled"),
+  emptyFields:  text("emptyFields"),   // JSON: string[]
+  errorReason:  text("errorReason"),   // "http_error" | "scraper_blocked" | "no_content" | "llm_empty" | "unknown"
+  errorDetail:  text("errorDetail"),
+  durationMs:   int("durationMs"),
+  createdAt:    timestamp("createdAt").defaultNow().notNull(),
+}, (table) => ({
+  jobIdIdx: index("jobLogs_jobId_idx").on(table.jobId),
+}));
+
+export type JobLog = typeof jobLogs.$inferSelect;
+export type InsertJobLog = typeof jobLogs.$inferInsert;

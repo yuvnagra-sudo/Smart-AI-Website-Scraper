@@ -20,7 +20,7 @@ import { useState, useRef } from "react";
 import { toast } from "sonner";
 import { Link } from "wouter";
 import ResultsSheet from "@/components/ResultsSheet";
-import { ALL_TEMPLATES, getTemplate } from "@/lib/templates";
+import { ALL_TEMPLATES, getTemplate, TEMPLATE_SECTIONS, TEMPLATE_SYSTEM_PROMPTS, type AgentSection as TemplateAgentSection } from "@/lib/templates";
 
 // ---------------------------------------------------------------------------
 // Icon map for templates
@@ -97,6 +97,36 @@ type WizardStep = "idle" | "configure" | "review";
 type WizardMode = "ai" | "template";
 
 // ---------------------------------------------------------------------------
+// JobLogFeed — live per-URL status shown inside a processing job card
+// ---------------------------------------------------------------------------
+function JobLogFeed({ jobId }: { jobId: number }) {
+  const { data: logs } = trpc.enrichment.getJobLogs.useQuery(
+    { jobId },
+    { refetchInterval: 3000 }
+  );
+  if (!logs || logs.length === 0) return null;
+  const recent = logs.slice(-5);
+  return (
+    <div className="mt-3 space-y-1">
+      {recent.map((log: any) => (
+        <div key={log.id} className="flex items-center gap-2 text-xs">
+          <span className={log.status === "success" ? "text-green-600 font-bold" : log.status === "partial" ? "text-amber-600 font-bold" : "text-red-500 font-bold"}>
+            {log.status === "success" ? "✓" : log.status === "partial" ? "~" : "✗"}
+          </span>
+          <span className="text-muted-foreground truncate max-w-[180px]">{log.companyName || log.url}</span>
+          {log.fieldsFilled != null && log.fieldsTotal != null && log.fieldsTotal > 0 && (
+            <span className="text-muted-foreground ml-auto shrink-0">{log.fieldsFilled}/{log.fieldsTotal} fields</span>
+          )}
+          {log.errorReason && (
+            <span className="text-red-400 shrink-0">{log.errorReason}</span>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
 export default function Dashboard() {
@@ -115,12 +145,20 @@ export default function Dashboard() {
   // Template mode state
   const [selectedTemplate, setSelectedTemplate] = useState<string>("vc");
   const [tierFilter, setTierFilter] = useState<"tier1" | "tier1-2" | "all">("all");
+  const [templateSections, setTemplateSections] = useState<TemplateAgentSection[]>([]);
 
   const [viewResultsJob, setViewResultsJob] = useState<{ id: number; template: string; sectionsJson?: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { data: jobs, isLoading: jobsLoading, refetch } = trpc.enrichment.listJobs.useQuery(undefined, {
     enabled: !!user,
+    refetchInterval: 3000,
+  });
+
+  const isAdmin = user?.role === "admin";
+  const [jobsTab, setJobsTab] = useState<"mine" | "all">("mine");
+  const { data: allJobs } = trpc.enrichment.listAllJobsAdmin.useQuery(undefined, {
+    enabled: isAdmin,
     refetchInterval: 3000,
   });
 
@@ -213,6 +251,18 @@ export default function Dashboard() {
   const handleConfirmEnrichment = () => {
     if (!previewData) return;
     const isAgentMode = wizardMode === "ai" && wizardSections.length > 0;
+    const isTemplateAgentMode = wizardMode === "template" && selectedTemplate !== "vc";
+
+    const extraFields = isAgentMode
+      ? { sectionsJson: JSON.stringify(wizardSections), systemPrompt: wizardSystemPrompt, objective: wizardObjective }
+      : isTemplateAgentMode
+      ? {
+          sectionsJson: JSON.stringify(templateSections),
+          systemPrompt: TEMPLATE_SYSTEM_PROMPTS[selectedTemplate] ?? "",
+          objective: TEMPLATE_OBJECTIVES[selectedTemplate] ?? "",
+        }
+      : {};
+
     confirmMutation.mutate({
       fileUrl: previewData.fileUrl,
       fileKey: previewData.fileKey,
@@ -220,11 +270,7 @@ export default function Dashboard() {
       tierFilter: selectedTemplate === "vc" ? tierFilter : "all",
       template: selectedTemplate,
       avgDescriptionLength: previewData.avgDescriptionLength,
-      ...(isAgentMode ? {
-        sectionsJson: JSON.stringify(wizardSections),
-        systemPrompt: wizardSystemPrompt,
-        objective: wizardObjective,
-      } : {}),
+      ...extraFields,
     });
   };
 
@@ -265,7 +311,8 @@ export default function Dashboard() {
     );
   }
 
-  const hasJobs = jobs && jobs.length > 0;
+  const displayedJobs: any[] = isAdmin && jobsTab === "all" ? (allJobs ?? []) : (jobs ?? []);
+  const hasJobs = displayedJobs.length > 0;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-blue-50">
@@ -485,7 +532,14 @@ export default function Dashboard() {
                         return (
                           <button
                             key={tpl.id}
-                            onClick={() => setSelectedTemplate(tpl.id)}
+                            onClick={() => {
+                              setSelectedTemplate(tpl.id);
+                              if (tpl.id !== "vc") {
+                                setTemplateSections(TEMPLATE_SECTIONS[tpl.id] ?? []);
+                              } else {
+                                setTemplateSections([]);
+                              }
+                            }}
                             className={`flex flex-col items-center gap-1.5 p-3 rounded-lg border-2 text-center transition-all ${
                               isSelected
                                 ? `${colors.bg} ${colors.border} ${colors.text}`
@@ -526,6 +580,42 @@ export default function Dashboard() {
                       ))}
                     </Accordion>
                   </div>
+
+                  {/* Editable sections for non-VC templates */}
+                  {selectedTemplate !== "vc" && templateSections.length > 0 && (
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between">
+                        <Label className="text-sm font-semibold">Extraction Sections <span className="font-normal text-muted-foreground">(edit to customize)</span></Label>
+                        <button
+                          className="text-xs text-muted-foreground hover:text-foreground underline"
+                          onClick={() => setTemplateSections(TEMPLATE_SECTIONS[selectedTemplate] ?? [])}
+                        >
+                          Reset to defaults
+                        </button>
+                      </div>
+                      <div className="space-y-2">
+                        {templateSections.map((s, i) => (
+                          <div
+                            key={s.key}
+                            className="flex items-start gap-2 p-3 rounded-lg border bg-muted/20"
+                          >
+                            <div className="flex-1 min-w-0">
+                              <p className="font-medium text-sm">{s.label}</p>
+                              <p className="text-xs text-muted-foreground mt-0.5 leading-snug">{s.desc}</p>
+                            </div>
+                            <button
+                              onClick={() => setTemplateSections(templateSections.filter((_, j) => j !== i))}
+                              className="text-muted-foreground hover:text-destructive mt-0.5 shrink-0"
+                              title="Remove section"
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                      <AddSectionRow onAdd={(s) => setTemplateSections([...templateSections, s])} />
+                    </div>
+                  )}
 
                   {/* Team Coverage — VC template only */}
                   {selectedTemplate === "vc" && (
@@ -663,8 +753,28 @@ export default function Dashboard() {
         {/* Jobs List */}
         <Card>
           <CardHeader>
-            <CardTitle>Extraction Jobs</CardTitle>
-            <CardDescription>Track your jobs and download results</CardDescription>
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle>Extraction Jobs</CardTitle>
+                <CardDescription>Track your jobs and download results</CardDescription>
+              </div>
+              {isAdmin && (
+                <div className="flex rounded-md border overflow-hidden text-sm">
+                  <button
+                    onClick={() => setJobsTab("mine")}
+                    className={`px-3 py-1.5 transition-colors ${jobsTab === "mine" ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}
+                  >
+                    My Jobs
+                  </button>
+                  <button
+                    onClick={() => setJobsTab("all")}
+                    className={`px-3 py-1.5 transition-colors border-l ${jobsTab === "all" ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}
+                  >
+                    All Jobs (Admin)
+                  </button>
+                </div>
+              )}
+            </div>
           </CardHeader>
           <CardContent>
             {jobsLoading ? (
@@ -673,7 +783,7 @@ export default function Dashboard() {
               </div>
             ) : hasJobs ? (
               <div className="space-y-4">
-                {jobs.map((job) => {
+                {displayedJobs.map((job) => {
                   const progress = job.firmCount && job.firmCount > 0
                     ? Math.round(((job.processedCount || 0) / job.firmCount) * 100)
                     : 0;
@@ -706,6 +816,9 @@ export default function Dashboard() {
                               )}
                             </div>
                             <p className="text-sm text-muted-foreground">
+                              {isAdmin && jobsTab === "all" && (
+                                <span className="mr-1 font-medium text-violet-600">User #{job.userId} ·</span>
+                              )}
                               {job.firmCount} entries · {new Date(job.createdAt).toLocaleDateString()}
                             </p>
 
@@ -793,6 +906,10 @@ export default function Dashboard() {
                               ) : null;
                             })()}
                           </div>
+                        )}
+
+                        {isProcessing && job.sectionsJson && (
+                          <JobLogFeed jobId={job.id} />
                         )}
 
                         {job.status === "failed" && job.errorMessage && (

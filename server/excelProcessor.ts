@@ -334,7 +334,8 @@ export function createAgentOutputExcel(
       }
       return row;
     });
-    const sheet = XLSX.utils.json_to_sheet(rows);
+    const sanitizedRows = sanitizeForExcel(rows);
+    const sheet = XLSX.utils.json_to_sheet(sanitizedRows);
     XLSX.utils.book_append_sheet(workbook, sheet, "Results");
   } else {
     // Empty placeholder sheet
@@ -349,7 +350,8 @@ export function createAgentOutputExcel(
       "Directory URL": e.directoryUrl,
       "Native URL": e.nativeUrl ?? "",
     }));
-    const urlSheet = XLSX.utils.json_to_sheet(urlRows);
+    const sanitizedUrlRows = sanitizeForExcel(urlRows);
+    const urlSheet = XLSX.utils.json_to_sheet(sanitizedUrlRows);
     XLSX.utils.book_append_sheet(workbook, urlSheet, "Collected URLs");
   }
 

@@ -363,3 +363,83 @@ const TEMPLATE_MAP = new Map<string, Template>(ALL_TEMPLATES.map(t => [t.id, t])
 export function getTemplate(id: string): Template {
   return TEMPLATE_MAP.get(id) ?? VC_TEMPLATE;
 }
+
+// ─── Agent-pipeline section definitions for non-VC templates ─────────────────
+
+export interface AgentSection { key: string; label: string; desc: string; }
+
+export const TEMPLATE_SECTIONS: Record<string, AgentSection[]> = {
+  b2b: [
+    { key: "industry_vertical",    label: "Industry / Vertical",     desc: "What industry or vertical does this company operate in? (e.g. SaaS, Fintech, Healthcare IT)" },
+    { key: "business_model",       label: "Business Model",          desc: "How does the company make money? (SaaS, services, marketplace, agency, etc.)" },
+    { key: "company_size",         label: "Company Size",            desc: "Employee count, revenue range, or funding stage if mentioned on the website" },
+    { key: "products_services",    label: "Products & Services",     desc: "Specific products, services, or solutions the company offers — be concrete" },
+    { key: "target_customers",     label: "Target Customers / ICP",  desc: "Who are their ideal customers? List industries, company sizes, or roles they serve" },
+    { key: "key_decision_makers",  label: "Key Decision Makers",     desc: "Names and titles of founders, CEO, CTO, VP Sales, or other C-suite / VP contacts" },
+    { key: "value_proposition",    label: "Value Proposition",       desc: "What is their core value prop or primary differentiator from competitors?" },
+    { key: "notable_clients",      label: "Notable Clients",         desc: "Well-known customers or brands featured in case studies, logos, or testimonials" },
+    { key: "funding_investors",    label: "Funding & Investors",     desc: "Funding stage, total raised, and notable investors if disclosed" },
+    { key: "hq_location",          label: "HQ Location",             desc: "Headquarters city and country" },
+    { key: "founded_year",         label: "Founded Year",            desc: "Year the company was founded" },
+  ],
+  people: [
+    { key: "current_title",        label: "Current Title",           desc: "Person's current job title (e.g. VP of Engineering, Founder, Partner)" },
+    { key: "current_company",      label: "Current Company",         desc: "Name of the company or organization they currently work at" },
+    { key: "career_background",    label: "Career Background",       desc: "Key past employers, roles held, and total years of professional experience" },
+    { key: "skills_expertise",     label: "Skills & Expertise",      desc: "Domain expertise, technical skills, or key areas of professional focus" },
+    { key: "education",            label: "Education",               desc: "Highest degree, institution, and field of study if visible" },
+    { key: "linkedin_url",         label: "LinkedIn URL",            desc: "LinkedIn profile URL if findable on the page or linked" },
+    { key: "contact_info",         label: "Contact Info",            desc: "Email address or other publicly listed contact details" },
+    { key: "location",             label: "Location",                desc: "City and country they are based in" },
+    { key: "notable_work",         label: "Notable Accomplishments", desc: "Major achievements, publications, awards, or well-known projects" },
+  ],
+  healthcare: [
+    { key: "facility_type",        label: "Facility Type",           desc: "Type of healthcare facility: hospital, outpatient clinic, private practice, surgery center, telehealth, etc." },
+    { key: "specialties",          label: "Medical Specialties",     desc: "All clinical specialties or departments offered (e.g. Cardiology, Orthopedics, Pediatrics)" },
+    { key: "staff_size",           label: "Staff / Physician Count", desc: "Number of physicians, practitioners, or overall headcount if stated" },
+    { key: "services_offered",     label: "Services Offered",        desc: "Specific treatments, procedures, diagnostics, or programs available" },
+    { key: "insurance_accepted",   label: "Insurance Accepted",      desc: "Insurance plans, payers, or networks accepted; note if self-pay is available" },
+    { key: "patient_population",   label: "Patient Population",      desc: "Who they treat: adults, pediatric, geriatric, specific conditions, underserved communities, etc." },
+    { key: "affiliated_systems",   label: "Health System Affiliations", desc: "Hospital networks, health systems, or academic medical centers they are affiliated with" },
+    { key: "location_hours",       label: "Location & Hours",        desc: "Full address, phone, and operating hours" },
+  ],
+  ecommerce: [
+    { key: "product_categories",   label: "Product Categories",      desc: "Main product types or categories sold — be specific (e.g. 'organic skincare', 'men's athletic apparel')" },
+    { key: "price_range",          label: "Price Range",             desc: "Typical product price range or average order value if visible" },
+    { key: "brand_positioning",    label: "Brand Positioning",       desc: "How does the brand position itself? (luxury, budget, sustainable, niche, etc.)" },
+    { key: "unique_selling_points",label: "Unique Selling Points",   desc: "What makes this store unique vs competitors? Feature claims, certifications, exclusives" },
+    { key: "shipping_policy",      label: "Shipping & Fulfillment",  desc: "Shipping speeds, carriers, free shipping threshold, international availability" },
+    { key: "return_policy",        label: "Return Policy",           desc: "Return/exchange/refund policy details and time window" },
+    { key: "customer_ratings",     label: "Customer Ratings",        desc: "Star rating, number of reviews, or notable customer testimonials if shown" },
+    { key: "target_demographics",  label: "Target Demographics",     desc: "Primary customer demographic: age range, gender, lifestyle, geography" },
+    { key: "social_presence",      label: "Social Media Channels",   desc: "Social platforms linked and approximate follower counts if shown" },
+  ],
+  realestate: [
+    { key: "agency_type",          label: "Agency Type",             desc: "Residential, commercial, luxury, property management, buyer's agency, full-service, etc." },
+    { key: "service_areas",        label: "Service Areas",           desc: "Cities, neighborhoods, counties, or regions the agency actively covers" },
+    { key: "property_specialties", label: "Property Specialties",    desc: "Types of properties handled: single-family, condos, multi-family, office, retail, industrial, etc." },
+    { key: "price_range",          label: "Listing Price Range",     desc: "Typical or advertised listing price range (e.g. $200K–$800K)" },
+    { key: "agent_count",          label: "Number of Agents",        desc: "Total number of agents or team size listed on the website" },
+    { key: "top_agents",           label: "Top / Featured Agents",   desc: "Names and specializations of featured or top-producing agents" },
+    { key: "recent_sales",         label: "Recent Sales / Volume",   desc: "Recent closed deals, transaction volume, or sales stats highlighted on the site" },
+    { key: "differentiators",      label: "Differentiators",         desc: "Awards, certifications, unique services (e.g. virtual tours, off-market listings), or brand claims" },
+  ],
+  local: [
+    { key: "business_category",    label: "Business Category",       desc: "Specific type of local business (e.g. Italian restaurant, auto repair shop, yoga studio)" },
+    { key: "services_menu",        label: "Services / Menu",         desc: "Core offerings, menu items, service packages, or treatments available" },
+    { key: "hours",                label: "Hours of Operation",      desc: "Days and times open; note seasonal variations or holiday hours if listed" },
+    { key: "price_range",          label: "Price Range",             desc: "Price tier ($, $$, $$$, $$$$) or typical cost for a standard purchase/service" },
+    { key: "ratings_reviews",      label: "Ratings & Reviews",       desc: "Star rating, review count, and key themes from customer feedback" },
+    { key: "amenities_features",   label: "Amenities / Features",    desc: "Parking, delivery, takeout, outdoor seating, ADA accessibility, appointment required, etc." },
+    { key: "contact_location",     label: "Contact & Location",      desc: "Street address, phone, email, and any booking or reservation links" },
+  ],
+};
+
+export const TEMPLATE_SYSTEM_PROMPTS: Record<string, string> = {
+  b2b:        "You are a B2B business intelligence analyst. For each company website, extract the requested fields. Focus on business model, product offering, target market, team leadership, and customer evidence. Be specific and concrete — avoid vague summaries. Return ONLY valid JSON with one key per requested field.",
+  people:     "You are a professional profile researcher. For each person's profile page, bio, or LinkedIn, extract the requested fields. Focus on concrete facts: titles, companies, achievements. Return ONLY valid JSON with one key per requested field.",
+  healthcare: "You are a healthcare market researcher. For each provider website, extract the requested fields about the facility, clinical specialties, staff, and patient services. Be factual and specific. Return ONLY valid JSON with one key per requested field.",
+  ecommerce:  "You are an e-commerce competitive analyst. For each online store, extract the requested fields about products, pricing, brand positioning, and customer experience. Return ONLY valid JSON with one key per requested field.",
+  realestate: "You are a real estate market analyst. For each agency website, extract the requested fields about property types, service areas, agents, and recent activity. Return ONLY valid JSON with one key per requested field.",
+  local:      "You are a local business researcher. For each business website or listing page, extract the requested fields about services, hours, pricing, and customer feedback. Return ONLY valid JSON with one key per requested field.",
+};
