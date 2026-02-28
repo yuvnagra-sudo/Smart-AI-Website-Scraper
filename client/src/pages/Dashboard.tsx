@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { trpc } from "@/lib/trpc";
 import { getLoginUrl } from "@/const";
 import {
@@ -142,6 +143,20 @@ export default function Dashboard() {
   const [wizardSystemPrompt, setWizardSystemPrompt] = useState("");
   const [wizardObjective, setWizardObjective] = useState("");
 
+  // Column mapping state
+  const [showColumnMapping, setShowColumnMapping] = useState(false);
+  const [fileHeaders, setFileHeaders] = useState<{
+    columns: string[];
+    sampleRows: Array<Record<string, string>>;
+    autoDetected: { companyName?: string; websiteUrl?: string; description?: string };
+  } | null>(null);
+  const [mappedCompanyName, setMappedCompanyName] = useState("");
+  const [mappedWebsiteUrl, setMappedWebsiteUrl] = useState("");
+  const [mappedDescription, setMappedDescription] = useState("");
+  // Store fileUrl/fileKey for re-submit with mapping
+  const [pendingFileUrl, setPendingFileUrl] = useState("");
+  const [pendingFileKey, setPendingFileKey] = useState("");
+
   // Template mode state
   const [selectedTemplate, setSelectedTemplate] = useState<string>("vc");
   const [tierFilter, setTierFilter] = useState<"tier1" | "tier1-2" | "all">("all");
@@ -164,18 +179,47 @@ export default function Dashboard() {
 
   const uploadMutation = trpc.enrichment.uploadAndPreview.useMutation({
     onSuccess: (data) => {
+      // Always store headers + file references for column mapping
+      if (data.headers) setFileHeaders(data.headers);
+      setPendingFileUrl(data.fileUrl);
+      setPendingFileKey(data.fileKey);
+
+      if (data.status === "needs_mapping") {
+        // Auto-detect failed — show column mapping UI
+        const ad = data.headers.autoDetected;
+        setMappedCompanyName(ad.companyName ?? "");
+        setMappedWebsiteUrl(ad.websiteUrl ?? "");
+        setMappedDescription(ad.description ?? "");
+        setShowColumnMapping(true);
+        setUploading(false);
+        toast.info("We couldn't auto-detect your columns. Please map them below.");
+        return;
+      }
+
+      // status === "ready"
       const avgLen = data.preview.length > 0
-        ? data.preview.reduce((s, f) => s + f.descriptionPreview.length, 0) / data.preview.length * 3
+        ? data.preview.reduce((s: number, f: any) => s + f.descriptionPreview.length, 0) / data.preview.length * 3
         : 200;
       setPreviewData({
-        ...data,
+        fileUrl: data.fileUrl,
+        fileKey: data.fileKey,
+        firmCount: data.firmCount,
         avgDescriptionLength: Math.round(avgLen),
         costEstimate: {
-          ...data.costEstimate,
-          totalCostLow: (data.costEstimate as any).totalCostLow,
-          totalCostHigh: (data.costEstimate as any).totalCostHigh,
+          totalCost: data.costEstimate.totalCost,
+          totalCostLow: data.costEstimate.totalCostLow,
+          totalCostHigh: data.costEstimate.totalCostHigh,
+          perFirmCost: data.costEstimate.perFirmCost,
+          estimatedDuration: data.costEstimate.estimatedDuration,
         },
+        preview: data.preview,
       });
+      // Pre-fill mapping dropdowns from auto-detect for the "edit" link
+      const ad = data.headers.autoDetected;
+      setMappedCompanyName(ad.companyName ?? "");
+      setMappedWebsiteUrl(ad.websiteUrl ?? "");
+      setMappedDescription(ad.description ?? "");
+      setShowColumnMapping(false);
       setWizardStep("configure");
       setWizardSections([]);
       setDescription("");

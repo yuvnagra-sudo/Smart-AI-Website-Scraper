@@ -10,7 +10,7 @@ import { createEnrichmentJob, getEnrichmentJob, getUserEnrichmentJobs, getAllEnr
 import { getDb } from "./db";
 import { enrichedFirms, teamMembers, portfolioCompanies, investmentThesis } from "../drizzle/schema";
 import { eq, and, like, count } from "drizzle-orm";
-import { parseInputExcel, createOutputExcel, createAgentOutputExcel, type EnrichedVCData, type TeamMemberData, type PortfolioCompanyData, type ProcessingSummaryData } from "./excelProcessor";
+import { parseInputExcel, parseInputHeaders, createOutputExcel, createAgentOutputExcel, type EnrichedVCData, type TeamMemberData, type PortfolioCompanyData, type ProcessingSummaryData, type FileHeaders } from "./excelProcessor";
 import { scrapeUrl, type AgentSection, type DirectoryEntry as AgentDirectoryEntry, type ScrapeStats } from "./agentScraper";
 import { generateInvestmentThesisSummaries } from "./investmentThesisAnalyzer";
 import { generateResultsFile } from "./generateResultsService";
@@ -44,56 +44,91 @@ export const appRouter = router({
     uploadAndPreview: protectedProcedure
       .input(
         z.object({
-          fileData: z.string(), // base64 encoded file
-          fileName: z.string(),
+          fileData: z.string().optional(), // base64 encoded file (omitted on re-submit with mapping)
+          fileName: z.string().optional(),
+          fileUrl: z.string().optional(),   // provided on re-submit with mapping
+          fileKey: z.string().optional(),   // provided on re-submit with mapping
+          columnMapping: z.object({
+            companyNameColumn: z.string(),
+            websiteUrlColumn: z.string(),
+            descriptionColumn: z.string().optional(),
+          }).optional(),
         }),
       )
       .mutation(async ({ ctx, input }) => {
-        // Decode base64 and upload to S3
-        const buffer = Buffer.from(input.fileData, "base64");
-        const fileKey = `enrichment/${ctx.user.id}/${nanoid()}-${input.fileName}`;
-        // Determine MIME type based on file extension
-        const mimeType = input.fileName.toLowerCase().endsWith('.csv') 
-          ? 'text/csv' 
-          : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
-        
-        const { url: fileUrl } = await storagePut(fileKey, buffer, mimeType);
+        let fileUrl: string;
+        let fileKey: string;
 
-        // Parse Excel to get preview
-        const firms = await parseInputExcel(fileUrl);
-
-        // Validate firm count
-        const MAX_FIRMS_PER_JOB = 10000;
-        if (firms.length > MAX_FIRMS_PER_JOB) {
-          throw new TRPCError({
-            code: "BAD_REQUEST",
-            message: `Too many firms in your file (${firms.length}). Maximum allowed: ${MAX_FIRMS_PER_JOB} firms per job. Please split your file into smaller batches.`,
-          });
+        if (input.fileUrl && input.fileKey) {
+          // Re-submit with column mapping — file already uploaded
+          fileUrl = input.fileUrl;
+          fileKey = input.fileKey;
+        } else if (input.fileData && input.fileName) {
+          // First upload — decode and store
+          const buffer = Buffer.from(input.fileData, "base64");
+          fileKey = `enrichment/${ctx.user.id}/${nanoid()}-${input.fileName}`;
+          const mimeType = input.fileName.toLowerCase().endsWith('.csv')
+            ? 'text/csv'
+            : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+          const result = await storagePut(fileKey, buffer, mimeType);
+          fileUrl = result.url;
+        } else {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Provide either fileData+fileName or fileUrl+fileKey" });
         }
 
-        // Return preview data (first 5 firms)
-        const avgDescLength = firms.length > 0
-          ? firms.reduce((sum, f) => sum + (f.description?.length ?? 0), 0) / firms.length
-          : 200;
-        const costEstimate = estimateEnrichmentCost(firms.length, avgDescLength);
+        // Always get headers for the edit column mapping link
+        const headers = await parseInputHeaders(fileUrl);
 
-      return {
-        fileUrl,
-        fileKey,
-        firmCount: firms.length,
-        costEstimate: {
-          totalCost: costEstimate.totalCost,
-          totalCostLow: costEstimate.totalCostLow,
-          totalCostHigh: costEstimate.totalCostHigh,
-          perFirmCost: costEstimate.perFirmCost,
-          estimatedDuration: costEstimate.estimatedDuration,
-        },
-        preview: firms.slice(0, 5).map((f) => ({
-          companyName: f.companyName,
-          websiteUrl: f.websiteUrl,
-          descriptionPreview: f.description.substring(0, 150) + (f.description.length > 150 ? "..." : ""),
-        })),
-      };
+        // Try parsing — with explicit mapping or auto-detect
+        try {
+          const firms = await parseInputExcel(fileUrl, input.columnMapping);
+
+          const MAX_FIRMS_PER_JOB = 10000;
+          if (firms.length > MAX_FIRMS_PER_JOB) {
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message: `Too many firms (${firms.length}). Maximum: ${MAX_FIRMS_PER_JOB}. Split into smaller batches.`,
+            });
+          }
+
+          const avgDescLength = firms.length > 0
+            ? firms.reduce((sum, f) => sum + (f.description?.length ?? 0), 0) / firms.length
+            : 200;
+          const costEstimate = estimateEnrichmentCost(firms.length, avgDescLength);
+
+          return {
+            status: "ready" as const,
+            fileUrl,
+            fileKey,
+            firmCount: firms.length,
+            avgDescriptionLength: Math.round(avgDescLength),
+            costEstimate: {
+              totalCost: costEstimate.totalCost,
+              totalCostLow: costEstimate.totalCostLow,
+              totalCostHigh: costEstimate.totalCostHigh,
+              perFirmCost: costEstimate.perFirmCost,
+              estimatedDuration: costEstimate.estimatedDuration,
+            },
+            preview: firms.slice(0, 5).map((f) => ({
+              companyName: f.companyName,
+              websiteUrl: f.websiteUrl,
+              descriptionPreview: f.description.substring(0, 150) + (f.description.length > 150 ? "..." : ""),
+            })),
+            headers,
+          };
+        } catch (err) {
+          // Auto-detect failed — return headers so user can map columns
+          if (input.columnMapping) {
+            // User already provided mapping but it still failed — re-throw
+            throw err;
+          }
+          return {
+            status: "needs_mapping" as const,
+            fileUrl,
+            fileKey,
+            headers,
+          };
+        }
       }),
 
     // Confirm and start enrichment

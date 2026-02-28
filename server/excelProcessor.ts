@@ -8,6 +8,22 @@ export interface VCFirmInput {
   description: string;
 }
 
+export interface ColumnMapping {
+  companyNameColumn: string;
+  websiteUrlColumn: string;
+  descriptionColumn?: string;
+}
+
+export interface FileHeaders {
+  columns: string[];
+  sampleRows: Array<Record<string, string>>;
+  autoDetected: {
+    companyName?: string;
+    websiteUrl?: string;
+    description?: string;
+  };
+}
+
 export interface EnrichedVCData {
   companyName: string;
   websiteUrl: string;
@@ -71,71 +87,122 @@ export interface PortfolioCompanyData {
   recencyCategory: string;
 }
 
-export async function parseInputExcel(fileUrl: string): Promise<VCFirmInput[]> {
+// ---------------------------------------------------------------------------
+// Shared: read file into row data
+// ---------------------------------------------------------------------------
+
+async function readFileToRows(fileUrl: string): Promise<any[]> {
   let buffer: Buffer;
-  
-  // Check if it's a local file path (for testing) or a URL
+
   if (fileUrl.startsWith('/') || fileUrl.startsWith('./')) {
-    // Local file path - read directly from filesystem
     const fs = await import('fs/promises');
     buffer = await fs.readFile(fileUrl);
   } else {
-    // URL - download the file
     const response = await axios.get(fileUrl, { responseType: "arraybuffer" });
     buffer = Buffer.from(response.data);
   }
 
-  // Detect file type from URL or content
   const isCsv = fileUrl.toLowerCase().endsWith('.csv');
 
-  let data: any[];
-
   if (isCsv) {
-    // Use csv-parse for reliability on large files (2000+ rows)
-    // XLSX v0.18.x truncates large CSVs at ~800 rows with cellText:true
     const text = buffer.toString('utf-8');
-    data = csvParse(text, {
+    return csvParse(text, {
       columns: true,
       skip_empty_lines: true,
       trim: true,
       relax_column_count: true,
     }) as any[];
   } else {
-    // XLSX for .xlsx files — drop cellText:true (causes large-file truncation)
     const workbook = XLSX.read(buffer, { type: "buffer", cellDates: false });
     const sheetName = workbook.SheetNames[0];
     if (!sheetName) throw new Error("No sheets found in file");
     const sheet = workbook.Sheets[sheetName];
     if (!sheet) throw new Error("Sheet not found");
-    data = XLSX.utils.sheet_to_json(sheet, { raw: false, defval: "" }) as any[];
+    return XLSX.utils.sheet_to_json(sheet, { raw: false, defval: "" }) as any[];
   }
+}
+
+// Column name variants for auto-detection
+const COMPANY_NAME_VARIANTS = [
+  "Company Name", "company_name", "CompanyName", "company name",
+  "Company", "company", "Name", "name", "Firm Name", "firm_name", "Firm", "firm",
+];
+const WEBSITE_URL_VARIANTS = [
+  "Company Website URL", "website_url", "WebsiteURL", "Company Website",
+  "company website url", "Corporate Website", "corporate website",
+  "Corporate LinkedIn URL", "corporate linkedin url",
+  "Website", "website", "URL", "url", "Site", "site",
+];
+const DESCRIPTION_VARIANTS = [
+  "LinkedIn Description", "linkedin_description", "Description", "description",
+  "linkedin description", "About", "about", "Summary", "summary",
+];
+
+// Find which column header matches a set of variants (returns the header name, not the value)
+function findMatchingColumnHeader(columns: string[], possibleNames: string[]): string | undefined {
+  for (const name of possibleNames) {
+    const lowerName = name.toLowerCase().replace(/[\s_-]/g, '');
+    for (const col of columns) {
+      if (col === name) return col;
+      if (col.toLowerCase() === name.toLowerCase()) return col;
+      if (col.toLowerCase().replace(/[\s_-]/g, '') === lowerName) return col;
+    }
+  }
+  return undefined;
+}
+
+// Find column value from a row using variant matching
+function findColumnValue(row: any, possibleNames: string[]): string | undefined {
+  for (const name of possibleNames) {
+    if (row[name] !== undefined) return String(row[name]);
+    const lowerName = name.toLowerCase();
+    for (const key of Object.keys(row)) {
+      if (key.toLowerCase() === lowerName || key.toLowerCase().replace(/[\s_-]/g, '') === lowerName.replace(/[\s_-]/g, '')) {
+        return String(row[key]);
+      }
+    }
+  }
+  return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Parse file headers + auto-detect columns (never throws on missing columns)
+// ---------------------------------------------------------------------------
+
+export async function parseInputHeaders(fileUrl: string): Promise<FileHeaders> {
+  const data = await readFileToRows(fileUrl);
+  if (data.length === 0) throw new Error("File is empty or has no data rows");
+
+  const columns = Object.keys(data[0] || {});
+  const sampleRows = data.slice(0, 5).map(row => {
+    const clean: Record<string, string> = {};
+    for (const col of columns) clean[col] = String(row[col] ?? "");
+    return clean;
+  });
+
+  return {
+    columns,
+    sampleRows,
+    autoDetected: {
+      companyName: findMatchingColumnHeader(columns, COMPANY_NAME_VARIANTS),
+      websiteUrl: findMatchingColumnHeader(columns, WEBSITE_URL_VARIANTS),
+      description: findMatchingColumnHeader(columns, DESCRIPTION_VARIANTS),
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Parse input file into firm list (with optional explicit column mapping)
+// ---------------------------------------------------------------------------
+
+export async function parseInputExcel(fileUrl: string, columnMapping?: ColumnMapping): Promise<VCFirmInput[]> {
+  const data = await readFileToRows(fileUrl);
 
   if (data.length === 0) {
     throw new Error("File is empty or has no data rows");
   }
 
-  // Get all column names from the first row
-  const firstRow = data[0];
-  const availableColumns = Object.keys(firstRow || {});
-
-  // Helper function to find column case-insensitively
-  const findColumn = (row: any, possibleNames: string[]): string | undefined => {
-    for (const name of possibleNames) {
-      // Try exact match first
-      if (row[name] !== undefined) return String(row[name]);
-      
-      // Try case-insensitive match
-      const lowerName = name.toLowerCase();
-      for (const key of Object.keys(row)) {
-        if (key.toLowerCase() === lowerName || key.toLowerCase().replace(/[\s_-]/g, '') === lowerName.replace(/[\s_-]/g, '')) {
-          return String(row[key]);
-        }
-      }
-    }
-    return undefined;
-  };
-
-  // Validate and map data
+  const availableColumns = Object.keys(data[0] || {});
   const firms: VCFirmInput[] = [];
   const skippedRows: number[] = [];
 
@@ -143,69 +210,37 @@ export async function parseInputExcel(fileUrl: string): Promise<VCFirmInput[]> {
     const row = data[i];
     if (!row) continue;
 
-    const companyName = findColumn(row, [
-      "Company Name",
-      "company_name",
-      "CompanyName",
-      "company name",
-      "Company",
-      "company",
-      "Name",
-      "name",
-      "Firm Name",
-      "firm_name",
-      "Firm",
-      "firm",
-    ]);
+    let companyName: string | undefined;
+    let websiteUrl: string | undefined;
+    let description: string | undefined;
 
-    const websiteUrl = findColumn(row, [
-      "Company Website URL",
-      "website_url",
-      "WebsiteURL",
-      "Company Website",
-      "company website url",
-      "Corporate Website",
-      "corporate website",
-      "Corporate LinkedIn URL",
-      "corporate linkedin url",
-      "Website",
-      "website",
-      "URL",
-      "url",
-      "Site",
-      "site",
-    ]);
+    if (columnMapping) {
+      // Use explicit column mapping
+      companyName = row[columnMapping.companyNameColumn] != null ? String(row[columnMapping.companyNameColumn]) : undefined;
+      websiteUrl = row[columnMapping.websiteUrlColumn] != null ? String(row[columnMapping.websiteUrlColumn]) : undefined;
+      description = columnMapping.descriptionColumn ? String(row[columnMapping.descriptionColumn] ?? "") : "";
+    } else {
+      // Auto-detect using variant matching
+      companyName = findColumnValue(row, COMPANY_NAME_VARIANTS);
+      websiteUrl = findColumnValue(row, WEBSITE_URL_VARIANTS);
+      description = findColumnValue(row, DESCRIPTION_VARIANTS);
+    }
 
-    const description = findColumn(row, [
-      "LinkedIn Description",
-      "linkedin_description",
-      "Description",
-      "description",
-      "linkedin description",
-      "About",
-      "about",
-      "Summary",
-      "summary",
-    ]);
-
-    // Only require companyName and websiteUrl - description is optional
     if (!companyName || !websiteUrl) {
       console.log(`[Excel Parser] Skipping row ${i + 2}: missing required fields (companyName=${!!companyName}, websiteUrl=${!!websiteUrl})`);
-      skippedRows.push(i + 2); // +2 because Excel rows are 1-indexed and header is row 1
+      skippedRows.push(i + 2);
       continue;
     }
-    
-    console.log(`[Excel Parser] Parsed firm: ${companyName}`);
 
     firms.push({
       companyName,
       websiteUrl,
-      description: description || '', // Use empty string if no description
+      description: description || '',
     });
   }
 
   console.log(`[Excel Parser] Successfully parsed ${firms.length} firms, skipped ${skippedRows.length} rows`);
-  
+
   if (firms.length === 0) {
     const columnList = availableColumns.join(", ");
     throw new Error(
