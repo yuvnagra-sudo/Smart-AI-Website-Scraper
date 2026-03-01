@@ -163,6 +163,8 @@ export default function Dashboard() {
 
   const [viewResultsJob, setViewResultsJob] = useState<{ id: number; template: string; sectionsJson?: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Track whether the current uploadMutation call is a manual re-submit with explicit mapping
+  const isManualMappingRef = useRef(false);
 
   const { data: jobs, isLoading: jobsLoading, refetch } = trpc.enrichment.listJobs.useQuery(undefined, {
     enabled: !!user,
@@ -183,9 +185,8 @@ export default function Dashboard() {
       setPendingFileUrl(data.fileUrl);
       setPendingFileKey(data.fileKey);
 
-      // Only auto-fill roles on first upload, not after user re-submits with mapping
-      const hasExistingRoles = Object.values(columnRoles).some(r => r !== "");
-      if (!hasExistingRoles) {
+      // Only auto-fill roles on first upload, not after user re-submits with their manual mapping
+      if (!isManualMappingRef.current) {
         const ad = data.headers.autoDetected;
         const roles: Record<string, string> = {};
         for (const col of data.headers.columns) roles[col] = "";
@@ -194,6 +195,7 @@ export default function Dashboard() {
         if (ad.description) roles[ad.description] = "description";
         setColumnRoles(roles);
       }
+      isManualMappingRef.current = false;
 
       if (data.status === "needs_mapping") {
         // Auto-detect failed — show column mapping grid
@@ -339,6 +341,7 @@ export default function Dashboard() {
       toast.error("Please assign both Company Name and Website URL to a column");
       return;
     }
+    isManualMappingRef.current = true;
     uploadMutation.mutate({
       fileUrl: pendingFileUrl,
       fileKey: pendingFileKey,
@@ -1257,7 +1260,7 @@ function AddSectionRow({ onAdd }: { onAdd: (s: AgentSection) => void }) {
   );
 }
 
-function DownloadResultsButton({ jobId }: { jobId: number; outputFileUrl?: string | null }) {
+function DownloadResultsButton({ jobId, outputFileUrl }: { jobId: number; outputFileUrl?: string | null }) {
   const [isGenerating, setIsGenerating] = useState(false);
   const generateMutation = trpc.enrichment.generateResults.useMutation({
     onSuccess: (data) => {
@@ -1286,10 +1289,36 @@ function DownloadResultsButton({ jobId }: { jobId: number; outputFileUrl?: strin
     },
   });
 
+  const handleClick = async () => {
+    setIsGenerating(true);
+    // Agent jobs store results directly in S3 — download from there
+    if (outputFileUrl) {
+      try {
+        const response = await fetch(outputFileUrl);
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `results-${jobId}.xlsx`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(url);
+      } catch {
+        toast.error("Failed to download file");
+      } finally {
+        setIsGenerating(false);
+      }
+    } else {
+      // Standard enrichment job — regenerate from DB
+      generateMutation.mutate({ jobId });
+    }
+  };
+
   return (
     <Button
       size="sm"
-      onClick={() => { setIsGenerating(true); generateMutation.mutate({ jobId }); }}
+      onClick={handleClick}
       disabled={isGenerating || generateMutation.isPending}
     >
       {isGenerating || generateMutation.isPending ? (
