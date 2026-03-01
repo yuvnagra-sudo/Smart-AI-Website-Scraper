@@ -183,14 +183,17 @@ export default function Dashboard() {
       setPendingFileUrl(data.fileUrl);
       setPendingFileKey(data.fileKey);
 
-      // Build role map from auto-detected columns
-      const ad = data.headers.autoDetected;
-      const roles: Record<string, string> = {};
-      for (const col of data.headers.columns) roles[col] = "";
-      if (ad.companyName) roles[ad.companyName] = "companyName";
-      if (ad.websiteUrl) roles[ad.websiteUrl] = "websiteUrl";
-      if (ad.description) roles[ad.description] = "description";
-      setColumnRoles(roles);
+      // Only auto-fill roles on first upload, not after user re-submits with mapping
+      const hasExistingRoles = Object.values(columnRoles).some(r => r !== "");
+      if (!hasExistingRoles) {
+        const ad = data.headers.autoDetected;
+        const roles: Record<string, string> = {};
+        for (const col of data.headers.columns) roles[col] = "";
+        if (ad.companyName) roles[ad.companyName] = "companyName";
+        if (ad.websiteUrl) roles[ad.websiteUrl] = "websiteUrl";
+        if (ad.description) roles[ad.description] = "description";
+        setColumnRoles(roles);
+      }
 
       if (data.status === "needs_mapping") {
         // Auto-detect failed — show column mapping grid
