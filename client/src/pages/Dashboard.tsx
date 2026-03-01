@@ -318,11 +318,33 @@ export default function Dashboard() {
     });
   };
 
+  const handleColumnMappingSubmit = () => {
+    if (!mappedCompanyName || !mappedWebsiteUrl) {
+      toast.error("Please select both Company Name and Website URL columns");
+      return;
+    }
+    uploadMutation.mutate({
+      fileUrl: pendingFileUrl,
+      fileKey: pendingFileKey,
+      columnMapping: {
+        companyNameColumn: mappedCompanyName,
+        websiteUrlColumn: mappedWebsiteUrl,
+        descriptionColumn: mappedDescription || undefined,
+      },
+    });
+    setShowColumnMapping(false);
+    setUploading(true);
+  };
+
   const handleCancelWizard = () => {
     setWizardStep("idle");
     setPreviewData(null);
     setWizardSections([]);
     setDescription("");
+    setShowColumnMapping(false);
+    setFileHeaders(null);
+    setPendingFileUrl("");
+    setPendingFileKey("");
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
@@ -402,7 +424,10 @@ export default function Dashboard() {
                 disabled={uploading || wizardStep !== "idle"}
                 className="flex-1"
               />
-              <Button disabled={uploading || wizardStep !== "idle"}>
+              <Button
+                disabled={uploading || wizardStep !== "idle"}
+                onClick={() => fileInputRef.current?.click()}
+              >
                 {uploading ? (
                   <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Uploading...</>
                 ) : (
@@ -419,6 +444,113 @@ export default function Dashboard() {
           <span>Works best on public websites. Social media profiles and login-protected pages have limited support.</span>
         </div>
 
+        {/* ── Column Mapping Card ── */}
+        {showColumnMapping && fileHeaders && (
+          <Card className="mb-6 border-2 border-amber-400">
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <CardTitle className="text-lg">Map Your Columns</CardTitle>
+                <Button variant="ghost" size="sm" onClick={handleCancelWizard}>
+                  <X className="h-4 w-4 mr-1" /> Cancel
+                </Button>
+              </div>
+              <CardDescription>
+                Select which columns in your file correspond to each required field.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-5">
+              {/* Company Name mapping */}
+              <div className="space-y-1.5">
+                <Label className="text-sm font-medium">
+                  Company Name <span className="text-red-500">*</span>
+                </Label>
+                <Select value={mappedCompanyName} onValueChange={setMappedCompanyName}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select column..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {fileHeaders.columns.map((col) => (
+                      <SelectItem key={col} value={col}>{col}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {mappedCompanyName && fileHeaders.sampleRows[0] && (
+                  <p className="text-xs text-muted-foreground">
+                    Sample: {fileHeaders.sampleRows[0][mappedCompanyName] || "(empty)"}
+                  </p>
+                )}
+              </div>
+
+              {/* Website URL mapping */}
+              <div className="space-y-1.5">
+                <Label className="text-sm font-medium">
+                  Website URL <span className="text-red-500">*</span>
+                </Label>
+                <Select value={mappedWebsiteUrl} onValueChange={setMappedWebsiteUrl}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select column..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {fileHeaders.columns.map((col) => (
+                      <SelectItem key={col} value={col}>{col}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {mappedWebsiteUrl && fileHeaders.sampleRows[0] && (
+                  <p className="text-xs text-muted-foreground">
+                    Sample: {fileHeaders.sampleRows[0][mappedWebsiteUrl] || "(empty)"}
+                  </p>
+                )}
+              </div>
+
+              {/* Description mapping (optional) */}
+              <div className="space-y-1.5">
+                <Label className="text-sm font-medium">
+                  Description <span className="text-muted-foreground font-normal">(optional)</span>
+                </Label>
+                <Select value={mappedDescription || "__none__"} onValueChange={(v) => setMappedDescription(v === "__none__" ? "" : v)}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="None" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="__none__">None</SelectItem>
+                    {fileHeaders.columns.map((col) => (
+                      <SelectItem key={col} value={col}>{col}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {mappedDescription && fileHeaders.sampleRows[0] && (
+                  <p className="text-xs text-muted-foreground">
+                    Sample: {fileHeaders.sampleRows[0][mappedDescription] || "(empty)"}
+                  </p>
+                )}
+              </div>
+
+              {/* Sample data preview */}
+              {fileHeaders.sampleRows.length > 0 && (
+                <div>
+                  <p className="text-xs font-medium text-muted-foreground mb-2">
+                    Your file has {fileHeaders.columns.length} columns: {fileHeaders.columns.join(", ")}
+                  </p>
+                </div>
+              )}
+
+              <div className="flex justify-end pt-1">
+                <Button
+                  onClick={handleColumnMappingSubmit}
+                  disabled={!mappedCompanyName || !mappedWebsiteUrl || uploadMutation.isPending}
+                >
+                  {uploadMutation.isPending ? (
+                    <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Processing...</>
+                  ) : (
+                    "Confirm & Continue"
+                  )}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         {/* ── Step 2: Configure ── */}
         {wizardStep === "configure" && previewData && (
           <Card className="mb-6 border-2 border-primary/30">
@@ -431,6 +563,14 @@ export default function Dashboard() {
               </div>
               <CardDescription>
                 {previewData.firmCount} entries ready · Choose how to extract data from each page
+                {fileHeaders && (
+                  <button
+                    className="ml-2 text-xs text-primary underline hover:text-primary/80"
+                    onClick={() => setShowColumnMapping(true)}
+                  >
+                    Edit column mapping
+                  </button>
+                )}
               </CardDescription>
             </CardHeader>
             <CardContent>
