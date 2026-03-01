@@ -9,7 +9,7 @@ export interface VCFirmInput {
 }
 
 export interface ColumnMapping {
-  companyNameColumn: string;
+  companyNameColumn?: string; // optional — falls back to URL if not provided
   websiteUrlColumn: string;
   descriptionColumn?: string;
 }
@@ -220,7 +220,9 @@ export async function parseInputExcel(fileUrl: string, columnMapping?: ColumnMap
 
     if (columnMapping) {
       // Use explicit column mapping
-      companyName = row[columnMapping.companyNameColumn] != null ? String(row[columnMapping.companyNameColumn]) : undefined;
+      if (columnMapping.companyNameColumn) {
+        companyName = row[columnMapping.companyNameColumn] != null ? String(row[columnMapping.companyNameColumn]) : undefined;
+      }
       websiteUrl = row[columnMapping.websiteUrlColumn] != null ? String(row[columnMapping.websiteUrlColumn]) : undefined;
       description = columnMapping.descriptionColumn ? String(row[columnMapping.descriptionColumn] ?? "") : "";
     } else {
@@ -230,11 +232,14 @@ export async function parseInputExcel(fileUrl: string, columnMapping?: ColumnMap
       description = findColumnValue(row, DESCRIPTION_VARIANTS);
     }
 
-    if (!companyName || !websiteUrl) {
-      console.log(`[Excel Parser] Skipping row ${i + 2}: missing required fields (companyName=${!!companyName}, websiteUrl=${!!websiteUrl})`);
+    if (!websiteUrl) {
+      console.log(`[Excel Parser] Skipping row ${i + 2}: missing required websiteUrl`);
       skippedRows.push(i + 2);
       continue;
     }
+
+    // Company name is optional — fall back to URL as identifier
+    if (!companyName) companyName = websiteUrl;
 
     firms.push({
       companyName,
@@ -249,8 +254,8 @@ export async function parseInputExcel(fileUrl: string, columnMapping?: ColumnMap
     const columnList = availableColumns.join(", ");
     throw new Error(
       `No valid data found. Your file has columns: [${columnList}]. ` +
-      `Required columns (case-insensitive): Company Name (or Name/Firm Name), ` +
-      `Company Website URL (or Website/URL), and LinkedIn Description (or Description/About/Summary). ` +
+      `Required: a Website URL column (or Website/URL/Link). ` +
+      `Company Name is optional (falls back to URL if not provided). ` +
       (skippedRows.length > 0 ? `Skipped rows: ${skippedRows.join(", ")}` : "")
     );
   }

@@ -315,8 +315,8 @@ export default function Dashboard() {
     const companyCol = Object.entries(columnRoles).find(([, r]) => r === "companyName")?.[0];
     const websiteCol = Object.entries(columnRoles).find(([, r]) => r === "websiteUrl")?.[0];
     const descCol = Object.entries(columnRoles).find(([, r]) => r === "description")?.[0];
-    const columnMapping = companyCol && websiteCol ? {
-      companyNameColumn: companyCol,
+    const columnMapping = websiteCol ? {
+      companyNameColumn: companyCol || undefined,
       websiteUrlColumn: websiteCol,
       descriptionColumn: descCol || undefined,
     } : undefined;
@@ -337,8 +337,8 @@ export default function Dashboard() {
     const companyCol = Object.entries(columnRoles).find(([, r]) => r === "companyName")?.[0];
     const websiteCol = Object.entries(columnRoles).find(([, r]) => r === "websiteUrl")?.[0];
     const descCol = Object.entries(columnRoles).find(([, r]) => r === "description")?.[0];
-    if (!companyCol || !websiteCol) {
-      toast.error("Please assign both Company Name and Website URL to a column");
+    if (!websiteCol) {
+      toast.error("Please assign a Website URL column");
       return;
     }
     isManualMappingRef.current = true;
@@ -346,7 +346,7 @@ export default function Dashboard() {
       fileUrl: pendingFileUrl,
       fileKey: pendingFileKey,
       columnMapping: {
-        companyNameColumn: companyCol,
+        companyNameColumn: companyCol || undefined,
         websiteUrlColumn: websiteCol,
         descriptionColumn: descCol || undefined,
       },
@@ -570,17 +570,14 @@ export default function Dashboard() {
                     : `${fileHeaders.sampleRows.length} sample rows`}
                   {" · "}
                   {(() => {
-                    const hasName = Object.values(columnRoles).includes("companyName");
                     const hasUrl = Object.values(columnRoles).includes("websiteUrl");
-                    if (hasName && hasUrl) return <span className="text-green-600 font-medium">Ready</span>;
-                    const missing = [!hasName && "Company Name", !hasUrl && "Website URL"].filter(Boolean);
-                    return <span className="text-amber-600 font-medium">Missing: {missing.join(", ")}</span>;
+                    if (hasUrl) return <span className="text-green-600 font-medium">Ready</span>;
+                    return <span className="text-amber-600 font-medium">Missing: Website URL</span>;
                   })()}
                 </p>
                 <Button
                   onClick={handleColumnMappingSubmit}
                   disabled={
-                    !Object.values(columnRoles).includes("companyName") ||
                     !Object.values(columnRoles).includes("websiteUrl") ||
                     uploadMutation.isPending
                   }

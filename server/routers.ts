@@ -49,7 +49,7 @@ export const appRouter = router({
           fileUrl: z.string().optional(),   // provided on re-submit with mapping
           fileKey: z.string().optional(),   // provided on re-submit with mapping
           columnMapping: z.object({
-            companyNameColumn: z.string(),
+            companyNameColumn: z.string().optional(),
             websiteUrlColumn: z.string(),
             descriptionColumn: z.string().optional(),
           }).optional(),
@@ -149,7 +149,7 @@ export const appRouter = router({
           objective: z.string().optional(),
           // Column mapping (for non-standard column names)
           columnMapping: z.object({
-            companyNameColumn: z.string(),
+            companyNameColumn: z.string().optional(),
             websiteUrlColumn: z.string(),
             descriptionColumn: z.string().optional(),
           }).optional(),
