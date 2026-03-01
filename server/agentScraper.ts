@@ -408,7 +408,16 @@ export async function scrapeUrl(
   // ── DIRECTORY-ENTRY ────────────────────────────────────────────────────────
   if (classification.type === "directory-entry") {
     const nativeUrl = await extractNativeUrl(content, url);
-    // Also extract basic profile fields if sections are defined
+    console.log(`[agentScraper] Directory-entry: nativeUrl=${nativeUrl}`);
+
+    if (nativeUrl && maxHops > 0) {
+      // Follow the company's native website and return its profile data directly.
+      // This makes directory-entry pages transparent to the caller.
+      console.log(`[agentScraper] Following native URL: ${nativeUrl}`);
+      return await scrapeUrl(nativeUrl, objective, sections, systemPrompt, maxHops - 1);
+    }
+
+    // Fallback: no native URL found — return as directory entry so user can see it
     let data: Record<string, string> = {};
     if (sections.length > 0) {
       data = await extractProfileFields(content, sections, systemPrompt);
@@ -418,8 +427,6 @@ export async function scrapeUrl(
       directoryUrl: url,
       nativeUrl,
     };
-    console.log(`[agentScraper] Directory-entry: nativeUrl=${nativeUrl}`);
-    // Return as directory (single entry) so it ends up in "Collected URLs" tab
     return { type: "directory", entries: [entry] };
   }
 

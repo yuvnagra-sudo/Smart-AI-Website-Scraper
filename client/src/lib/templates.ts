@@ -310,6 +310,30 @@ const REALESTATE_TEMPLATE: Template = {
   ],
 };
 
+const DIRECTORY_TEMPLATE: Template = {
+  id: "directory",
+  name: "Directory Listing",
+  icon: "List",
+  description: "Scrape companies from directory pages (GoodFirms, Clutch, G2, Yelp, etc.) — automatically visits each company's own website",
+  color: "slate",
+  sheets: [
+    {
+      key: "firms",
+      label: "Companies",
+      fields: [
+        { key: "companyName",      label: "Company Name" },
+        { key: "websiteUrl",       label: "Website" },
+        { key: "description",      label: "Description" },
+        { key: "investmentNiches", label: "Services / Products" },
+        { key: "aum",              label: "Team Size" },
+        { key: "headquarters",     label: "Location" },
+        { key: "foundedYear",      label: "Founded" },
+        { key: "investorType",     label: "Key Contact" },
+      ],
+    },
+  ],
+};
+
 const LOCAL_TEMPLATE: Template = {
   id: "local",
   name: "Local Businesses",
@@ -356,6 +380,7 @@ export const ALL_TEMPLATES: Template[] = [
   ECOMMERCE_TEMPLATE,
   REALESTATE_TEMPLATE,
   LOCAL_TEMPLATE,
+  DIRECTORY_TEMPLATE,
 ];
 
 const TEMPLATE_MAP = new Map<string, Template>(ALL_TEMPLATES.map(t => [t.id, t]));
@@ -433,6 +458,16 @@ export const TEMPLATE_SECTIONS: Record<string, AgentSection[]> = {
     { key: "amenities_features",   label: "Amenities / Features",    desc: "Parking, delivery, takeout, outdoor seating, ADA accessibility, appointment required, etc." },
     { key: "contact_location",     label: "Contact & Location",      desc: "Street address, phone, email, and any booking or reservation links" },
   ],
+  directory: [
+    { key: "company_name",         label: "Company Name",            desc: "Full legal or trading name of the company (from their own website)" },
+    { key: "website",              label: "Website",                 desc: "The company's own website URL (not the directory URL)" },
+    { key: "description",          label: "Description",             desc: "What the company does — their core offering or value proposition" },
+    { key: "services",             label: "Services / Products",     desc: "Specific services or products they offer" },
+    { key: "team_size",            label: "Team Size",               desc: "Number of employees or size indicator (e.g. '10–49', '~200 staff')" },
+    { key: "location",             label: "Location",                desc: "Headquarters city, country, or region" },
+    { key: "founded",              label: "Founded",                 desc: "Year the company was founded, if available" },
+    { key: "key_contact",          label: "Key Contact",             desc: "Name and title of the primary contact or decision maker listed on the site" },
+  ],
 };
 
 export const TEMPLATE_SYSTEM_PROMPTS: Record<string, string> = {
@@ -442,4 +477,5 @@ export const TEMPLATE_SYSTEM_PROMPTS: Record<string, string> = {
   ecommerce:  "You are an e-commerce competitive analyst. For each online store, extract the requested fields about products, pricing, brand positioning, and customer experience. Return ONLY valid JSON with one key per requested field.",
   realestate: "You are a real estate market analyst. For each agency website, extract the requested fields about property types, service areas, agents, and recent activity. Return ONLY valid JSON with one key per requested field.",
   local:      "You are a local business researcher. For each business website or listing page, extract the requested fields about services, hours, pricing, and customer feedback. Return ONLY valid JSON with one key per requested field.",
+  directory:  "You are a business researcher analyzing companies sourced from directory listings. The scraper automatically visits each company's own website (not the directory page). Extract the requested fields from the company's native website. Be specific and factual — use what's actually stated on the site. Return ONLY valid JSON with one key per requested field.",
 };

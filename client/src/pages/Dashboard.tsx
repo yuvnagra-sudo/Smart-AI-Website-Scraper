@@ -15,7 +15,7 @@ import { getLoginUrl } from "@/const";
 import {
   Bot, Download, Upload, Clock, CheckCircle, XCircle, Loader2, LogOut,
   FileSpreadsheet, Table2, DollarSign, TrendingUp, Building2, Users,
-  HeartPulse, ShoppingCart, Home, MapPin, Info, Sparkles, X, Plus,
+  HeartPulse, ShoppingCart, Home, MapPin, Info, Sparkles, X, Plus, List,
 } from "lucide-react";
 import { useState, useRef } from "react";
 import { toast } from "sonner";
@@ -34,6 +34,7 @@ const TEMPLATE_ICONS: Record<string, any> = {
   ecommerce:   <ShoppingCart className="h-4 w-4" />,
   realestate:  <Home className="h-4 w-4" />,
   local:       <MapPin className="h-4 w-4" />,
+  directory:   <List className="h-4 w-4" />,
 };
 
 const TEMPLATE_COLORS: Record<string, { bg: string; text: string; border: string }> = {
@@ -44,6 +45,7 @@ const TEMPLATE_COLORS: Record<string, { bg: string; text: string; border: string
   ecommerce:   { bg: "bg-orange-50",  text: "text-orange-700",  border: "border-orange-400" },
   realestate:  { bg: "bg-teal-50",    text: "text-teal-700",    border: "border-teal-400" },
   local:       { bg: "bg-green-50",   text: "text-green-700",   border: "border-green-400" },
+  directory:   { bg: "bg-slate-50",   text: "text-slate-700",   border: "border-slate-400" },
 };
 
 // Pre-fills the textarea with a good starting objective per template
@@ -55,6 +57,7 @@ const TEMPLATE_OBJECTIVES: Record<string, string> = {
   ecommerce:  "Find product categories, pricing strategy, customer reviews, shipping options, and market positioning for each store",
   realestate: "Find property types, listing prices, agent information, neighborhood details, and market positioning",
   local:      "Find business hours, services, customer reviews, pricing, and contact details for each local business",
+  directory:  "Visit each company's own website from the directory listing and extract their description, services, team size, location, and key contact",
 };
 
 const SUGGESTION_CHIPS = [
@@ -430,7 +433,7 @@ export default function Dashboard() {
               Upload your list
             </CardTitle>
             <CardDescription>
-              Excel (.xlsx) or CSV with columns: <strong>Name</strong>, <strong>Website URL</strong>, <strong>Description</strong> (optional — use as per-URL objective override).
+              Excel (.xlsx) or CSV with columns: <strong>Website URL</strong> (required), <strong>Name</strong> and <strong>Description</strong> (optional — Description used as per-URL objective override).
               The scraper will visit each URL and extract structured data automatically.
             </CardDescription>
           </CardHeader>
@@ -475,13 +478,13 @@ export default function Dashboard() {
                 </Button>
               </div>
               <CardDescription>
-                Use the dropdowns above each column to assign: <strong>Company Name</strong>, <strong>Website URL</strong>, and optionally <strong>Description</strong>.
+                Use the dropdowns above each column to assign: <strong>Website URL</strong> (required), and optionally <strong>Company Name</strong> and <strong>Description</strong>.
               </CardDescription>
             </CardHeader>
             <CardContent>
               {/* Legend */}
               <div className="flex gap-3 mb-3 text-xs">
-                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-500 inline-block" /> Company Name (required)</span>
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-500 inline-block" /> Company Name (optional)</span>
                 <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500 inline-block" /> Website URL (required)</span>
                 <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-500 inline-block" /> Description (optional)</span>
               </div>

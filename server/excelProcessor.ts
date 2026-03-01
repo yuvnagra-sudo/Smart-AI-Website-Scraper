@@ -142,6 +142,30 @@ const DESCRIPTION_VARIANTS = [
   "linkedin description", "About", "about", "Summary", "summary",
 ];
 
+// Returns true if a string looks like a URL (not an email or plain text)
+function looksLikeUrl(s: string): boolean {
+  const t = s.trim();
+  return t.startsWith("http://") || t.startsWith("https://") || t.startsWith("www.");
+}
+
+// Find websiteUrl column: prefer name-based match but validate with cell content.
+// Falls back to any column whose sample values look like URLs.
+function detectWebsiteUrlColumn(
+  columns: string[],
+  sampleRows: Record<string, string>[]
+): string | undefined {
+  const nameMatch = findMatchingColumnHeader(columns, WEBSITE_URL_VARIANTS);
+  if (nameMatch) {
+    const hasUrlContent = sampleRows.some(row => looksLikeUrl(row[nameMatch] ?? ""));
+    if (hasUrlContent) return nameMatch; // name + content both match
+  }
+  // Fallback: find any column whose sample values look like URLs
+  for (const col of columns) {
+    if (sampleRows.some(row => looksLikeUrl(row[col] ?? ""))) return col;
+  }
+  return nameMatch; // give up — return name match so user can remap manually
+}
+
 // Find which column header matches a set of variants (returns the header name, not the value)
 function findMatchingColumnHeader(columns: string[], possibleNames: string[]): string | undefined {
   for (const name of possibleNames) {
@@ -189,7 +213,7 @@ export async function parseInputHeaders(fileUrl: string): Promise<FileHeaders> {
     sampleRows,
     autoDetected: {
       companyName: findMatchingColumnHeader(columns, COMPANY_NAME_VARIANTS),
-      websiteUrl: findMatchingColumnHeader(columns, WEBSITE_URL_VARIANTS),
+      websiteUrl: detectWebsiteUrlColumn(columns, sampleRows),
       description: findMatchingColumnHeader(columns, DESCRIPTION_VARIANTS),
     },
   };
@@ -230,6 +254,13 @@ export async function parseInputExcel(fileUrl: string, columnMapping?: ColumnMap
       companyName = findColumnValue(row, COMPANY_NAME_VARIANTS);
       websiteUrl = findColumnValue(row, WEBSITE_URL_VARIANTS);
       description = findColumnValue(row, DESCRIPTION_VARIANTS);
+    }
+
+    // Reject email addresses that ended up in the websiteUrl field
+    if (websiteUrl && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(websiteUrl.trim()) && !websiteUrl.includes("://")) {
+      console.log(`[Excel Parser] Skipping row ${i + 2}: websiteUrl is an email address (${websiteUrl})`);
+      skippedRows.push(i + 2);
+      continue;
     }
 
     if (!websiteUrl) {
