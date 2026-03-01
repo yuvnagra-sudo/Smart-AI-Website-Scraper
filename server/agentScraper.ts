@@ -9,7 +9,7 @@
  * Builds on existing primitives: directoryExtractor, jinaFetcher, queuedLLMCall.
  */
 
-import { fetchViaJina } from "./jinaFetcher";
+import { fetchViaJina, fetchWebsiteContentHybrid } from "./jinaFetcher";
 import { extractDirectory, type DirectoryEntry as DirEntry } from "./directoryExtractor";
 import { queuedLLMCall } from "./_core/llmQueue";
 
@@ -373,10 +373,18 @@ export async function scrapeUrl(
 ): Promise<AgentScrapeResult> {
   console.log(`[agentScraper] Starting: ${url}`);
 
-  // Fetch the initial page
-  const jinaResult = await fetchViaJina(url);
-  if (!jinaResult?.success || !jinaResult.content) {
-    console.warn(`[agentScraper] Failed to fetch: ${url}`);
+  // Fetch the initial page (Jina first, Puppeteer fallback for Cloudflare-protected sites)
+  const jinaResult = await fetchWebsiteContentHybrid(url, async () => {
+    try {
+      const { scrapeWebsite } = await import("./scraper");
+      const result = await scrapeWebsite({ url, cache: true, cacheTTL: 7 * 24 * 60 * 60, timeout: 45000 });
+      return result.success ? result.html || null : null;
+    } catch {
+      return null;
+    }
+  });
+  if (!jinaResult.success || !jinaResult.content) {
+    console.warn(`[agentScraper] Failed to fetch (Jina + Puppeteer): ${url}`);
     if (sections.length === 0) return { type: "directory", entries: [] };
     const empty: Record<string, string> = {};
     for (const s of sections) empty[s.key] = "";
