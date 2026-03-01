@@ -150,9 +150,8 @@ export default function Dashboard() {
     sampleRows: Array<Record<string, string>>;
     autoDetected: { companyName?: string; websiteUrl?: string; description?: string };
   } | null>(null);
-  const [mappedCompanyName, setMappedCompanyName] = useState("");
-  const [mappedWebsiteUrl, setMappedWebsiteUrl] = useState("");
-  const [mappedDescription, setMappedDescription] = useState("");
+  // Maps each column name → role ("companyName" | "websiteUrl" | "description" | "")
+  const [columnRoles, setColumnRoles] = useState<Record<string, string>>({});
   // Store fileUrl/fileKey for re-submit with mapping
   const [pendingFileUrl, setPendingFileUrl] = useState("");
   const [pendingFileKey, setPendingFileKey] = useState("");
@@ -184,12 +183,17 @@ export default function Dashboard() {
       setPendingFileUrl(data.fileUrl);
       setPendingFileKey(data.fileKey);
 
+      // Build role map from auto-detected columns
+      const ad = data.headers.autoDetected;
+      const roles: Record<string, string> = {};
+      for (const col of data.headers.columns) roles[col] = "";
+      if (ad.companyName) roles[ad.companyName] = "companyName";
+      if (ad.websiteUrl) roles[ad.websiteUrl] = "websiteUrl";
+      if (ad.description) roles[ad.description] = "description";
+      setColumnRoles(roles);
+
       if (data.status === "needs_mapping") {
-        // Auto-detect failed — show column mapping UI
-        const ad = data.headers.autoDetected;
-        setMappedCompanyName(ad.companyName ?? "");
-        setMappedWebsiteUrl(ad.websiteUrl ?? "");
-        setMappedDescription(ad.description ?? "");
+        // Auto-detect failed — show column mapping grid
         setShowColumnMapping(true);
         setUploading(false);
         toast.info("We couldn't auto-detect your columns. Please map them below.");
@@ -214,11 +218,6 @@ export default function Dashboard() {
         },
         preview: data.preview,
       });
-      // Pre-fill mapping dropdowns from auto-detect for the "edit" link
-      const ad = data.headers.autoDetected;
-      setMappedCompanyName(ad.companyName ?? "");
-      setMappedWebsiteUrl(ad.websiteUrl ?? "");
-      setMappedDescription(ad.description ?? "");
       setShowColumnMapping(false);
       setWizardStep("configure");
       setWizardSections([]);
@@ -319,17 +318,20 @@ export default function Dashboard() {
   };
 
   const handleColumnMappingSubmit = () => {
-    if (!mappedCompanyName || !mappedWebsiteUrl) {
-      toast.error("Please select both Company Name and Website URL columns");
+    const companyCol = Object.entries(columnRoles).find(([, r]) => r === "companyName")?.[0];
+    const websiteCol = Object.entries(columnRoles).find(([, r]) => r === "websiteUrl")?.[0];
+    const descCol = Object.entries(columnRoles).find(([, r]) => r === "description")?.[0];
+    if (!companyCol || !websiteCol) {
+      toast.error("Please assign both Company Name and Website URL to a column");
       return;
     }
     uploadMutation.mutate({
       fileUrl: pendingFileUrl,
       fileKey: pendingFileKey,
       columnMapping: {
-        companyNameColumn: mappedCompanyName,
-        websiteUrlColumn: mappedWebsiteUrl,
-        descriptionColumn: mappedDescription || undefined,
+        companyNameColumn: companyCol,
+        websiteUrlColumn: websiteCol,
+        descriptionColumn: descCol || undefined,
       },
     });
     setShowColumnMapping(false);
@@ -343,6 +345,7 @@ export default function Dashboard() {
     setDescription("");
     setShowColumnMapping(false);
     setFileHeaders(null);
+    setColumnRoles({});
     setPendingFileUrl("");
     setPendingFileKey("");
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -444,7 +447,7 @@ export default function Dashboard() {
           <span>Works best on public websites. Social media profiles and login-protected pages have limited support.</span>
         </div>
 
-        {/* ── Column Mapping Card ── */}
+        {/* ── Column Mapping Card (grid style) ── */}
         {showColumnMapping && fileHeaders && (
           <Card className="mb-6 border-2 border-amber-400">
             <CardHeader>
@@ -455,90 +458,115 @@ export default function Dashboard() {
                 </Button>
               </div>
               <CardDescription>
-                Select which columns in your file correspond to each required field.
+                Use the dropdowns above each column to assign: <strong>Company Name</strong>, <strong>Website URL</strong>, and optionally <strong>Description</strong>.
               </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-5">
-              {/* Company Name mapping */}
-              <div className="space-y-1.5">
-                <Label className="text-sm font-medium">
-                  Company Name <span className="text-red-500">*</span>
-                </Label>
-                <Select value={mappedCompanyName} onValueChange={setMappedCompanyName}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select column..." />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {fileHeaders.columns.map((col) => (
-                      <SelectItem key={col} value={col}>{col}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                {mappedCompanyName && fileHeaders.sampleRows[0] && (
-                  <p className="text-xs text-muted-foreground">
-                    Sample: {fileHeaders.sampleRows[0][mappedCompanyName] || "(empty)"}
-                  </p>
-                )}
+            <CardContent>
+              {/* Legend */}
+              <div className="flex gap-3 mb-3 text-xs">
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-500 inline-block" /> Company Name (required)</span>
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500 inline-block" /> Website URL (required)</span>
+                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-500 inline-block" /> Description (optional)</span>
               </div>
 
-              {/* Website URL mapping */}
-              <div className="space-y-1.5">
-                <Label className="text-sm font-medium">
-                  Website URL <span className="text-red-500">*</span>
-                </Label>
-                <Select value={mappedWebsiteUrl} onValueChange={setMappedWebsiteUrl}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select column..." />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {fileHeaders.columns.map((col) => (
-                      <SelectItem key={col} value={col}>{col}</SelectItem>
+              {/* Scrollable grid */}
+              <div className="overflow-x-auto border rounded-lg">
+                <table className="w-full text-sm border-collapse min-w-[600px]">
+                  {/* Row 1: Role dropdowns */}
+                  <thead>
+                    <tr className="bg-muted/60">
+                      {fileHeaders.columns.map((col) => {
+                        const role = columnRoles[col] || "";
+                        const roleColor = role === "companyName" ? "border-blue-500 bg-blue-50"
+                          : role === "websiteUrl" ? "border-green-500 bg-green-50"
+                          : role === "description" ? "border-amber-500 bg-amber-50"
+                          : "border-border";
+                        return (
+                          <th key={col} className="p-1.5 text-left align-top min-w-[140px]">
+                            <Select
+                              value={role || "__skip__"}
+                              onValueChange={(v: string) => {
+                                const newRoles = { ...columnRoles };
+                                // Clear this role from any other column first
+                                if (v !== "__skip__") {
+                                  for (const k of Object.keys(newRoles)) {
+                                    if (newRoles[k] === v) newRoles[k] = "";
+                                  }
+                                }
+                                newRoles[col] = v === "__skip__" ? "" : v;
+                                setColumnRoles(newRoles);
+                              }}
+                            >
+                              <SelectTrigger className={`h-8 text-xs border-2 ${roleColor}`}>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="__skip__">-- Skip --</SelectItem>
+                                <SelectItem value="companyName">Company Name</SelectItem>
+                                <SelectItem value="websiteUrl">Website URL</SelectItem>
+                                <SelectItem value="description">Description</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </th>
+                        );
+                      })}
+                    </tr>
+                    {/* Row 2: Column headers from file */}
+                    <tr className="border-b bg-muted/30">
+                      {fileHeaders.columns.map((col) => {
+                        const role = columnRoles[col] || "";
+                        const dotColor = role === "companyName" ? "bg-blue-500"
+                          : role === "websiteUrl" ? "bg-green-500"
+                          : role === "description" ? "bg-amber-500"
+                          : "";
+                        return (
+                          <th key={col} className="px-3 py-2 text-left text-xs font-semibold text-foreground whitespace-nowrap">
+                            <span className="flex items-center gap-1.5">
+                              {dotColor && <span className={`w-2 h-2 rounded-full ${dotColor} shrink-0`} />}
+                              {col}
+                            </span>
+                          </th>
+                        );
+                      })}
+                    </tr>
+                  </thead>
+                  {/* Data rows */}
+                  <tbody>
+                    {fileHeaders.sampleRows.slice(0, 4).map((row, i) => (
+                      <tr key={i} className={i % 2 === 0 ? "bg-white" : "bg-muted/10"}>
+                        {fileHeaders.columns.map((col) => (
+                          <td key={col} className="px-3 py-1.5 text-xs text-muted-foreground truncate max-w-[200px] border-t">
+                            {row[col] || ""}
+                          </td>
+                        ))}
+                      </tr>
                     ))}
-                  </SelectContent>
-                </Select>
-                {mappedWebsiteUrl && fileHeaders.sampleRows[0] && (
-                  <p className="text-xs text-muted-foreground">
-                    Sample: {fileHeaders.sampleRows[0][mappedWebsiteUrl] || "(empty)"}
-                  </p>
-                )}
+                  </tbody>
+                </table>
               </div>
 
-              {/* Description mapping (optional) */}
-              <div className="space-y-1.5">
-                <Label className="text-sm font-medium">
-                  Description <span className="text-muted-foreground font-normal">(optional)</span>
-                </Label>
-                <Select value={mappedDescription || "__none__"} onValueChange={(v) => setMappedDescription(v === "__none__" ? "" : v)}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="None" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="__none__">None</SelectItem>
-                    {fileHeaders.columns.map((col) => (
-                      <SelectItem key={col} value={col}>{col}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                {mappedDescription && fileHeaders.sampleRows[0] && (
-                  <p className="text-xs text-muted-foreground">
-                    Sample: {fileHeaders.sampleRows[0][mappedDescription] || "(empty)"}
-                  </p>
-                )}
-              </div>
-
-              {/* Sample data preview */}
-              {fileHeaders.sampleRows.length > 0 && (
-                <div>
-                  <p className="text-xs font-medium text-muted-foreground mb-2">
-                    Your file has {fileHeaders.columns.length} columns: {fileHeaders.columns.join(", ")}
-                  </p>
-                </div>
-              )}
-
-              <div className="flex justify-end pt-1">
+              {/* Footer: status + confirm */}
+              <div className="flex items-center justify-between mt-4">
+                <p className="text-xs text-muted-foreground">
+                  {fileHeaders.sampleRows.length > 4
+                    ? `Showing 4 of ${fileHeaders.sampleRows.length} sample rows`
+                    : `${fileHeaders.sampleRows.length} sample rows`}
+                  {" · "}
+                  {(() => {
+                    const hasName = Object.values(columnRoles).includes("companyName");
+                    const hasUrl = Object.values(columnRoles).includes("websiteUrl");
+                    if (hasName && hasUrl) return <span className="text-green-600 font-medium">Ready</span>;
+                    const missing = [!hasName && "Company Name", !hasUrl && "Website URL"].filter(Boolean);
+                    return <span className="text-amber-600 font-medium">Missing: {missing.join(", ")}</span>;
+                  })()}
+                </p>
                 <Button
                   onClick={handleColumnMappingSubmit}
-                  disabled={!mappedCompanyName || !mappedWebsiteUrl || uploadMutation.isPending}
+                  disabled={
+                    !Object.values(columnRoles).includes("companyName") ||
+                    !Object.values(columnRoles).includes("websiteUrl") ||
+                    uploadMutation.isPending
+                  }
                 >
                   {uploadMutation.isPending ? (
                     <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Processing...</>
