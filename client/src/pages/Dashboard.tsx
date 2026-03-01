@@ -1260,11 +1260,11 @@ function AddSectionRow({ onAdd }: { onAdd: (s: AgentSection) => void }) {
   );
 }
 
-function DownloadResultsButton({ jobId, outputFileUrl }: { jobId: number; outputFileUrl?: string | null }) {
+function DownloadResultsButton({ jobId }: { jobId: number; outputFileUrl?: string | null }) {
   const [isGenerating, setIsGenerating] = useState(false);
   const generateMutation = trpc.enrichment.generateResults.useMutation({
     onSuccess: (data) => {
-      toast.success(`Results ready! ${data.firmCount} entries, ${data.teamMemberCount} contacts`);
+      toast.success(`Results ready! ${data.firmCount} entries`);
       const byteCharacters = atob(data.fileData);
       const byteNumbers = new Array(byteCharacters.length);
       for (let i = 0; i < byteCharacters.length; i++) {
@@ -1289,36 +1289,10 @@ function DownloadResultsButton({ jobId, outputFileUrl }: { jobId: number; output
     },
   });
 
-  const handleClick = async () => {
-    setIsGenerating(true);
-    // Agent jobs store results directly in S3 — download from there
-    if (outputFileUrl) {
-      try {
-        const response = await fetch(outputFileUrl);
-        const blob = await response.blob();
-        const url = window.URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = `results-${jobId}.xlsx`;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        window.URL.revokeObjectURL(url);
-      } catch {
-        toast.error("Failed to download file");
-      } finally {
-        setIsGenerating(false);
-      }
-    } else {
-      // Standard enrichment job — regenerate from DB
-      generateMutation.mutate({ jobId });
-    }
-  };
-
   return (
     <Button
       size="sm"
-      onClick={handleClick}
+      onClick={() => { setIsGenerating(true); generateMutation.mutate({ jobId }); }}
       disabled={isGenerating || generateMutation.isPending}
     >
       {isGenerating || generateMutation.isPending ? (

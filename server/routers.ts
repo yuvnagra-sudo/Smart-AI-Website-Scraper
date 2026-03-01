@@ -4,7 +4,7 @@ import { systemRouter } from "./_core/systemRouter";
 import { publicProcedure, router, protectedProcedure } from "./_core/trpc";
 import { TRPCError } from "@trpc/server";
 import { z } from "zod";
-import { storagePut } from "./storage";
+import { storagePut, storageGet } from "./storage";
 import { estimateEnrichmentCost } from "./costEstimation";
 import { createEnrichmentJob, getEnrichmentJob, getUserEnrichmentJobs, getAllEnrichmentJobs, updateEnrichmentJob, insertJobLog, getJobLogs } from "./enrichmentDb";
 import { getDb } from "./db";
@@ -365,6 +365,23 @@ Return ONLY valid JSON (no markdown, no code fences):
           });
         }
 
+        // Agent jobs (AI Custom extraction): results are stored in S3, not in enrichedFirms
+        if (job.sectionsJson && job.outputFileKey) {
+          const { url } = await storageGet(job.outputFileKey);
+          const response = await fetch(url);
+          if (!response.ok) {
+            throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Results file not available in storage" });
+          }
+          const buffer = Buffer.from(await response.arrayBuffer());
+          return {
+            success: true,
+            fileData: buffer.toString("base64"),
+            fileName: `agent-results-${input.jobId}.xlsx`,
+            firmCount: job.processedCount ?? 0,
+            teamMemberCount: 0,
+          };
+        }
+
         if (job.status !== "completed" && job.processedCount === 0) {
           throw new TRPCError({
             code: "BAD_REQUEST",
@@ -372,7 +389,7 @@ Return ONLY valid JSON (no markdown, no code fences):
           });
         }
 
-        // Generate the results file
+        // Standard jobs: generate from enrichedFirms table
         const result = await generateResultsFile({
           jobId: input.jobId,
           forceRegenerate: input.forceRegenerate,

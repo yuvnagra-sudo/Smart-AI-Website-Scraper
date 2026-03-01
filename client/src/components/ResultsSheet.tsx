@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Loader2, ChevronLeft, ChevronRight, Search, Sparkles, Download } from "lucide-react";
+import { toast } from "sonner";
 import { trpc } from "@/lib/trpc";
 import { getTemplate, type TemplateField } from "@/lib/templates";
 
@@ -63,7 +64,7 @@ function AgentJobSheet({ jobId, open, onClose, sectionsJson }: {
       document.body.removeChild(a); URL.revokeObjectURL(url);
       setIsDownloading(false);
     },
-    onError: () => setIsDownloading(false),
+    onError: (error: { message: string }) => { toast.error(`Failed to download results: ${error.message}`); setIsDownloading(false); },
   });
 
   return (
