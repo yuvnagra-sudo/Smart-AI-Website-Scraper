@@ -106,6 +106,7 @@ export async function runMigrations(): Promise<void> {
     { name: "sectionsJson",       sql: "ALTER TABLE enrichmentJobs ADD COLUMN sectionsJson TEXT" },
     { name: "systemPrompt",       sql: "ALTER TABLE enrichmentJobs ADD COLUMN systemPrompt TEXT" },
     { name: "objective",          sql: "ALTER TABLE enrichmentJobs ADD COLUMN objective TEXT" },
+    { name: "columnMappingJson", sql: "ALTER TABLE enrichmentJobs ADD COLUMN columnMappingJson TEXT" },
     // Per-URL workflow tracking table
     { name: "jobLogs_table", sql: `CREATE TABLE IF NOT EXISTS jobLogs (
       id INT AUTO_INCREMENT PRIMARY KEY,

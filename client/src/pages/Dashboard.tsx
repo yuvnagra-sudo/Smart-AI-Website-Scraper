@@ -306,6 +306,16 @@ export default function Dashboard() {
         }
       : {};
 
+    // Build columnMapping from columnRoles state (if user overrode defaults)
+    const companyCol = Object.entries(columnRoles).find(([, r]) => r === "companyName")?.[0];
+    const websiteCol = Object.entries(columnRoles).find(([, r]) => r === "websiteUrl")?.[0];
+    const descCol = Object.entries(columnRoles).find(([, r]) => r === "description")?.[0];
+    const columnMapping = companyCol && websiteCol ? {
+      companyNameColumn: companyCol,
+      websiteUrlColumn: websiteCol,
+      descriptionColumn: descCol || undefined,
+    } : undefined;
+
     confirmMutation.mutate({
       fileUrl: previewData.fileUrl,
       fileKey: previewData.fileKey,
@@ -313,6 +323,7 @@ export default function Dashboard() {
       tierFilter: selectedTemplate === "vc" ? tierFilter : "all",
       template: selectedTemplate,
       avgDescriptionLength: previewData.avgDescriptionLength,
+      columnMapping,
       ...extraFields,
     });
   };

@@ -147,6 +147,12 @@ export const appRouter = router({
           sectionsJson: z.string().optional(),
           systemPrompt: z.string().optional(),
           objective: z.string().optional(),
+          // Column mapping (for non-standard column names)
+          columnMapping: z.object({
+            companyNameColumn: z.string(),
+            websiteUrlColumn: z.string(),
+            descriptionColumn: z.string().optional(),
+          }).optional(),
         }),
       )
       .mutation(async ({ ctx, input }) => {
@@ -169,6 +175,7 @@ export const appRouter = router({
           sectionsJson: input.sectionsJson,
           systemPrompt: input.systemPrompt,
           objective: input.objective,
+          columnMappingJson: input.columnMapping ? JSON.stringify(input.columnMapping) : undefined,
         });
 
         // Route to agentic job processor if custom sections are present
@@ -494,8 +501,9 @@ export async function processEnrichmentJob(jobId: number) {
     const job = await getEnrichmentJob(jobId);
     if (!job) throw new Error("Job not found");
 
-    // Parse input file
-    const allFirms = await parseInputExcel(job.inputFileUrl);
+    // Parse input file (with column mapping if user overrode defaults)
+    const columnMapping = job.columnMappingJson ? JSON.parse(job.columnMappingJson) : undefined;
+    const allFirms = await parseInputExcel(job.inputFileUrl, columnMapping);
     
     // Get list of already-processed firms from processedFirms table
     const processedFirmNames = await getProcessedFirms(jobId);
@@ -823,7 +831,8 @@ export async function processAgentJob(jobId: number) {
     const systemPrompt = job.systemPrompt ?? "";
     const objective = job.objective ?? "";
 
-    const firms = await parseInputExcel(job.inputFileUrl);
+    const columnMapping = job.columnMappingJson ? JSON.parse(job.columnMappingJson) : undefined;
+    const firms = await parseInputExcel(job.inputFileUrl, columnMapping);
     console.log(`[processAgentJob] Job ${jobId}: ${firms.length} URLs, ${sections.length} sections`);
 
     const profileResults: Array<Record<string, string>> = [];
