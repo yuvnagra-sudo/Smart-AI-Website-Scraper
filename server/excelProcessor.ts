@@ -125,13 +125,17 @@ async function readFileToRows(fileUrl: string): Promise<any[]> {
 // Column name variants for auto-detection
 const COMPANY_NAME_VARIANTS = [
   "Company Name", "company_name", "CompanyName", "company name",
+  "Business Name", "business_name", "BusinessName", "business name",
+  "Organization", "organization", "Org Name", "org_name",
   "Company", "company", "Name", "name", "Firm Name", "firm_name", "Firm", "firm",
+  "Business", "business",
 ];
 const WEBSITE_URL_VARIANTS = [
   "Company Website URL", "website_url", "WebsiteURL", "Company Website",
   "company website url", "Corporate Website", "corporate website",
   "Corporate LinkedIn URL", "corporate linkedin url",
   "Website", "website", "URL", "url", "Site", "site",
+  "Link", "link", "Web", "web", "Homepage", "homepage",
 ];
 const DESCRIPTION_VARIANTS = [
   "LinkedIn Description", "linkedin_description", "Description", "description",
