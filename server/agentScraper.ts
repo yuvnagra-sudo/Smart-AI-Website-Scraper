@@ -378,7 +378,7 @@ export async function scrapeUrl(
     try {
       const { scrapeWebsite } = await import("./scraper");
       const result = await scrapeWebsite({ url, cache: true, cacheTTL: 7 * 24 * 60 * 60, timeout: 45000 });
-      return result.success ? result.html || null : null;
+      return result.success ? result.text || result.html || null : null;
     } catch {
       return null;
     }
@@ -425,17 +425,19 @@ export async function scrapeUrl(
       return await scrapeUrl(nativeUrl, objective, sections, systemPrompt, maxHops - 1);
     }
 
-    // Fallback: no native URL found — return as directory entry so user can see it
+    // Fallback: no native URL found — still return profile data (don't discard it)
     let data: Record<string, string> = {};
     if (sections.length > 0) {
       data = await extractProfileFields(content, sections, systemPrompt);
     }
-    const entry: DirectoryEntry = {
-      name: data["company_name"] ?? data["name"] ?? "",
-      directoryUrl: url,
-      nativeUrl,
+    const emptyFields = sections.map(s => s.key).filter(k => !data[k] || data[k].trim() === "");
+    const stats: ScrapeStats = {
+      fieldsTotal: sections.length,
+      fieldsFilled: sections.length - emptyFields.length,
+      emptyFields,
     };
-    return { type: "directory", entries: [entry] };
+    console.log(`[agentScraper] No native URL found, extracting directly (${stats.fieldsFilled}/${stats.fieldsTotal} fields)`);
+    return { type: "profile", data, stats };
   }
 
   // ── PROFILE ────────────────────────────────────────────────────────────────

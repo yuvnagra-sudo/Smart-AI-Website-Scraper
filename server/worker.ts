@@ -14,7 +14,7 @@ import { drizzle } from 'drizzle-orm/mysql2';
 import mysql from 'mysql2/promise';
 import { enrichmentJobs } from '../drizzle/schema';
 import { eq, and, or, lt, isNull } from 'drizzle-orm';
-import { processEnrichmentJob } from './routers';
+import { processEnrichmentJob, processAgentJob } from './routers';
 
 const POLL_INTERVAL = 5000; // Check for new jobs every 5 seconds
 const HEARTBEAT_INTERVAL = 30000; // Send heartbeat every 30 seconds
@@ -187,9 +187,13 @@ async function processJob(job: any) {
   startHeartbeat(job.id);
   
   try {
-    // Process the job (this calls the existing processEnrichmentJob function)
-    await processEnrichmentJob(job.id);
-    
+    // Route to correct processor: agent jobs have sectionsJson, VC jobs do not
+    if (job.sectionsJson) {
+      await processAgentJob(job.id);
+    } else {
+      await processEnrichmentJob(job.id);
+    }
+
     console.log(`\n[Worker] ✅ Job ${job.id} completed successfully!`);
   } catch (error) {
     console.error(`\n[Worker] ❌ Job ${job.id} failed:`, error);
