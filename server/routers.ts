@@ -22,6 +22,7 @@ import { getOpenAIStats } from "./_core/openaiLLM";
 import { classifyDecisionMakerTier } from './decisionMakerTiers';
 import { calculateRecencyScore } from './portfolioIntelligence';
 import { canResumeJob, prepareJobForResume, getResumeProgress } from "./resumeJob";
+import { extractDirectory } from "./directoryExtractor";
 import { nanoid } from "nanoid";
 import { saveFirmImmediately, getProcessedFirms } from "./incrementalSave";
 
@@ -129,6 +130,63 @@ export const appRouter = router({
             headers,
           };
         }
+      }),
+
+    // Discover entries from a directory URL (autonomous crawl with pagination)
+    discoverFromUrl: protectedProcedure
+      .input(z.object({
+        directoryUrl: z.string().url(),
+        maxPages: z.number().int().min(1).max(20).default(5),
+      }))
+      .mutation(async ({ input, ctx }) => {
+        const { entries, pagesVisited, errors } = await extractDirectory(input.directoryUrl, {
+          maxPages: input.maxPages,
+          delayMs: 800,
+        });
+
+        if (entries.length === 0) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: `No entries found (visited ${pagesVisited} page(s)${errors.length ? "; " + errors[0] : ""})`,
+          });
+        }
+
+        // Build CSV from discovered entries
+        const csvLines = ["Company Name,Website URL"];
+        for (const e of entries) {
+          csvLines.push(`"${e.name.replace(/"/g, '""')}","${e.url}"`);
+        }
+        const csv = csvLines.join("\n");
+
+        const fileKey = `enrichment/${ctx.user.id}/${nanoid()}-discovery.csv`;
+        const stored = await storagePut(fileKey, Buffer.from(csv, "utf-8"), "text/csv");
+        const costEstimate = estimateEnrichmentCost(entries.length, 200);
+
+        return {
+          status: "ready" as const,
+          fileUrl: stored.url,
+          fileKey: stored.key,
+          firmCount: entries.length,
+          avgDescriptionLength: 200,
+          pagesVisited,
+          costEstimate: {
+            totalCost: costEstimate.totalCost,
+            totalCostLow: costEstimate.totalCostLow,
+            totalCostHigh: costEstimate.totalCostHigh,
+            perFirmCost: costEstimate.perFirmCost,
+            estimatedDuration: costEstimate.estimatedDuration,
+          },
+          preview: entries.slice(0, 5).map(e => ({
+            companyName: e.name,
+            websiteUrl: e.url,
+            descriptionPreview: "",
+          })),
+          headers: {
+            columns: ["Company Name", "Website URL"],
+            sampleRows: [] as Array<Record<string, string>>,
+            autoDetected: { companyName: "Company Name", websiteUrl: "Website URL" },
+          },
+        };
       }),
 
     // Confirm and start enrichment

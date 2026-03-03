@@ -15,7 +15,7 @@ import { getLoginUrl } from "@/const";
 import {
   Bot, Download, Upload, Clock, CheckCircle, XCircle, Loader2, LogOut,
   FileSpreadsheet, Table2, DollarSign, TrendingUp, Building2, Users,
-  HeartPulse, ShoppingCart, Home, MapPin, Info, Sparkles, X, Plus, List,
+  HeartPulse, ShoppingCart, Home, MapPin, Info, Sparkles, X, Plus, List, Search,
 } from "lucide-react";
 import { useState, useRef } from "react";
 import { toast } from "sonner";
@@ -100,6 +100,15 @@ interface AgentSection {
 type WizardStep = "idle" | "configure" | "review";
 type WizardMode = "ai" | "template";
 
+type DiscoverResult = {
+  status: "ready";
+  fileUrl: string; fileKey: string;
+  firmCount: number; avgDescriptionLength: number; pagesVisited: number;
+  costEstimate: { totalCost: number; totalCostLow: number; totalCostHigh: number; perFirmCost: number; estimatedDuration: string };
+  preview: { companyName: string; websiteUrl: string; descriptionPreview: string }[];
+  headers: { columns: string[]; sampleRows: Record<string, string>[]; autoDetected: { companyName?: string; websiteUrl?: string } };
+};
+
 // ---------------------------------------------------------------------------
 // JobLogFeed — live per-URL status shown inside a processing job card
 // ---------------------------------------------------------------------------
@@ -168,6 +177,12 @@ export default function Dashboard() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Track whether the current uploadMutation call is a manual re-submit with explicit mapping
   const isManualMappingRef = useRef(false);
+
+  // Upload mode: file upload, paste URLs, or crawl a directory
+  const [uploadMode, setUploadMode] = useState<"file" | "paste" | "crawl">("file");
+  const [manualUrls, setManualUrls] = useState("");
+  const [crawlUrl, setCrawlUrl] = useState("");
+  const [crawlMaxPages, setCrawlMaxPages] = useState(5);
 
   const { data: jobs, isLoading: jobsLoading, refetch } = trpc.enrichment.listJobs.useQuery(undefined, {
     enabled: !!user,
@@ -369,7 +384,50 @@ export default function Dashboard() {
     setPendingFileUrl("");
     setPendingFileKey("");
     if (fileInputRef.current) fileInputRef.current.value = "";
+    setCrawlUrl("");
+    setCrawlMaxPages(5);
   };
+
+  const handleUrlSubmit = () => {
+    const urls = manualUrls
+      .split("\n")
+      .map((u: string) => u.trim())
+      .filter((u: string) => u.startsWith("http"));
+    if (urls.length === 0) { toast.error("No valid URLs found — each line should start with http"); return; }
+    // Build minimal CSV: header + one row per URL with empty company name
+    const csv = "Company Name,Website URL\n" + urls.map((u: string) => `"","${u}"`).join("\n");
+    // Encode as base64 (UTF-8 safe via TextEncoder)
+    const bytes = new TextEncoder().encode(csv);
+    let binary = "";
+    bytes.forEach(b => { binary += String.fromCharCode(b); });
+    const base64 = btoa(binary);
+    setUploading(true);
+    uploadMutation.mutate({ fileData: base64, fileName: "manual-urls.csv" });
+  };
+
+  const discoverMutation = trpc.enrichment.discoverFromUrl.useMutation({
+    onSuccess: (data: DiscoverResult) => {
+      setPendingFileUrl(data.fileUrl);
+      setPendingFileKey(data.fileKey);
+      setColumnRoles({ "Company Name": "companyName", "Website URL": "websiteUrl" });
+      setFileHeaders(data.headers);
+      setPreviewData({
+        fileUrl: data.fileUrl,
+        fileKey: data.fileKey,
+        firmCount: data.firmCount,
+        avgDescriptionLength: data.avgDescriptionLength,
+        costEstimate: data.costEstimate,
+        preview: data.preview,
+      });
+      setWizardStep("configure");
+      setUploading(false);
+      toast.success(`Found ${data.firmCount} entries across ${data.pagesVisited} page${data.pagesVisited !== 1 ? "s" : ""}`);
+    },
+    onError: (error: { message: string }) => {
+      toast.error(`Discovery failed: ${error.message}`);
+      setUploading(false);
+    },
+  });
 
   // -------------------------------------------------------------------------
   // Auth states
@@ -430,34 +488,138 @@ export default function Dashboard() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Upload className="h-6 w-6" />
-              Upload your list
+              Add your URLs
             </CardTitle>
             <CardDescription>
-              Excel (.xlsx) or CSV with columns: <strong>Website URL</strong> (required), <strong>Name</strong> and <strong>Description</strong> (optional — Description used as per-URL objective override).
-              The scraper will visit each URL and extract structured data automatically.
+              Upload a spreadsheet or paste URLs directly. Excel/CSV should have a <strong>Website URL</strong> column (required), plus optional <strong>Name</strong> and <strong>Description</strong> columns.
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <div className="flex items-center gap-4">
-              <Input
-                ref={fileInputRef}
-                type="file"
-                accept=".xlsx,.xls,.csv"
-                onChange={handleFileUpload}
-                disabled={uploading || wizardStep !== "idle"}
-                className="flex-1"
-              />
+            {/* Mode toggle */}
+            <div className="flex gap-2 mb-4">
               <Button
+                variant={uploadMode === "file" ? "default" : "outline"}
+                size="sm"
                 disabled={uploading || wizardStep !== "idle"}
-                onClick={() => fileInputRef.current?.click()}
+                onClick={() => setUploadMode("file")}
               >
-                {uploading ? (
-                  <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Uploading...</>
-                ) : (
-                  <><FileSpreadsheet className="h-4 w-4 mr-2" />Select File</>
-                )}
+                <FileSpreadsheet className="h-4 w-4 mr-2" />
+                Upload File
+              </Button>
+              <Button
+                variant={uploadMode === "paste" ? "default" : "outline"}
+                size="sm"
+                disabled={uploading || wizardStep !== "idle"}
+                onClick={() => setUploadMode("paste")}
+              >
+                <List className="h-4 w-4 mr-2" />
+                Paste URLs
+              </Button>
+              <Button
+                variant={uploadMode === "crawl" ? "default" : "outline"}
+                size="sm"
+                disabled={uploading || wizardStep !== "idle"}
+                onClick={() => setUploadMode("crawl")}
+              >
+                <Search className="h-4 w-4 mr-2" />
+                Crawl Directory
               </Button>
             </div>
+
+            {uploadMode === "paste" && (
+              <div className="space-y-3">
+                <Textarea
+                  placeholder={"Paste one URL per line:\nhttps://www.goodfirms.co/company/toast-studio\nhttps://clutch.co/profile/example-agency"}
+                  value={manualUrls}
+                  onChange={(e: { target: HTMLTextAreaElement }) => setManualUrls(e.target.value)}
+                  disabled={uploading || wizardStep !== "idle"}
+                  rows={5}
+                  className="font-mono text-sm"
+                />
+                <Button
+                  disabled={uploading || wizardStep !== "idle" || !manualUrls.trim()}
+                  onClick={handleUrlSubmit}
+                >
+                  {uploading ? (
+                    <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Processing...</>
+                  ) : (
+                    <>Process URLs &#8594;</>
+                  )}
+                </Button>
+              </div>
+            )}
+
+            {uploadMode === "crawl" && (
+              <div className="space-y-3">
+                <Input
+                  placeholder="https://clutch.co/agencies/digital-marketing"
+                  value={crawlUrl}
+                  onChange={(e: { target: HTMLInputElement }) => setCrawlUrl(e.target.value)}
+                  disabled={uploading || wizardStep !== "idle"}
+                  className="font-mono text-sm"
+                />
+                <div className="flex items-center gap-3">
+                  <Label className="text-sm text-muted-foreground shrink-0">Max pages:</Label>
+                  <Select
+                    value={String(crawlMaxPages)}
+                    onValueChange={(v: string) => setCrawlMaxPages(Number(v))}
+                  >
+                    <SelectTrigger className="w-28" disabled={uploading || wizardStep !== "idle"}><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="2">2 pages</SelectItem>
+                      <SelectItem value="5">5 pages</SelectItem>
+                      <SelectItem value="10">10 pages</SelectItem>
+                      <SelectItem value="20">20 pages</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <span className="text-xs text-muted-foreground">
+                    ~{crawlMaxPages * 25}–{crawlMaxPages * 50} companies
+                  </span>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Button
+                    disabled={uploading || wizardStep !== "idle" || !crawlUrl.trim()}
+                    onClick={() => {
+                      if (!crawlUrl.startsWith("http")) { toast.error("URL must start with http"); return; }
+                      setUploading(true);
+                      discoverMutation.mutate({ directoryUrl: crawlUrl, maxPages: crawlMaxPages });
+                    }}
+                  >
+                    {uploading ? (
+                      <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Discovering...</>
+                    ) : (
+                      <>Discover Entries</>
+                    )}
+                  </Button>
+                  {uploading && (
+                    <span className="text-xs text-muted-foreground">This may take 20–60 seconds...</span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {uploadMode === "file" && (
+              <div className="flex items-center gap-4">
+                <Input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".xlsx,.xls,.csv"
+                  onChange={handleFileUpload}
+                  disabled={uploading || wizardStep !== "idle"}
+                  className="flex-1"
+                />
+                <Button
+                  disabled={uploading || wizardStep !== "idle"}
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  {uploading ? (
+                    <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Uploading...</>
+                  ) : (
+                    <><FileSpreadsheet className="h-4 w-4 mr-2" />Select File</>
+                  )}
+                </Button>
+              </div>
+            )}
           </CardContent>
         </Card>
 

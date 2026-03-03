@@ -57,9 +57,15 @@ async function classifyPage(
   url: string,
   objective: string,
 ): Promise<PageClassification> {
+  const KNOWN_DIRECTORIES = ['goodfirms.co', 'clutch.co', 'g2.com', 'yelp.com', 'capterra.com', 'trustpilot.com'];
+  const urlHost = (() => { try { return new URL(url).hostname; } catch { return ""; } })();
+  const directoryHint = KNOWN_DIRECTORIES.some(d => urlHost.includes(d))
+    ? `\nNote: This URL is from a known directory site (${urlHost}). If it shows ONE specific company's profile, classify as "directory-entry".`
+    : "";
+
   const prompt = `You are analyzing a web page to classify its type.
 
-URL: ${url}
+URL: ${url}${directoryHint}
 User's objective: ${objective}
 
 Page content (first 12000 chars):
@@ -117,6 +123,30 @@ Return ONLY valid JSON:
 // ---------------------------------------------------------------------------
 
 async function extractNativeUrl(content: string, pageUrl: string): Promise<string | undefined> {
+  // Fast regex scan of full content before spending an LLM call
+  try {
+    const directoryDomain = new URL(pageUrl).hostname;
+    const urlPattern = /https?:\/\/([a-zA-Z0-9-]+\.[a-zA-Z]{2,}[^\s"'<>]*)/g;
+    const candidates = [...content.matchAll(urlPattern)]
+      .map(m => m[0].replace(/[.,;)>]+$/, ""))
+      .filter(u => {
+        try {
+          const h = new URL(u).hostname;
+          return h !== directoryDomain &&
+            !h.includes("goodfirms") && !h.includes("clutch.co") &&
+            !h.includes("g2.com") && !h.includes("yelp.") &&
+            !h.includes("capterra") && !h.includes("trustpilot") &&
+            !h.includes("google.") && !h.includes("facebook.") &&
+            !h.includes("linkedin.") && !h.includes("twitter.") &&
+            !h.includes("instagram.");
+        } catch { return false; }
+      });
+    if (candidates.length > 0) {
+      console.log(`[agentScraper] Regex found native URL: ${candidates[0]}`);
+      return candidates[0];
+    }
+  } catch { /* fall through to LLM */ }
+
   const prompt = `This is a directory entry page about a specific company/organization.
 Page URL: ${pageUrl}
 Content (first 6000 chars):
@@ -185,7 +215,9 @@ async function extractProfileFields(
 Page content:
 ${content.substring(0, 25000)}
 
-Extract each field from the page content. Be specific and concrete — use actual data from the page, not summaries.
+Extract each field about THIS company only (the entity being profiled on this page).
+Ignore client testimonials, reviewer names, case study client companies, partner logos, and any third-party content.
+Be specific and concrete — use actual data from the page, not summaries.
 If a field cannot be determined from the content, return an empty string "".
 
 Example output format:
