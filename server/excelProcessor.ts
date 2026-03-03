@@ -129,6 +129,8 @@ const COMPANY_NAME_VARIANTS = [
   "Organization", "organization", "Org Name", "org_name",
   "Company", "company", "Name", "name", "Firm Name", "firm_name", "Firm", "firm",
   "Business", "business",
+  // GoodFirms CSS class exports
+  "provider__title-link", "provider__title",
 ];
 const WEBSITE_URL_VARIANTS = [
   "Company Website URL", "website_url", "WebsiteURL", "Company Website",
@@ -136,6 +138,9 @@ const WEBSITE_URL_VARIANTS = [
   "Corporate LinkedIn URL", "corporate linkedin url",
   "Website", "website", "URL", "url", "Site", "site",
   "Link", "link", "Web", "web", "Homepage", "homepage",
+  // GoodFirms CSS class exports — "Visit Website" href is the company's own site;
+  // logo href is the GoodFirms profile URL (scraper handles directory entries)
+  "provider__cta-link href", "sg-provider-logotype-v2 href",
 ];
 const DESCRIPTION_VARIANTS = [
   "LinkedIn Description", "linkedin_description", "Description", "description",

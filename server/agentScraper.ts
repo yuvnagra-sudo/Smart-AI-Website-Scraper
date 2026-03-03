@@ -437,7 +437,7 @@ export async function scrapeUrl(
   if (classification.type === "directory") {
     const dirResult = await extractDirectory(url, {
       entryLabel: classification.entityLabel,
-      maxPages: 10,
+      maxPages: 500,
       delayMs: 500,
     });
     const entries: DirectoryEntry[] = dirResult.entries.map((e: DirEntry) => ({

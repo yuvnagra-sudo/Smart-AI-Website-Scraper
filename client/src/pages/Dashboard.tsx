@@ -216,10 +216,13 @@ export default function Dashboard() {
       isManualMappingRef.current = false;
 
       if (data.status === "needs_mapping") {
-        // Auto-detect failed — show column mapping grid
         setShowColumnMapping(true);
         setUploading(false);
-        toast.info("We couldn't auto-detect your columns. Please map them below.");
+        if ((data as any).mappingError) {
+          toast.error(`Column mapping failed: ${(data as any).mappingError}`);
+        } else {
+          toast.info("We couldn't auto-detect your columns. Please map them below.");
+        }
         return;
       }
 

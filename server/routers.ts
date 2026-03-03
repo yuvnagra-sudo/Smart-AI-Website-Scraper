@@ -118,16 +118,14 @@ export const appRouter = router({
             headers,
           };
         } catch (err) {
-          // Auto-detect failed — return headers so user can map columns
-          if (input.columnMapping) {
-            // User already provided mapping but it still failed — re-throw
-            throw err;
-          }
+          // Return to column mapping UI with an error message so user can try different columns
+          const mappingError = err instanceof Error ? err.message : "Could not parse file — please check your column mapping";
           return {
             status: "needs_mapping" as const,
             fileUrl,
             fileKey,
             headers,
+            mappingError: input.columnMapping ? mappingError : undefined,
           };
         }
       }),
@@ -136,7 +134,7 @@ export const appRouter = router({
     discoverFromUrl: protectedProcedure
       .input(z.object({
         directoryUrl: z.string().url(),
-        maxPages: z.number().int().min(1).max(20).default(5),
+        maxPages: z.number().int().min(1).max(500).default(50),
       }))
       .mutation(async ({ input, ctx }) => {
         const { entries, pagesVisited, errors } = await extractDirectory(input.directoryUrl, {
@@ -937,6 +935,20 @@ export async function processAgentJob(jobId: number) {
 
           if (result.type === "directory") {
             collectedUrls.push(...result.entries);
+            // Queue each discovered directory entry for individual profile scraping.
+            // Without this, entries only appear on a "Collected URLs" sheet and are never
+            // enriched with the user's custom sections.
+            for (const entry of result.entries) {
+              const scrapeTarget = entry.nativeUrl || entry.directoryUrl;
+              if (scrapeTarget && scrapeTarget !== firm.websiteUrl) {
+                firmQueue.push({
+                  companyName: entry.name || scrapeTarget,
+                  websiteUrl: scrapeTarget,
+                  description: rowObjective,
+                });
+              }
+            }
+            console.log(`[processAgentJob] Directory expanded: ${result.entries.length} entries queued for scraping`);
             insertJobLog({ jobId, url: firm.websiteUrl, companyName: firm.companyName, status: "success", fieldsTotal: 0, fieldsFilled: 0, durationMs: Date.now() - startMs }).catch(() => {});
           } else {
             profileResults.push({

@@ -64,6 +64,15 @@ async function fetchPageText(url: string): Promise<string | null> {
   return null;
 }
 
+async function fetchPageTextWithPuppeteer(url: string): Promise<string | null> {
+  try {
+    const { scrapeWebsite } = await import("./scraper");
+    const r = await scrapeWebsite({ url, cache: true, cacheTTL: 3600, timeout: 45000 });
+    if (r.success) return r.text || r.html || null;
+  } catch { }
+  return null;
+}
+
 async function extractEntriesFromText(
   text: string,
   pageUrl: string,
@@ -163,7 +172,7 @@ export async function extractDirectory(
   config: DirectoryExtractorConfig = {},
 ): Promise<DirectoryExtractionResult> {
   const {
-    maxPages = 10,
+    maxPages = 500,
     delayMs = 1000,
     entryLabel = "organisations",
   } = config;
@@ -186,11 +195,26 @@ export async function extractDirectory(
       break;
     }
 
-    const { entries, next_page_url } = await extractEntriesFromText(
+    let { entries, next_page_url } = await extractEntriesFromText(
       text,
       currentUrl,
       entryLabel,
     );
+
+    // If Jina returned too few entries, the page is likely JS-rendered.
+    // Retry with Puppeteer (real Chrome) which can execute JavaScript.
+    if (entries.length < 3) {
+      console.log(`[directoryExtractor] Jina found only ${entries.length} entries on page ${pagesVisited}, retrying with Puppeteer`);
+      const puppeteerText = await fetchPageTextWithPuppeteer(currentUrl);
+      if (puppeteerText) {
+        const puppeteerResult = await extractEntriesFromText(puppeteerText, currentUrl, entryLabel);
+        if (puppeteerResult.entries.length > entries.length) {
+          console.log(`[directoryExtractor] Puppeteer found ${puppeteerResult.entries.length} entries (vs Jina's ${entries.length})`);
+          entries = puppeteerResult.entries;
+          next_page_url = puppeteerResult.next_page_url;
+        }
+      }
+    }
 
     console.log(
       `[directoryExtractor] Found ${entries.length} entries on page ${pagesVisited}`,
