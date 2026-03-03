@@ -416,11 +416,15 @@ export async function scrapeUrl(
     }
   });
   if (!jinaResult.success || !jinaResult.content) {
-    console.warn(`[agentScraper] Failed to fetch (Jina + Puppeteer): ${url}`);
+    console.error(`[agentScraper] ❌ Both Jina and Puppeteer failed for: ${url}`);
     if (sections.length === 0) return { type: "directory", entries: [] };
     const empty: Record<string, string> = {};
     for (const s of sections) empty[s.key] = "";
     return { type: "profile", data: empty, stats: { fieldsTotal: sections.length, fieldsFilled: 0, emptyFields: sections.map(s => s.key) } };
+  }
+
+  if (jinaResult.source === "puppeteer") {
+    console.log(`[agentScraper] ✅ Puppeteer fallback succeeded for: ${url} (${jinaResult.content.length} chars)`);
   }
 
   const content = jinaResult.content;

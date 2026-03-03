@@ -105,7 +105,7 @@ async function claimJob(jobId: number): Promise<boolean> {
   const db = await getDb();
   
   try {
-    // Atomically claim the job
+    // Atomically claim the job — only succeeds if job is still "pending"
     const result = await db.update(enrichmentJobs)
       .set({
         status: "processing",
@@ -120,7 +120,13 @@ async function claimJob(jobId: number): Promise<boolean> {
           eq(enrichmentJobs.status, "pending")
         )
       );
-    
+
+    // MySQL returns [ResultSetHeader, ...] — affectedRows tells us if the update matched
+    const affectedRows = (result as any)[0]?.affectedRows ?? 0;
+    if (affectedRows === 0) {
+      console.log(`[Worker] Job ${jobId} was already claimed by another process, skipping`);
+      return false;
+    }
     return true;
   } catch (error) {
     console.error(`[Worker] Failed to claim job ${jobId}:`, error);

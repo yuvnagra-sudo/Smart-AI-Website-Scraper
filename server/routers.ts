@@ -236,16 +236,11 @@ export const appRouter = router({
           columnMappingJson: input.columnMapping ? JSON.stringify(input.columnMapping) : undefined,
         });
 
-        // Route to agentic job processor if custom sections are present
-        if (input.sectionsJson) {
-          processAgentJob(jobId).catch((error) => {
-            console.error(`Error processing agent job ${jobId}:`, error);
-          });
-        } else {
-          processEnrichmentJob(jobId).catch((error) => {
-            console.error(`Error processing job ${jobId}:`, error);
-          });
-        }
+        // Job will be picked up by worker.ts via polling (within 5 seconds)
+        // Do NOT call processAgentJob/processEnrichmentJob directly here — that causes
+        // dual processing: once from this web server (no heartbeat) and again when
+        // worker.ts sees it as stale and picks it up a second time.
+        console.log(`[confirmAndStart] Job ${jobId} queued — worker will pick up within 5s`);
 
         return { jobId, firmCount: input.firmCount };
       }),

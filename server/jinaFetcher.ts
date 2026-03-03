@@ -75,6 +75,20 @@ export async function fetchViaJina(url: string): Promise<JinaFetchResult | null>
 }
 
 /**
+ * Detect Cloudflare challenge/CAPTCHA pages that Jina returns as HTTP 200
+ */
+function isCloudflareChallenge(content: string): boolean {
+  const s = content.toLowerCase();
+  return (
+    s.includes("just a moment") ||
+    s.includes("checking your browser") ||
+    s.includes("challenge-running") ||
+    s.includes("enable javascript and cookies") ||
+    (s.includes("cloudflare") && (s.includes("challenge") || s.includes("ray id")))
+  );
+}
+
+/**
  * Fetch website content with Jina + Puppeteer fallback
  * Tries Jina first (fast), falls back to Puppeteer if needed
  */
@@ -85,15 +99,19 @@ export async function fetchWebsiteContentHybrid(
   const startTime = Date.now();
 
   // Try Jina first
-  const jinaResult = await fetchViaJina(url);
+  let jinaResult = await fetchViaJina(url);
   if (jinaResult?.success && jinaResult.content) {
     // Check if Jina returned meaningful content
     const contentLength = jinaResult.content.trim().length;
-    
+
     // If content is too short (<200 chars), likely failed to extract properly
     if (contentLength < 200) {
       console.log(`[Hybrid] Jina returned minimal content (${contentLength} chars), triggering Puppeteer fallback`);
-      // Fall through to Puppeteer fallback
+      jinaResult = null;
+    } else if (isCloudflareChallenge(jinaResult.content)) {
+      // Jina returned a Cloudflare challenge page as HTTP 200 — must use Puppeteer
+      console.log(`[Hybrid] Cloudflare challenge detected for ${url} — falling back to Puppeteer`);
+      jinaResult = null;
     } else {
       return jinaResult;
     }
