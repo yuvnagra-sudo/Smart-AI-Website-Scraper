@@ -23,6 +23,7 @@ const STALE_THRESHOLD = 5 * 60 * 1000; // 5 minutes without heartbeat = stale
 
 let currentJobId: number | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
+let cancellationTimer: NodeJS.Timeout | null = null;
 let isShuttingDown = false;
 
 /**
@@ -163,6 +164,37 @@ async function sendHeartbeat(jobId: number) {
 }
 
 /**
+ * Fast cancellation check — polls DB every 5s independent of the 30s heartbeat.
+ * This ensures the worker detects cancellation within 5s of the user clicking Cancel.
+ */
+async function checkForCancellation(jobId: number) {
+  try {
+    const db = await getDb();
+    const rows = await db.select({ status: enrichmentJobs.status })
+      .from(enrichmentJobs)
+      .where(eq(enrichmentJobs.id, jobId))
+      .limit(1);
+    if (rows[0]?.status === 'cancelled') {
+      markJobCancelled(jobId);
+    }
+  } catch { /* ignore transient errors */ }
+}
+
+function startCancellationCheck(jobId: number) {
+  if (cancellationTimer) clearInterval(cancellationTimer);
+  cancellationTimer = setInterval(() => {
+    if (!isShuttingDown) checkForCancellation(jobId);
+  }, 5000);
+}
+
+function stopCancellationCheck() {
+  if (cancellationTimer) {
+    clearInterval(cancellationTimer);
+    cancellationTimer = null;
+  }
+}
+
+/**
  * Start heartbeat timer for current job
  */
 function startHeartbeat(jobId: number) {
@@ -205,8 +237,9 @@ async function processJob(job: any) {
   // Clear any stale cancellation flag from a previous run
   clearJobCancelled(job.id);
 
-  // Start sending heartbeats
+  // Start sending heartbeats (30s) and fast cancellation checks (5s)
   startHeartbeat(job.id);
+  startCancellationCheck(job.id);
 
   try {
     // Route to correct processor: agent jobs have sectionsJson, VC jobs do not
@@ -242,6 +275,7 @@ async function processJob(job: any) {
   } finally {
     clearJobCancelled(job.id);
     stopHeartbeat();
+    stopCancellationCheck();
     currentJobId = null;
   }
 }

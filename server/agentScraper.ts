@@ -402,8 +402,10 @@ export async function scrapeUrl(
   sections: AgentSection[],
   systemPrompt: string,
   maxHops = 5,
+  isCancelled?: () => boolean,
 ): Promise<AgentScrapeResult> {
   console.log(`[agentScraper] Starting: ${url}`);
+  if (isCancelled?.()) throw new Error('JOB_CANCELLED');
 
   // Fetch the initial page with up to 3 attempts + exponential backoff
   let jinaResult = await fetchWebsiteContentHybrid(url, async () => {
@@ -443,6 +445,8 @@ export async function scrapeUrl(
 
   const content = jinaResult.content;
 
+  if (isCancelled?.()) throw new Error('JOB_CANCELLED');
+
   // Classify the page
   const classification = await classifyPage(content, url, objective);
   console.log(`[agentScraper] Page type: ${classification.type} (${classification.reasoning})`);
@@ -472,7 +476,7 @@ export async function scrapeUrl(
       // Follow the company's native website and return its profile data directly.
       // This makes directory-entry pages transparent to the caller.
       console.log(`[agentScraper] Following native URL: ${nativeUrl}`);
-      return await scrapeUrl(nativeUrl, objective, sections, systemPrompt, maxHops - 1);
+      return await scrapeUrl(nativeUrl, objective, sections, systemPrompt, maxHops - 1, isCancelled);
     }
 
     // Fallback: no native URL found — still return profile data (don't discard it)
@@ -497,11 +501,14 @@ export async function scrapeUrl(
 
   const visitedUrls = new Set<string>([url]);
 
+  if (isCancelled?.()) throw new Error('JOB_CANCELLED');
+
   // Initial extraction from the homepage
   let data = await extractProfileFields(content, sections, systemPrompt);
   let currentContent = content;
 
   for (let hop = 0; hop < maxHops; hop++) {
+    if (isCancelled?.()) throw new Error('JOB_CANCELLED');
     const decision = await decideNextLinks(
       data,
       sections,

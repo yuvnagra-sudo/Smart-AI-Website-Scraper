@@ -878,6 +878,10 @@ export async function processEnrichmentJob(jobId: number) {
     console.log(`[processEnrichmentJob] Job ${jobId} completed. Processed ${enrichedFirmsData.length} firms with ${allTeamMembers.length} team members.`);
     console.log(`[processEnrichmentJob] File will be generated on-demand when user requests download.`);
     
+    if (isJobCancelled(jobId)) {
+      console.log(`[processEnrichmentJob] Job ${jobId} was cancelled — skipping completed update`);
+      return;
+    }
     const finalStats = getOpenAIStats();
     await updateEnrichmentJob(jobId, {
       status: "completed",
@@ -887,6 +891,10 @@ export async function processEnrichmentJob(jobId: number) {
       totalOutputTokens:  finalStats.totalOutputTokens - outputBaseline,
     });
   } catch (error) {
+    if (isJobCancelled(jobId)) {
+      console.log(`[processEnrichmentJob] Job ${jobId} cancelled (caught during shutdown)`);
+      return;
+    }
     console.error(`Error processing job ${jobId}:`, error);
     await updateEnrichmentJob(jobId, {
       status: "failed",
@@ -969,6 +977,7 @@ export async function processAgentJob(jobId: number) {
             sections,
             resolvedPrompt,
             5,
+            () => isJobCancelled(jobId),
           );
 
           if (result.type === "directory") {
@@ -1008,6 +1017,10 @@ export async function processAgentJob(jobId: number) {
             }).catch(() => {});
           }
         } catch (err) {
+          if (err instanceof Error && err.message === 'JOB_CANCELLED') {
+            firmQueue.length = 0;
+            break;
+          }
           console.error(`[processAgentJob] Error processing ${firm.websiteUrl}:`, err);
           insertJobLog({
             jobId,
@@ -1049,6 +1062,10 @@ export async function processAgentJob(jobId: number) {
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     );
 
+    if (isJobCancelled(jobId)) {
+      console.log(`[processAgentJob] Job ${jobId} was cancelled — skipping completed update`);
+      return;
+    }
     await updateEnrichmentJob(jobId, {
       status: "completed",
       outputFileUrl: outputUrl,
@@ -1061,6 +1078,10 @@ export async function processAgentJob(jobId: number) {
       `[processAgentJob] ✅ Job ${jobId} complete. ${profileResults.length} profiles + ${collectedUrls.length} directory entries.`,
     );
   } catch (error) {
+    if (isJobCancelled(jobId)) {
+      console.log(`[processAgentJob] Job ${jobId} cancelled (caught during shutdown)`);
+      return;
+    }
     console.error(`[processAgentJob] Job ${jobId} failed:`, error);
     await updateEnrichmentJob(jobId, {
       status: "failed",
