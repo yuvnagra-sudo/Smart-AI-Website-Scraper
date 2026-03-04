@@ -31,7 +31,7 @@ export type InsertUser = typeof users.$inferInsert;
 export const enrichmentJobs = mysqlTable("enrichmentJobs", {
   id: int("id").autoincrement().primaryKey(),
   userId: int("userId").notNull(),
-  status: mysqlEnum("status", ["pending", "processing", "completed", "failed"]).default("pending").notNull(),
+  status: mysqlEnum("status", ["pending", "processing", "completed", "failed", "cancelled"]).default("pending").notNull(),
   inputFileUrl: text("inputFileUrl").notNull(),
   inputFileKey: text("inputFileKey").notNull(),
   outputFileUrl: text("outputFileUrl"),

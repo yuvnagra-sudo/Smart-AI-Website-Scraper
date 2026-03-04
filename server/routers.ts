@@ -8,8 +8,9 @@ import { storagePut, storageGet } from "./storage";
 import { estimateEnrichmentCost } from "./costEstimation";
 import { createEnrichmentJob, getEnrichmentJob, getUserEnrichmentJobs, getAllEnrichmentJobs, updateEnrichmentJob, insertJobLog, getJobLogs } from "./enrichmentDb";
 import { getDb } from "./db";
-import { enrichedFirms, teamMembers, portfolioCompanies, investmentThesis } from "../drizzle/schema";
-import { eq, and, like, count } from "drizzle-orm";
+import { enrichedFirms, teamMembers, portfolioCompanies, investmentThesis, enrichmentJobs } from "../drizzle/schema";
+import { eq, and, like, count, or, inArray } from "drizzle-orm";
+import { isJobCancelled } from "./_core/jobCancellation";
 import { parseInputExcel, parseInputHeaders, createOutputExcel, createAgentOutputExcel, type EnrichedVCData, type TeamMemberData, type PortfolioCompanyData, type ProcessingSummaryData, type FileHeaders } from "./excelProcessor";
 import { scrapeUrl, type AgentSection, type DirectoryEntry as AgentDirectoryEntry, type ScrapeStats } from "./agentScraper";
 import { generateInvestmentThesisSummaries } from "./investmentThesisAnalyzer";
@@ -554,6 +555,31 @@ Return ONLY valid JSON (no markdown, no code fences):
           teamMemberCount: members.length,
         };
       }),
+
+    cancelJob: protectedProcedure
+      .input(z.object({ jobId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        const db = await getDb();
+        if (!db) throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Database connection failed" });
+
+        const result = await db.update(enrichmentJobs)
+          .set({ status: "cancelled", completedAt: new Date() })
+          .where(and(
+            eq(enrichmentJobs.id, input.jobId),
+            eq(enrichmentJobs.userId, ctx.user.id),
+            or(
+              eq(enrichmentJobs.status, "pending"),
+              eq(enrichmentJobs.status, "processing"),
+            ),
+          ));
+
+        const affectedRows = (result as any)[0]?.affectedRows ?? 0;
+        if (affectedRows === 0) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Job not found or already completed" });
+        }
+
+        return { success: true };
+      }),
   }),
 });
 
@@ -694,6 +720,12 @@ export async function processEnrichmentJob(jobId: number) {
       while (true) {
         const firm = firmQueue.shift();
         if (!firm) break;
+
+        if (isJobCancelled(jobId)) {
+          console.log(`[processEnrichmentJob] Job ${jobId} cancelled — stopping`);
+          firmQueue.length = 0;
+          break;
+        }
 
         activeFirms.add(firm.companyName);
         try {
@@ -914,6 +946,12 @@ export async function processAgentJob(jobId: number) {
       while (firmQueue.length > 0) {
         const firm = firmQueue.shift();
         if (!firm) break;
+
+        if (isJobCancelled(jobId)) {
+          console.log(`[processAgentJob] Job ${jobId} cancelled — stopping`);
+          firmQueue.length = 0;
+          break;
+        }
 
         // Use per-row objective (Description column) if present, else global objective
         const rowObjective = firm.description?.trim() || objective;

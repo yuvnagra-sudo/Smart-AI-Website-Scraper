@@ -15,6 +15,7 @@ import mysql from 'mysql2/promise';
 import { enrichmentJobs } from '../drizzle/schema';
 import { eq, and, or, lt, isNull } from 'drizzle-orm';
 import { processEnrichmentJob, processAgentJob } from './routers';
+import { markJobCancelled, clearJobCancelled, isJobCancelled } from './_core/jobCancellation';
 
 const POLL_INTERVAL = 5000; // Check for new jobs every 5 seconds
 const HEARTBEAT_INTERVAL = 30000; // Send heartbeat every 30 seconds
@@ -135,15 +136,27 @@ async function claimJob(jobId: number): Promise<boolean> {
 }
 
 /**
- * Send heartbeat to indicate worker is alive
+ * Send heartbeat to indicate worker is alive.
+ * Also checks if the job has been cancelled and sets the in-memory flag.
  */
 async function sendHeartbeat(jobId: number) {
   const db = await getDb();
-  
+
   try {
     await db.update(enrichmentJobs)
       .set({ heartbeatAt: new Date() })
       .where(eq(enrichmentJobs.id, jobId));
+
+    // Check if the job was cancelled via the API while we were processing
+    const rows = await db.select({ status: enrichmentJobs.status })
+      .from(enrichmentJobs)
+      .where(eq(enrichmentJobs.id, jobId))
+      .limit(1);
+
+    if (rows[0]?.status === 'cancelled') {
+      console.log(`[Worker] Job ${jobId} has been cancelled — setting cancellation flag`);
+      markJobCancelled(jobId);
+    }
   } catch (error) {
     console.error(`[Worker] Failed to send heartbeat for job ${jobId}:`, error);
   }
@@ -189,9 +202,12 @@ async function processJob(job: any) {
   }
   console.log(`${'='.repeat(60)}\n`);
   
+  // Clear any stale cancellation flag from a previous run
+  clearJobCancelled(job.id);
+
   // Start sending heartbeats
   startHeartbeat(job.id);
-  
+
   try {
     // Route to correct processor: agent jobs have sectionsJson, VC jobs do not
     if (job.sectionsJson) {
@@ -200,21 +216,31 @@ async function processJob(job: any) {
       await processEnrichmentJob(job.id);
     }
 
-    console.log(`\n[Worker] ✅ Job ${job.id} completed successfully!`);
+    if (isJobCancelled(job.id)) {
+      console.log(`\n[Worker] 🛑 Job ${job.id} was cancelled — preserving partial results`);
+    } else {
+      console.log(`\n[Worker] ✅ Job ${job.id} completed successfully!`);
+    }
   } catch (error) {
-    console.error(`\n[Worker] ❌ Job ${job.id} failed:`, error);
-    
-    // Update job status to failed
-    const db = await getDb();
-    await db.update(enrichmentJobs)
-      .set({
-        status: "failed",
-        errorMessage: error instanceof Error ? error.message : String(error),
-        completedAt: new Date(),
-      })
-      .where(eq(enrichmentJobs.id, job.id));
+    // If the job was cancelled, don't mark it as failed — the cancelJob mutation
+    // already set status = "cancelled" in the DB
+    if (isJobCancelled(job.id)) {
+      console.log(`\n[Worker] 🛑 Job ${job.id} cancelled (caught error during shutdown):`, error instanceof Error ? error.message : String(error));
+    } else {
+      console.error(`\n[Worker] ❌ Job ${job.id} failed:`, error);
+
+      // Update job status to failed
+      const db = await getDb();
+      await db.update(enrichmentJobs)
+        .set({
+          status: "failed",
+          errorMessage: error instanceof Error ? error.message : String(error),
+          completedAt: new Date(),
+        })
+        .where(eq(enrichmentJobs.id, job.id));
+    }
   } finally {
-    // Stop heartbeat
+    clearJobCancelled(job.id);
     stopHeartbeat();
     currentJobId = null;
   }
