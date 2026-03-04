@@ -68,8 +68,8 @@ async function classifyPage(
 URL: ${url}${directoryHint}
 User's objective: ${objective}
 
-Page content (first 12000 chars):
-${content.substring(0, 12000)}
+Page content (first 20000 chars):
+${content.substring(0, 20000)}
 
 Classify this page as ONE of:
 - "directory": A listing/index page with many individual entries (companies, people, etc.) linked from it. Examples: VC firm databases, agent directories, company lists.
@@ -405,8 +405,8 @@ export async function scrapeUrl(
 ): Promise<AgentScrapeResult> {
   console.log(`[agentScraper] Starting: ${url}`);
 
-  // Fetch the initial page (Jina first, Puppeteer fallback for Cloudflare-protected sites)
-  const jinaResult = await fetchWebsiteContentHybrid(url, async () => {
+  // Fetch the initial page with up to 3 attempts + exponential backoff
+  let jinaResult = await fetchWebsiteContentHybrid(url, async () => {
     try {
       const { scrapeWebsite } = await import("./scraper");
       const result = await scrapeWebsite({ url, cache: true, cacheTTL: 7 * 24 * 60 * 60, timeout: 45000 });
@@ -415,6 +415,20 @@ export async function scrapeUrl(
       return null;
     }
   });
+
+  for (let attempt = 1; attempt < 3 && (!jinaResult.success || !jinaResult.content); attempt++) {
+    const delay = 2000 * Math.pow(2, attempt - 1); // 2s, 4s
+    console.log(`[agentScraper] Retry ${attempt} for ${url} after ${delay}ms`);
+    await new Promise(r => setTimeout(r, delay));
+    jinaResult = await fetchWebsiteContentHybrid(url, async () => {
+      try {
+        const { scrapeWebsite } = await import("./scraper");
+        const result = await scrapeWebsite({ url, cache: false, timeout: 60000 });
+        return result.success ? result.text || result.html || null : null;
+      } catch { return null; }
+    });
+  }
+
   if (!jinaResult.success || !jinaResult.content) {
     console.error(`[agentScraper] ❌ Both Jina and Puppeteer failed for: ${url}`);
     if (sections.length === 0) return { type: "directory", entries: [] };
@@ -507,7 +521,14 @@ export async function scrapeUrl(
       if (visitedUrls.has(link)) continue;
       visitedUrls.add(link);
 
-      const subResult = await fetchViaJina(link);
+      // Use hybrid fetch (Jina + Puppeteer fallback) for sub-pages too
+      const subResult = await fetchWebsiteContentHybrid(link, async () => {
+        try {
+          const { scrapeWebsite } = await import("./scraper");
+          const r = await scrapeWebsite({ url: link, cache: true, cacheTTL: 7 * 24 * 60 * 60, timeout: 30000 });
+          return r.success ? r.text || r.html || null : null;
+        } catch { return null; }
+      });
       if (!subResult?.success || !subResult.content) continue;
 
       currentContent = subResult.content; // use last fetched page for next link decision

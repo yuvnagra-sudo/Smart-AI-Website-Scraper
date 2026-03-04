@@ -38,7 +38,7 @@ export async function fetchViaJina(url: string): Promise<JinaFetchResult | null>
         'Authorization': `Bearer ${apiKey}`,
         'Accept': 'text/markdown',
       },
-      timeout: 8000, // 8 second timeout
+      timeout: 15000, // 15 second timeout
     });
 
     if (response.status === 200 && response.data) {
@@ -89,8 +89,10 @@ function isCloudflareChallenge(content: string): boolean {
 }
 
 /**
- * Fetch website content with Jina + Puppeteer fallback
- * Tries Jina first (fast), falls back to Puppeteer if needed
+ * Fetch website content with Jina + Puppeteer running in parallel.
+ * Puppeteer starts after a 4-second delay — fast Jina pages resolve before
+ * Puppeteer ever launches. For Cloudflare-protected or JS-heavy pages, Puppeteer
+ * wins the race after the delay.
  */
 export async function fetchWebsiteContentHybrid(
   url: string,
@@ -98,58 +100,65 @@ export async function fetchWebsiteContentHybrid(
 ): Promise<JinaFetchResult> {
   const startTime = Date.now();
 
-  // Try Jina first
-  let jinaResult = await fetchViaJina(url);
-  if (jinaResult?.success && jinaResult.content) {
-    // Check if Jina returned meaningful content
-    const contentLength = jinaResult.content.trim().length;
-
-    // If content is too short (<200 chars), likely failed to extract properly
-    if (contentLength < 200) {
-      console.log(`[Hybrid] Jina returned minimal content (${contentLength} chars), triggering Puppeteer fallback`);
-      jinaResult = null;
-    } else if (isCloudflareChallenge(jinaResult.content)) {
-      // Jina returned a Cloudflare challenge page as HTTP 200 — must use Puppeteer
-      console.log(`[Hybrid] Cloudflare challenge detected for ${url} — falling back to Puppeteer`);
-      jinaResult = null;
-    } else {
-      return jinaResult;
+  const validateJina = (r: JinaFetchResult | null): JinaFetchResult | null => {
+    if (!r?.success || !r.content) return null;
+    const len = r.content.trim().length;
+    if (len < 200) {
+      console.log(`[Hybrid] Jina minimal content (${len} chars) for ${url}`);
+      return null;
     }
-  }
+    if (isCloudflareChallenge(r.content)) {
+      console.log(`[Hybrid] Cloudflare challenge detected for ${url}`);
+      return null;
+    }
+    return r;
+  };
 
-  // Fallback to Puppeteer
-  console.log(`[Hybrid] Falling back to Puppeteer for ${url}`);
-  const puppeteerStart = Date.now();
+  // Jina starts immediately
+  const jinaPromise: Promise<JinaFetchResult | null> = fetchViaJina(url)
+    .then(validateJina)
+    .catch(() => null);
 
-  try {
-    const content = await puppeteerFallback();
-
-    if (content) {
-      const duration = Date.now() - puppeteerStart;
-      console.log(`[Puppeteer] ✅ Success (${duration}ms): ${url}`);
-
+  // Puppeteer starts after 4s delay — won't launch at all for fast Jina pages
+  const puppeteerPromise: Promise<JinaFetchResult | null> = new Promise<void>(
+    resolve => setTimeout(resolve, 4000)
+  )
+    .then(() => puppeteerFallback())
+    .then(content => {
+      if (!content || content.trim().length < 200) return null;
+      const duration = Date.now() - startTime;
+      console.log(`[Hybrid] ✅ Puppeteer won race (${duration}ms): ${url}`);
       return {
-        success: true,
+        success: true as const,
         content,
-        format: 'html',
-        source: 'puppeteer',
+        format: 'html' as const,
+        source: 'puppeteer' as const,
         duration,
       };
+    })
+    .catch(() => null);
+
+  // Take whichever gives real content first
+  const result = await Promise.any([
+    jinaPromise.then(r => { if (!r) throw new Error('empty'); return r; }),
+    puppeteerPromise.then(r => { if (!r) throw new Error('empty'); return r; }),
+  ]).catch(() => null);
+
+  if (result) {
+    const duration = Date.now() - startTime;
+    if (result.source === 'jina') {
+      console.log(`[Hybrid] ✅ Jina won race (${duration}ms): ${url}`);
     }
-  } catch (error) {
-    const errorMsg = error instanceof Error ? error.message : String(error);
-    console.log(`[Puppeteer] ❌ Error: ${errorMsg}`);
+    return { ...result, duration };
   }
 
-  // Both failed
-  const totalDuration = Date.now() - startTime;
   return {
     success: false,
     content: null,
     format: 'html',
     source: 'puppeteer',
     error: 'Both Jina and Puppeteer failed',
-    duration: totalDuration,
+    duration: Date.now() - startTime,
   };
 }
 
