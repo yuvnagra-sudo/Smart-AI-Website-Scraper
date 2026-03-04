@@ -71,9 +71,18 @@ const SKIP_DOMAINS = [
   "youtube.com", "google.com", "apple.com", "microsoft.com",
 ];
 
-function isSkipDomain(url: string): boolean {
+function isSkipUrl(url: string): boolean {
+  // Redirect/tracking URLs are extremely long — no real company URL is 500+ chars
+  if (url.length > 500) return true;
   try {
-    const host = new URL(url).hostname.toLowerCase();
+    const { hostname, pathname } = new URL(url);
+    const host = hostname.toLowerCase();
+    // Skip image/static CDN subdomains (e.g. img.shgstatic.com, cdn.clutch.co)
+    if (/^(img|cdn|static|assets|media|images|s3|files)\./.test(host)) return true;
+    // Skip redirect/tracking subdomains (e.g. r.clutch.co, go.example.com)
+    if (/^(r|go|redirect|track|click|out)\./.test(host)) return true;
+    // Skip redirect paths
+    if (pathname.startsWith("/redirect") || pathname.startsWith("/go/") || pathname.startsWith("/out/")) return true;
     return SKIP_DOMAINS.some(d => host === d || host.endsWith("." + d));
   } catch { return true; }
 }
@@ -102,7 +111,7 @@ function heuristicExtractFromMarkdown(
     const name = m[1].trim();
     const url = m[2].replace(/[.,;)>]+$/, "").trim();
     if (name.length < 2 || name.length > 150) continue;
-    if (isSkipDomain(url)) continue;
+    if (isSkipUrl(url)) continue;
     allLinks.push({ name, url });
   }
 
@@ -470,7 +479,7 @@ export async function extractDirectory(
           }
         }
       } catch (err) {
-        console.error(`[directoryExtractor] Puppeteer error on page ${pageNum}:`, err);
+        console.error(`[directoryExtractor] Puppeteer error on page ${pageNum}:`, err instanceof Error ? err.message : String(err));
       }
     }
 
