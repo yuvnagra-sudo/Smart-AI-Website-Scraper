@@ -112,7 +112,7 @@ Return ONLY valid JSON:
       reasoning: parsed.reasoning ?? "",
     };
   } catch (err) {
-    console.error("[agentScraper] classifyPage error:", err);
+    console.error("[agentScraper] classifyPage error:", err instanceof Error ? err.message : String(err).slice(0, 300));
     // Default to profile to attempt extraction
     return { type: "profile", entityLabel: "entities", reasoning: "classification failed" };
   }
@@ -257,7 +257,7 @@ Return ONLY valid JSON with these keys: ${sections.map((s) => s.key).join(", ")}
     }
     return result;
   } catch (err) {
-    console.error("[agentScraper] extractProfileFields error:", err);
+    console.error("[agentScraper] extractProfileFields error:", err instanceof Error ? err.message : String(err).slice(0, 300));
     const empty: Record<string, string> = {};
     for (const s of sections) empty[s.key] = "";
     return empty;

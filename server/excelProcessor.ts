@@ -138,6 +138,15 @@ const WEBSITE_URL_VARIANTS = [
   "Corporate LinkedIn URL", "corporate linkedin url",
   "Website", "website", "URL", "url", "Site", "site",
   "Link", "link", "Web", "web", "Homepage", "homepage",
+  // Google Maps / local business exports
+  "Website URL", "website url", "Business Website", "business website",
+  "Business URL", "business url", "Place URL", "place url",
+  "Maps URL", "maps url", "Google Maps URL", "google maps url",
+  "Profile URL", "profile url", "Listing URL", "listing url",
+  // Apollo / Hunter / ZoomInfo / LinkedIn Sales Nav exports
+  "Company Domain", "company domain", "Domain", "domain",
+  "Company URL", "company url", "Org URL", "org url",
+  "LinkedIn URL", "linkedin url", "LinkedIn", "linkedin",
   // GoodFirms CSS class exports — "Visit Website" href is the company's own site;
   // logo href is the GoodFirms profile URL (scraper handles directory entries)
   "provider__cta-link href", "sg-provider-logotype-v2 href",
@@ -147,10 +156,15 @@ const DESCRIPTION_VARIANTS = [
   "linkedin description", "About", "about", "Summary", "summary",
 ];
 
-// Returns true if a string looks like a URL (not an email or plain text)
+// Returns true if a string looks like a URL or domain (not an email or plain text)
 function looksLikeUrl(s: string): boolean {
   const t = s.trim();
-  return t.startsWith("http://") || t.startsWith("https://") || t.startsWith("www.");
+  if (!t) return false;
+  if (t.startsWith("http://") || t.startsWith("https://") || t.startsWith("www.")) return true;
+  // Match bare domains like "example.com" or "sub.example.co.uk"
+  // Must have a dot and a valid TLD (2-6 chars), no spaces
+  if (!t.includes(' ') && /^[a-zA-Z0-9-]+\.[a-zA-Z]{2,6}(\.[a-zA-Z]{2,6})?(\/.*)?$/.test(t)) return true;
+  return false;
 }
 
 // Find websiteUrl column: prefer name-based match but validate with cell content.
@@ -288,11 +302,17 @@ export async function parseInputExcel(fileUrl: string, columnMapping?: ColumnMap
 
   if (firms.length === 0) {
     const columnList = availableColumns.join(", ");
+    // Suggest which column might contain URLs by scanning all columns for URL-like values
+    const allRows = data.slice(0, 5);
+    const urlLikeCols = availableColumns.filter(col =>
+      allRows.some(row => looksLikeUrl(String(row[col] ?? "")))
+    );
+    const suggestion = urlLikeCols.length > 0
+      ? ` Columns that look like they contain URLs: [${urlLikeCols.join(", ")}]. Use the column mapping tool to assign one as "Website URL".`
+      : ` No columns with URL-like values were detected. Please add a Website URL column to your file.`;
     throw new Error(
-      `No valid data found. Your file has columns: [${columnList}]. ` +
-      `Required: a Website URL column (or Website/URL/Link). ` +
-      `Company Name is optional (falls back to URL if not provided). ` +
-      (skippedRows.length > 0 ? `Skipped rows: ${skippedRows.join(", ")}` : "")
+      `No valid data found. Your file has columns: [${columnList}].${suggestion}` +
+      (skippedRows.length > 0 ? ` Skipped rows: ${skippedRows.join(", ")}` : "")
     );
   }
 

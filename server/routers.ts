@@ -745,7 +745,14 @@ export async function processEnrichmentJob(jobId: number) {
           parallelProcessedCount++;
         } catch (err) {
           parallelProcessedCount++;
-          console.error(`[Job ${jobId}] Error enriching "${firm.companyName}":`, err);
+          const _errMsg = err instanceof Error ? err.message : String(err);
+          const _isAxios = (err as any)?.isAxiosError || (err as any)?.response?.status;
+          if (_isAxios) {
+            const _status = (err as any)?.response?.status ?? 'unknown';
+            console.error(`[Job ${jobId}] HTTP ${_status} error for "${firm.companyName}": ${_errMsg.slice(0, 200)}`);
+          } else {
+            console.error(`[Job ${jobId}] Error enriching "${firm.companyName}": ${_errMsg.slice(0, 500)}`);
+          }
         } finally {
           activeFirms.delete(firm.companyName);
           const activeFirmsList = [...activeFirms];
@@ -1040,7 +1047,15 @@ export async function processAgentJob(jobId: number) {
             firmQueue.length = 0;
             break;
           }
-          console.error(`[processAgentJob] Error processing ${firm.websiteUrl}:`, err);
+          // Truncate axios/network errors to avoid dumping full request/response objects in logs
+          const errMsg = err instanceof Error ? err.message : String(err);
+          const isAxiosErr = (err as any)?.isAxiosError || (err as any)?.response?.status;
+          if (isAxiosErr) {
+            const status = (err as any)?.response?.status ?? 'unknown';
+            console.error(`[processAgentJob] HTTP ${status} error for ${firm.websiteUrl}: ${errMsg.slice(0, 200)}`);
+          } else {
+            console.error(`[processAgentJob] Error processing ${firm.websiteUrl}: ${errMsg.slice(0, 500)}`);
+          }
           insertJobLog({
             jobId,
             url: firm.websiteUrl,
