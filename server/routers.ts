@@ -939,7 +939,7 @@ export async function processAgentJob(jobId: number) {
     const seenUrls = new Set<string>(firms.map(f => f.websiteUrl));
     let totalQueued = firms.length;
 
-    const CONCURRENCY = 10; // Reduced from 50 for stability and faster cancel response
+    const CONCURRENCY = 50; // Full concurrency — cancel responsiveness handled by cancellation poller
     const firmQueue = [...firms];
 
     keepAlive.start();

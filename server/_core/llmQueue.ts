@@ -111,17 +111,40 @@ export class LLMRequestQueue {
       this.requestsThisMinute++;
       
       try {
-        const result = await invokeLLM(request.params);
-        this.totalProcessed++;
-        request.resolve(result);
+        // Retry on 429 rate-limit errors with exponential backoff + jitter
+        let result: InvokeResult | undefined;
+        let lastError: Error | undefined;
+        for (let attempt = 0; attempt < 5; attempt++) {
+          try {
+            result = await invokeLLM(request.params);
+            break;
+          } catch (err: any) {
+            const is429 = err?.status === 429 || err?.message?.includes('429') || err?.message?.includes('RESOURCE_EXHAUSTED');
+            if (is429 && attempt < 4) {
+              const backoffMs = Math.min(60000, Math.pow(2, attempt) * 1000) + Math.random() * 500;
+              console.warn(`[LLM Queue] 429 rate limit — retry ${attempt + 1}/4 in ${Math.ceil(backoffMs / 1000)}s`);
+              await new Promise(r => setTimeout(r, backoffMs));
+            } else {
+              lastError = err as Error;
+              break;
+            }
+          }
+        }
+        if (result !== undefined) {
+          this.totalProcessed++;
+          request.resolve(result);
+        } else {
+          throw lastError ?? new Error('LLM call failed after retries');
+        }
       } catch (error) {
         this.totalErrors++;
-        console.error(`[LLM Queue] Request failed:`, error);
+        const msg = error instanceof Error ? error.message : String(error);
+        console.error(`[LLM Queue] Request failed: ${msg}`);
         request.reject(error as Error);
       }
       
-      // 67ms between requests → ~895 RPM effective throughput (capped at 1,000 RPM below)
-      await new Promise(resolve => setTimeout(resolve, 67));
+      // 30ms between requests → ~2,000 RPM effective throughput (Gemini 3 Flash Tier 2 limit)
+      await new Promise(resolve => setTimeout(resolve, 30));
     }
     
     this.processing = false;
@@ -174,10 +197,12 @@ export class LLMRequestQueue {
 }
 
 // Global singleton instance
-// 8,000 RPM cap — safe below OpenAI Tier 4 / Gemini Paid Tier 1 (10K RPM limit)
-// At 8ms inter-request delay, effective throughput = ~7,500 RPM (delay is the real limiter)
-// 1,000 RPM — matches Gemini Tier 2 cap (your account limit)
-export const llmQueue = new LLMRequestQueue(1000);
+// 2,000 RPM — matches Gemini 3 Flash Tier 2 cap (requires $250 cumulative Google Cloud spend)
+// Tier 1 (paid, no spend threshold): 300 RPM — set to 300 if you haven't hit $250 yet
+// At 30ms inter-request delay, effective throughput = ~2,000 RPM
+export const llmQueue = new LLMRequestQueue(
+  parseInt(process.env.LLM_RPM_LIMIT ?? '2000', 10)
+);
 
 /**
  * Convenience function to enqueue LLM requests
