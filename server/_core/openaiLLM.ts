@@ -1,20 +1,25 @@
 /**
- * LLM Implementation — Gemini 3 (default) or OpenAI (fallback)
+ * LLM Implementation — Gemini (default) or OpenAI (fallback)
  *
  * Provider is selected at runtime:
  *   - If GEMINI_API_KEY is set → uses Gemini (model via GEMINI_MODEL env var)
- *       Default model: gemini-3-flash-preview  ($0.50/$3.00 per 1M tokens)
- *       Better output:  gemini-3.1-pro-preview  ($2.00/$12.00 per 1M tokens)
- *       Budget option:  gemini-3.1-flash-lite-preview ($0.25/$1.50 per 1M tokens)
- *   - Otherwise → uses OpenAI (model via OPENAI_MODEL env var, default: gpt-4o-mini)
  *
- * All Gemini 3 models use Google's OpenAI-compatible endpoint.
- * To switch models in Railway: set GEMINI_MODEL to the desired model ID.
+ * Model selection guide (set GEMINI_MODEL in Railway env vars):
  *
- * Gemini 3 Flash vs 3.1 Pro:
- *   - gemini-3-flash-preview:     fast, frontier-class intelligence, best value for scraping
- *   - gemini-3.1-pro-preview:     highest accuracy, best for complex/ambiguous pages, 4x cost
- *   - gemini-3.1-flash-lite-preview: cheapest, good for simple structured extraction
+ *   gemini-3-flash-preview  ← DEFAULT — 1,000 RPM cap, best quality for agentic scraping
+ *     $0.50/$3.00 per 1M tokens
+ *
+ *   gemini-3.1-pro-preview  — highest accuracy, complex/ambiguous pages, 1,000 RPM cap
+ *     $2.00/$12.00 per 1M tokens
+ *
+ *   gemini-2.5-flash  — budget option, 343 RPM, very cheap
+ *     $0.075/$0.30 per 1M tokens
+ *
+ * Rate limits (Tier 1, as confirmed Mar 2026):
+ *   gemini-3-flash-preview:  1,000 RPM cap (4 used = plenty of headroom)
+ *   gemini-2.5-flash:          343 RPM cap
+ *
+ * Set LLM_RPM_LIMIT in Railway to match your model's RPM cap.
  */
 
 import { type InvokeParams, type InvokeResult } from "./llm";
@@ -24,7 +29,7 @@ const USE_GEMINI = !!process.env.GEMINI_API_KEY;
 const LLM_BASE_URL = USE_GEMINI
   ? "https://generativelanguage.googleapis.com/v1beta/openai/"
   : "https://api.openai.com/v1/";
-// Default to gemini-3-flash-preview — best balance of quality and cost for agentic scraping
+// Default to gemini-3-flash-preview — 1,000 RPM cap on Tier 1, best quality for agentic scraping
 const LLM_MODEL = USE_GEMINI
   ? (process.env.GEMINI_MODEL ?? "gemini-3-flash-preview")
   : (process.env.OPENAI_MODEL ?? "gpt-4o-mini");

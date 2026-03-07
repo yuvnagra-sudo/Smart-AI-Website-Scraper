@@ -143,8 +143,10 @@ export class LLMRequestQueue {
         request.reject(error as Error);
       }
       
-      // 30ms between requests → ~2,000 RPM effective throughput (Gemini 3 Flash Tier 2 limit)
-      await new Promise(resolve => setTimeout(resolve, 30));
+      // 200ms between requests → ~300 RPM effective throughput (Gemini 3 Flash Tier 1 limit)
+      // Override with LLM_RPM_LIMIT env var if on Tier 2 (2000 RPM) or higher
+      const delayMs = Math.max(30, Math.ceil(60000 / this.requestsPerMinute));
+      await new Promise(resolve => setTimeout(resolve, delayMs));
     }
     
     this.processing = false;
@@ -197,11 +199,12 @@ export class LLMRequestQueue {
 }
 
 // Global singleton instance
-// 2,000 RPM — matches Gemini 3 Flash Tier 2 cap (requires $250 cumulative Google Cloud spend)
-// Tier 1 (paid, no spend threshold): 300 RPM — set to 300 if you haven't hit $250 yet
-// At 30ms inter-request delay, effective throughput = ~2,000 RPM
+// 800 RPM — 80% safety buffer below the 1,000 RPM Tier 1 cap for gemini-3-flash-preview
+// Leaves 200 RPM headroom to absorb burst spikes without ever hitting a 429 error
+// Override via LLM_RPM_LIMIT env var in Railway if needed
+// Inter-request delay is auto-calculated: 60000ms / RPM = 75ms at 800 RPM
 export const llmQueue = new LLMRequestQueue(
-  parseInt(process.env.LLM_RPM_LIMIT ?? '2000', 10)
+  parseInt(process.env.LLM_RPM_LIMIT ?? '800', 10)
 );
 
 /**

@@ -939,7 +939,12 @@ export async function processAgentJob(jobId: number) {
     const seenUrls = new Set<string>(firms.map(f => f.websiteUrl));
     let totalQueued = firms.length;
 
-    const CONCURRENCY = 50; // Full concurrency — cancel responsiveness handled by cancellation poller
+    // Concurrency auto-scales with LLM_RPM_LIMIT.
+    // Formula: floor(RPM / 7 LLM-calls-per-firm / 2) capped at 50
+    // At 800 RPM: floor(800 / 7 / 2) = 57 → capped at 50
+    // At 300 RPM: floor(300 / 7 / 2) = 21
+    const RPM = parseInt(process.env.LLM_RPM_LIMIT ?? '800', 10);
+    const CONCURRENCY = Math.min(50, Math.max(5, Math.floor(RPM / 7 / 2)));
     const firmQueue = [...firms];
 
     keepAlive.start();
