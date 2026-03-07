@@ -972,7 +972,19 @@ export async function processAgentJob(jobId: number) {
     // leaves up to 50 in-flight LLM calls that must complete before the job
     // actually stops. 10 is still fast and dramatically reduces cancel latency.
     const CONCURRENCY = 10;
-    const firmQueue = [...firms];
+
+    // SMART STOPPING: Hard cap on total entries to process.
+    // A directory page can expand into hundreds of entries. Without a cap the job
+    // runs indefinitely. The cap is 5× the original input size (min 500, max 5000).
+    // This lets directory jobs finish in a reasonable time while still being useful.
+    const MAX_TOTAL_ENTRIES = Math.min(5000, Math.max(500, firms.length * 5));
+
+    // Track which URLs have already been queued to prevent duplicate work.
+    const queuedUrls = new Set<string>(firms.map(f => f.websiteUrl));
+
+    // Queue items carry a depth flag so we never expand a directory-of-directories.
+    type QueueItem = { companyName: string; websiteUrl: string; description?: string; isExpanded?: boolean };
+    const firmQueue: QueueItem[] = firms.map(f => ({ ...f, isExpanded: false }));
 
     const runWorker = async () => {
       while (firmQueue.length > 0) {
@@ -1007,24 +1019,40 @@ export async function processAgentJob(jobId: number) {
 
           if (result.type === "directory") {
             collectedUrls.push(...result.entries);
-            // Queue each discovered directory entry for individual profile scraping.
-            // Without this, entries only appear on a "Collected URLs" sheet and are never
-            // enriched with the user's custom sections.
+
+            // SMART STOPPING — three guards:
+            // 1. Depth guard: never expand a URL that was itself produced by a directory expansion.
+            //    This prevents directories-of-directories from running forever.
+            // 2. Deduplication: skip URLs already in the queue or already processed.
+            // 3. Hard cap: stop adding entries once MAX_TOTAL_ENTRIES is reached.
             let newEntries = 0;
-            for (const entry of result.entries) {
-              const scrapeTarget = entry.nativeUrl || entry.directoryUrl;
-              if (scrapeTarget && scrapeTarget !== firm.websiteUrl) {
+            if (!(firm as QueueItem).isExpanded) {
+              for (const entry of result.entries) {
+                const scrapeTarget = entry.nativeUrl || entry.directoryUrl;
+                if (!scrapeTarget || scrapeTarget === firm.websiteUrl) continue;
+                if (queuedUrls.has(scrapeTarget)) continue; // dedup
+
+                // Check hard cap (current queue + already processed)
+                const totalSoFar = queuedUrls.size + processed;
+                if (totalSoFar >= MAX_TOTAL_ENTRIES) {
+                  console.log(`[processAgentJob] Hard cap of ${MAX_TOTAL_ENTRIES} entries reached — stopping directory expansion`);
+                  break;
+                }
+
+                queuedUrls.add(scrapeTarget);
                 firmQueue.push({
                   companyName: entry.name || scrapeTarget,
                   websiteUrl: scrapeTarget,
                   description: rowObjective,
+                  isExpanded: true, // depth guard: these entries will NOT be further expanded
                 });
                 newEntries++;
               }
+            } else {
+              console.log(`[processAgentJob] Skipping directory expansion for ${firm.websiteUrl} (already an expanded entry — depth guard)`);
             }
-            // FIX: Update firmCount in DB to include the newly queued entries.
-            // Without this, processedCount exceeds firmCount and the UI shows >100%.
-            // Use a direct atomic SQL increment to avoid race conditions with concurrent workers.
+
+            // Update firmCount in DB to include the newly queued entries.
             if (newEntries > 0) {
               const db = await getDb();
               if (db) {
@@ -1033,7 +1061,7 @@ export async function processAgentJob(jobId: number) {
                   .where(eq(enrichmentJobs.id, jobId));
               }
             }
-            console.log(`[processAgentJob] Directory expanded: ${result.entries.length} entries queued for scraping (firmCount +${newEntries})`);
+            console.log(`[processAgentJob] Directory expanded: ${result.entries.length} entries found, ${newEntries} queued (firmCount +${newEntries})`);
             insertJobLog({ jobId, url: firm.websiteUrl, companyName: firm.companyName, status: "success", fieldsTotal: 0, fieldsFilled: 0, durationMs: Date.now() - startMs }).catch(() => {});
           } else {
             profileResults.push({
