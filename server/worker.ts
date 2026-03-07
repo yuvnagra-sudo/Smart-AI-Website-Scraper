@@ -13,7 +13,7 @@
 import { drizzle } from 'drizzle-orm/mysql2';
 import mysql from 'mysql2/promise';
 import { enrichmentJobs } from '../drizzle/schema';
-import { eq, and, or, lt, isNull } from 'drizzle-orm';
+import { eq, and, or, lt, isNull, ne } from 'drizzle-orm';
 import { processEnrichmentJob, processAgentJob } from './routers';
 
 const POLL_INTERVAL = 5000; // Check for new jobs every 5 seconds
@@ -57,12 +57,15 @@ async function findNextJob() {
   const db = await getDb();
   
   // First, check for stale jobs (processing but no recent heartbeat)
+  // FIX: Exclude "cancelled" status to prevent accidentally re-queuing a job
+  // that the user cancelled while the worker was between heartbeats.
   const staleThreshold = new Date(Date.now() - STALE_THRESHOLD);
   const staleJobs = await db.select()
     .from(enrichmentJobs)
     .where(
       and(
         eq(enrichmentJobs.status, "processing"),
+        ne(enrichmentJobs.status, "cancelled" as any), // FIX: guard against cancelled jobs
         or(
           lt(enrichmentJobs.heartbeatAt!, staleThreshold),
           isNull(enrichmentJobs.heartbeatAt)

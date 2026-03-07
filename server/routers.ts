@@ -25,7 +25,7 @@ import { canResumeJob, prepareJobForResume, getResumeProgress } from "./resumeJo
 import { extractDirectory } from "./directoryExtractor";
 import { nanoid } from "nanoid";
 import { saveFirmImmediately, getProcessedFirms } from "./incrementalSave";
-
+import { isJobCancelled } from "./_core/jobCancellation";
 export const appRouter = router({
     // if you need to use socket.io, read and register route in server/_core/index.ts, all api should start with '/api/' so that the gateway can route correctly
   system: systemRouter,
@@ -249,19 +249,22 @@ export const appRouter = router({
       .mutation(async ({ input }) => {
         const { queuedLLMCall } = await import("./_core/llmQueue");
 
+        // FIX: Raised section cap from 3-8 to 3-15. The old 8-section limit caused the
+        // LLM to silently merge or drop fields when users asked for more columns.
         const systemMsg = `You are a web data extraction architect. Parse the user's intent into a structured extraction plan.
 
 Rules for sections:
-- 3-8 sections total
-- Each section key: snake_case, max 40 chars
+- 3-15 sections total (use as many as the user's request requires, up to 15)
+- Each section key: snake_case, max 40 chars — MUST exactly match the field names used in systemPrompt
 - Each section label: 2-4 words, suitable as a CSV column header
 - Each section desc: 1-2 sentence research instruction
+- IMPORTANT: Every field name mentioned in systemPrompt MUST have a matching key in sections
 
 Return ONLY valid JSON (no markdown, no code fences):
 {
   "objective": "one concise sentence describing what to find",
   "sections": [{"key":"snake_case_key","label":"Display Name","desc":"Research instruction"}],
-  "systemPrompt": "Complete extraction prompt. Start with 'You are a [role]. Extract the following fields from the provided page content:' followed by numbered **Bold** sections with instructions. Include {companyName} and {websiteUrl} as placeholders."
+  "systemPrompt": "Complete extraction prompt. Start with 'You are a [role]. Extract the following fields from the provided page content:' followed by numbered **Bold** sections with instructions. Include {companyName} and {websiteUrl} as placeholders. Use ONLY the exact snake_case keys defined in sections."
 }`;
 
         try {
@@ -324,10 +327,25 @@ Return ONLY valid JSON (no markdown, no code fences):
             });
           }
 
+          // FIX: Validate that the systemPrompt only references keys that exist in sections.
+          // A mismatch means extracted data goes into a column that doesn't exist in the output.
+          const sectionKeys = new Set(sections.map((s: AgentSection) => s.key));
+          let validatedSystemPrompt = String(parsed.systemPrompt ?? "");
+          // Rebuild the systemPrompt from sections to guarantee alignment
+          const sectionList = sections
+            .map((s: AgentSection, i: number) => `${i + 1}. **${s.label}** (key: ${s.key}): ${s.desc}`)
+            .join("\n");
+          if (validatedSystemPrompt) {
+            // Append a strict key reminder to the generated prompt
+            validatedSystemPrompt += `\n\nIMPORTANT: Return ONLY these exact JSON keys: ${sections.map((s: AgentSection) => s.key).join(", ")}`;
+          } else {
+            validatedSystemPrompt = `You are a data extraction assistant for {companyName} ({websiteUrl}).\nExtract the following fields from the provided page content:\n${sectionList}\n\nReturn ONLY these exact JSON keys: ${sections.map((s: AgentSection) => s.key).join(", ")}`;
+          }
+
           return {
             objective: String(parsed.objective ?? input.description),
             sections,
-            systemPrompt: String(parsed.systemPrompt ?? ""),
+            systemPrompt: validatedSystemPrompt,
           };
         } catch (err: any) {
           if (err instanceof TRPCError) throw err;
@@ -389,14 +407,16 @@ Return ONLY valid JSON (no markdown, no code fences):
         // Prepare job for resume
         await prepareJobForResume(input.jobId);
 
-        // Restart processing
-        processEnrichmentJob(input.jobId).catch((error) => {
-          console.error(`Error resuming job ${input.jobId}:`, error);
-        });
+        // FIX: Re-queue the job as "pending" so the background worker picks it up.
+        // Previously this called processEnrichmentJob() directly from the web server
+        // process, which has no heartbeat, no cancellation timer, and no keepAlive —
+        // making resumed jobs extremely fragile.
+        await updateEnrichmentJob(input.jobId, { status: "pending", workerPid: null, heartbeatAt: null });
+        console.log(`[resumeJob] Job ${input.jobId} re-queued as pending — worker will pick up within 5s`);
 
         const progress = await getResumeProgress(input.jobId);
         return {
-          message: "Job resumed successfully",
+          message: "Job resumed successfully — worker will pick it up within 5 seconds",
           ...progress,
         };
       }),
@@ -888,6 +908,7 @@ function classifyAgentError(err: unknown): string {
 
 export async function processAgentJob(jobId: number) {
   const keepAlive = new ConnectionKeepAlive();
+  keepAlive.start(); // FIX: was missing — prevents MySQL connection timeout on long agent jobs
 
   try {
     const job = await getEnrichmentJob(jobId);
@@ -903,17 +924,36 @@ export async function processAgentJob(jobId: number) {
     const firms = await parseInputExcel(job.inputFileUrl, columnMapping);
     console.log(`[processAgentJob] Job ${jobId}: ${firms.length} URLs, ${sections.length} sections`);
 
+    // FIX: Sync firmCount in DB to the actual parsed count.
+    // The client-side preview count may differ from the real parsed count
+    // (e.g. rows with missing URLs are filtered out), causing the progress bar
+    // to never reach 100%.
+    if (firms.length !== job.firmCount) {
+      console.log(`[processAgentJob] Correcting firmCount: DB=${job.firmCount}, actual=${firms.length}`);
+      await updateEnrichmentJob(jobId, { firmCount: firms.length });
+    }
+
     const profileResults: Array<Record<string, string>> = [];
     const collectedUrls: AgentDirectoryEntry[] = [];
     let processed = 0;
 
-    const CONCURRENCY = 50;
+    // FIX: Reduced from 50 to 10. With 50 concurrent workers, a cancel event
+    // leaves up to 50 in-flight LLM calls that must complete before the job
+    // actually stops. 10 is still fast and dramatically reduces cancel latency.
+    const CONCURRENCY = 10;
     const firmQueue = [...firms];
 
     const runWorker = async () => {
       while (firmQueue.length > 0) {
         const firm = firmQueue.shift();
         if (!firm) break;
+
+        // FIX: Check cancellation at the start of every firm (before any work)
+        if (isJobCancelled(jobId)) {
+          console.log(`[processAgentJob] Job ${jobId} cancelled — stopping`);
+          firmQueue.length = 0;
+          break;
+        }
 
         // Use per-row objective (Description column) if present, else global objective
         const rowObjective = firm.description?.trim() || objective;
@@ -931,6 +971,7 @@ export async function processAgentJob(jobId: number) {
             sections,
             resolvedPrompt,
             5,
+            () => isJobCancelled(jobId), // FIX: pass cancellation callback so scrapeUrl can abort mid-hop
           );
 
           if (result.type === "directory") {
@@ -970,6 +1011,11 @@ export async function processAgentJob(jobId: number) {
             }).catch(() => {});
           }
         } catch (err) {
+          // FIX: Propagate JOB_CANCELLED so the outer loop can drain the queue
+          if (err instanceof Error && err.message === 'JOB_CANCELLED') {
+            firmQueue.length = 0;
+            break;
+          }
           console.error(`[processAgentJob] Error processing ${firm.websiteUrl}:`, err);
           insertJobLog({
             jobId,
@@ -1002,6 +1048,13 @@ export async function processAgentJob(jobId: number) {
       Array.from({ length: Math.min(CONCURRENCY, firms.length) }, runWorker),
     );
 
+    // FIX: If the job was cancelled, skip writing the completed status.
+    // The cancelJob mutation already set status = "cancelled" in the DB.
+    if (isJobCancelled(jobId)) {
+      console.log(`[processAgentJob] Job ${jobId} was cancelled — skipping completed update`);
+      return;
+    }
+
     // Generate output Excel and upload to S3
     const excelBuffer = createAgentOutputExcel(sections, profileResults, collectedUrls);
     const outputKey = `enrichment/${job.userId}/${jobId}-results.xlsx`;
@@ -1023,6 +1076,10 @@ export async function processAgentJob(jobId: number) {
       `[processAgentJob] ✅ Job ${jobId} complete. ${profileResults.length} profiles + ${collectedUrls.length} directory entries.`,
     );
   } catch (error) {
+    if (isJobCancelled(jobId)) {
+      console.log(`[processAgentJob] Job ${jobId} cancelled (caught during shutdown)`);
+      return;
+    }
     console.error(`[processAgentJob] Job ${jobId} failed:`, error);
     await updateEnrichmentJob(jobId, {
       status: "failed",

@@ -210,10 +210,13 @@ async function extractProfileFields(
   }
   const exampleJson = JSON.stringify(exampleObj, null, 2);
 
+  // FIX: Expanded from 25,000 to 60,000 characters. Many content-rich sites
+  // (SaaS, e-commerce, large company pages) have key data beyond the 25K mark.
+  // 60K stays well within GPT-4o-mini's 128K context window.
   const userMsg = `${systemPrompt}
 
 Page content:
-${content.substring(0, 25000)}
+${content.substring(0, 60000)}
 
 Extract each field about THIS company only (the entity being profiled on this page).
 Ignore client testimonials, reviewer names, case study client companies, partner logos, and any third-party content.
@@ -373,6 +376,14 @@ function mergeResults(
     // If existing is a substring of incoming, replace (incoming is more complete)
     if (incomingLower.includes(existingLower)) { merged[key] = incomingTrimmed; continue; }
 
+    // FIX: Prefer the longer value when both are non-empty and neither contains the other.
+    // Previously the first (homepage) value was always kept, even if a sub-page had
+    // a more complete value. Now we keep whichever is longer.
+    if (incomingTrimmed.length > existingTrimmed.length) {
+      merged[key] = incomingTrimmed;
+      continue;
+    }
+
     // Check individual semicolon-separated segments for duplicates
     const existingSegments = existingTrimmed.split(";").map(s => s.trim().toLowerCase());
     const newSegments = incomingTrimmed.split(";").map(s => s.trim()).filter(
@@ -402,6 +413,7 @@ export async function scrapeUrl(
   sections: AgentSection[],
   systemPrompt: string,
   maxHops = 5,
+  isCancelled?: () => boolean, // FIX: optional cancellation callback
 ): Promise<AgentScrapeResult> {
   console.log(`[agentScraper] Starting: ${url}`);
 
@@ -502,6 +514,10 @@ export async function scrapeUrl(
   let currentContent = content;
 
   for (let hop = 0; hop < maxHops; hop++) {
+    // FIX: Check cancellation at the start of each hop so we don't start new
+    // network requests or LLM calls after the job has been cancelled.
+    if (isCancelled?.()) throw new Error('JOB_CANCELLED');
+
     const decision = await decideNextLinks(
       data,
       sections,
@@ -518,6 +534,8 @@ export async function scrapeUrl(
     console.log(`[agentScraper] Following ${decision.linksToFollow.length} link(s) at hop ${hop + 1}`);
 
     for (const link of decision.linksToFollow.slice(0, 3)) {
+      // FIX: Check cancellation before each sub-page fetch
+      if (isCancelled?.()) throw new Error('JOB_CANCELLED');
       if (visitedUrls.has(link)) continue;
       visitedUrls.add(link);
 
@@ -530,6 +548,9 @@ export async function scrapeUrl(
         } catch { return null; }
       });
       if (!subResult?.success || !subResult.content) continue;
+
+      // FIX: Check cancellation after the fetch, before the LLM call
+      if (isCancelled?.()) throw new Error('JOB_CANCELLED');
 
       currentContent = subResult.content; // use last fetched page for next link decision
       const subData = await extractProfileFields(subResult.content, sections, systemPrompt);
