@@ -8,8 +8,8 @@ import { storagePut, storageGet } from "./storage";
 import { estimateEnrichmentCost } from "./costEstimation";
 import { createEnrichmentJob, getEnrichmentJob, getUserEnrichmentJobs, getAllEnrichmentJobs, updateEnrichmentJob, insertJobLog, getJobLogs } from "./enrichmentDb";
 import { getDb } from "./db";
-import { enrichedFirms, teamMembers, portfolioCompanies, investmentThesis } from "../drizzle/schema";
-import { eq, and, like, count } from "drizzle-orm";
+import { enrichedFirms, teamMembers, portfolioCompanies, investmentThesis, enrichmentJobs } from "../drizzle/schema";
+import { eq, and, like, count, sql } from "drizzle-orm";
 import { parseInputExcel, parseInputHeaders, createOutputExcel, createAgentOutputExcel, type EnrichedVCData, type TeamMemberData, type PortfolioCompanyData, type ProcessingSummaryData, type FileHeaders } from "./excelProcessor";
 import { scrapeUrl, type AgentSection, type DirectoryEntry as AgentDirectoryEntry, type ScrapeStats } from "./agentScraper";
 import { generateInvestmentThesisSummaries } from "./investmentThesisAnalyzer";
@@ -1010,6 +1010,7 @@ export async function processAgentJob(jobId: number) {
             // Queue each discovered directory entry for individual profile scraping.
             // Without this, entries only appear on a "Collected URLs" sheet and are never
             // enriched with the user's custom sections.
+            let newEntries = 0;
             for (const entry of result.entries) {
               const scrapeTarget = entry.nativeUrl || entry.directoryUrl;
               if (scrapeTarget && scrapeTarget !== firm.websiteUrl) {
@@ -1018,9 +1019,21 @@ export async function processAgentJob(jobId: number) {
                   websiteUrl: scrapeTarget,
                   description: rowObjective,
                 });
+                newEntries++;
               }
             }
-            console.log(`[processAgentJob] Directory expanded: ${result.entries.length} entries queued for scraping`);
+            // FIX: Update firmCount in DB to include the newly queued entries.
+            // Without this, processedCount exceeds firmCount and the UI shows >100%.
+            // Use a direct atomic SQL increment to avoid race conditions with concurrent workers.
+            if (newEntries > 0) {
+              const db = await getDb();
+              if (db) {
+                await db.update(enrichmentJobs)
+                  .set({ firmCount: sql`${enrichmentJobs.firmCount} + ${newEntries}` })
+                  .where(eq(enrichmentJobs.id, jobId));
+              }
+            }
+            console.log(`[processAgentJob] Directory expanded: ${result.entries.length} entries queued for scraping (firmCount +${newEntries})`);
             insertJobLog({ jobId, url: firm.websiteUrl, companyName: firm.companyName, status: "success", fieldsTotal: 0, fieldsFilled: 0, durationMs: Date.now() - startMs }).catch(() => {});
           } else {
             profileResults.push({
