@@ -300,7 +300,7 @@ export async function parseInputExcel(fileUrl: string, columnMapping?: ColumnMap
 }
 
 import type { InvestmentThesisSummary } from "./investmentThesisAnalyzer";
-import type { AgentSection, DirectoryEntry } from "./agentScraper";
+import type { AgentSection, DirectoryEntry, FieldResultMap } from "./agentScraper";
 
 export interface ProcessingSummaryData {
   firmName: string;
@@ -393,16 +393,18 @@ export function createOutputExcel(
 /**
  * Create output Excel for agentic extraction jobs.
  * - "Results" sheet: one row per profile entity, one column per custom section
+ * - "Sources" sheet: source URLs and confidence scores per field per company
  * - "Collected URLs" sheet: entries gathered from directory pages
  */
 export function createAgentOutputExcel(
   sections: AgentSection[],
   profileResults: Array<Record<string, string>>,
   collectedUrls: DirectoryEntry[],
+  fieldResultsMap?: Array<{ companyName: string; websiteUrl: string; fieldResults: FieldResultMap }>,
 ): Buffer {
   const workbook = XLSX.utils.book_new();
 
-  // Sheet 1: Results (profile extractions)
+  // Sheet 1: Results (profile extractions — clean data only)
   if (profileResults.length > 0) {
     const rows = profileResults.map((r) => {
       const row: Record<string, string> = {
@@ -421,6 +423,27 @@ export function createAgentOutputExcel(
     // Empty placeholder sheet
     const sheet = XLSX.utils.aoa_to_sheet([["No profile results found"]]);
     XLSX.utils.book_append_sheet(workbook, sheet, "Results");
+  }
+
+  // Sheet 2: Sources (confidence scores + source URLs per field)
+  if (fieldResultsMap && fieldResultsMap.length > 0) {
+    const sourceRows = fieldResultsMap.map(({ companyName, websiteUrl, fieldResults }) => {
+      const row: Record<string, string> = {
+        "Company Name": companyName,
+        "Website": websiteUrl,
+      };
+      for (const s of sections) {
+        const fr = fieldResults[s.key];
+        const conf = fr?.confidence ?? 0;
+        const confLabel = conf >= 0.9 ? "High" : conf >= 0.7 ? "Good" : conf >= 0.4 ? "Partial" : "Not found";
+        row[`${s.label} (Confidence)`] = fr?.value ? `${confLabel} (${(conf * 100).toFixed(0)}%)` : "Not found";
+        row[`${s.label} (Source URL)`] = fr?.sourceUrl ?? "";
+      }
+      return row;
+    });
+    const sanitizedSourceRows = sanitizeForExcel(sourceRows);
+    const sourceSheet = XLSX.utils.json_to_sheet(sanitizedSourceRows);
+    XLSX.utils.book_append_sheet(workbook, sourceSheet, "Sources");
   }
 
   // Sheet 2: Collected URLs (from directory pages)

@@ -11,12 +11,13 @@ import { getDb } from "./db";
 import { enrichedFirms, teamMembers, portfolioCompanies, investmentThesis } from "../drizzle/schema";
 import { eq, and, like, count } from "drizzle-orm";
 import { parseInputExcel, parseInputHeaders, createOutputExcel, createAgentOutputExcel, type EnrichedVCData, type TeamMemberData, type PortfolioCompanyData, type ProcessingSummaryData, type FileHeaders } from "./excelProcessor";
-import { scrapeUrl, type AgentSection, type DirectoryEntry as AgentDirectoryEntry, type ScrapeStats } from "./agentScraper";
+import { scrapeUrl, scrapeUrlAsDirectory, type AgentSection, type DirectoryEntry as AgentDirectoryEntry, type ScrapeStats } from "./agentScraper";
 import { generateInvestmentThesisSummaries } from "./investmentThesisAnalyzer";
 import { generateResultsFile } from "./generateResultsService";
 import { createCSVExport } from "./csvExporter";
 import { updateJobProgressSafely, incrementJobProcessedCountSafely } from "./batchProcessor";
 import { ConnectionKeepAlive } from "./dbConnectionManager";
+import { isJobCancelled } from "./_core/jobCancellation";
 import { VCEnrichmentService } from "./vcEnrichment";
 import { getOpenAIStats } from "./_core/openaiLLM";
 import { classifyDecisionMakerTier } from './decisionMakerTiers';
@@ -904,11 +905,19 @@ export async function processAgentJob(jobId: number) {
     console.log(`[processAgentJob] Job ${jobId}: ${firms.length} URLs, ${sections.length} sections`);
 
     const profileResults: Array<Record<string, string>> = [];
+    const fieldResultsMapArr: Array<{ companyName: string; websiteUrl: string; fieldResults: import("./agentScraper").FieldResultMap }> = [];
     const collectedUrls: AgentDirectoryEntry[] = [];
     let processed = 0;
 
-    const CONCURRENCY = 50;
+    // Smart stopping rules
+    const MAX_TOTAL_ENTRIES = Math.min(5000, Math.max(500, firms.length * 5));
+    const seenUrls = new Set<string>(firms.map(f => f.websiteUrl));
+    let totalQueued = firms.length;
+
+    const CONCURRENCY = 10; // Reduced from 50 for stability and faster cancel response
     const firmQueue = [...firms];
+
+    keepAlive.start();
 
     const runWorker = async () => {
       while (firmQueue.length > 0) {
@@ -925,30 +934,37 @@ export async function processAgentJob(jobId: number) {
           .replace(/\{websiteUrl\}/g, firm.websiteUrl);
 
         try {
+          // The new agent loop (scrapeUrl) never misclassifies a company site as a
+          // directory — it always enriches the target company. Directory expansion is
+          // only triggered when the user explicitly opts in via the isExpanded flag.
           const result = await scrapeUrl(
             firm.websiteUrl,
             rowObjective,
             sections,
             resolvedPrompt,
-            5,
+            8, // maxHops increased from 5 to 8
+            () => isJobCancelled(jobId),
           );
 
           if (result.type === "directory") {
+            // This path is now only reached via scrapeUrlAsDirectory (explicit directory mode)
             collectedUrls.push(...result.entries);
-            // Queue each discovered directory entry for individual profile scraping.
-            // Without this, entries only appear on a "Collected URLs" sheet and are never
-            // enriched with the user's custom sections.
             for (const entry of result.entries) {
               const scrapeTarget = entry.nativeUrl || entry.directoryUrl;
-              if (scrapeTarget && scrapeTarget !== firm.websiteUrl) {
-                firmQueue.push({
-                  companyName: entry.name || scrapeTarget,
-                  websiteUrl: scrapeTarget,
-                  description: rowObjective,
-                });
+              if (scrapeTarget && scrapeTarget !== firm.websiteUrl && !seenUrls.has(scrapeTarget)) {
+                seenUrls.add(scrapeTarget);
+                if (totalQueued < MAX_TOTAL_ENTRIES) {
+                  firmQueue.push({
+                    companyName: entry.name || scrapeTarget,
+                    websiteUrl: scrapeTarget,
+                    description: rowObjective,
+                    isExpanded: true,
+                  });
+                  totalQueued++;
+                }
               }
             }
-            console.log(`[processAgentJob] Directory expanded: ${result.entries.length} entries queued for scraping`);
+            console.log(`[processAgentJob] Directory expanded: ${result.entries.length} entries queued`);
             insertJobLog({ jobId, url: firm.websiteUrl, companyName: firm.companyName, status: "success", fieldsTotal: 0, fieldsFilled: 0, durationMs: Date.now() - startMs }).catch(() => {});
           } else {
             profileResults.push({
@@ -956,6 +972,14 @@ export async function processAgentJob(jobId: number) {
               "Website": firm.websiteUrl,
               ...result.data,
             });
+            // Collect fieldResults for the Sources sheet
+            if (result.fieldResults) {
+              fieldResultsMapArr.push({
+                companyName: firm.companyName,
+                websiteUrl: firm.websiteUrl,
+                fieldResults: result.fieldResults,
+              });
+            }
             const stats: ScrapeStats = result.stats;
             const logStatus = stats.fieldsFilled === 0 ? "failed" : stats.fieldsFilled < stats.fieldsTotal ? "partial" : "success";
             insertJobLog({
@@ -1003,7 +1027,7 @@ export async function processAgentJob(jobId: number) {
     );
 
     // Generate output Excel and upload to S3
-    const excelBuffer = createAgentOutputExcel(sections, profileResults, collectedUrls);
+    const excelBuffer = createAgentOutputExcel(sections, profileResults, collectedUrls, fieldResultsMapArr);
     const outputKey = `enrichment/${job.userId}/${jobId}-results.xlsx`;
     const { url: outputUrl } = await storagePut(
       outputKey,

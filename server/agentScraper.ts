@@ -1,17 +1,29 @@
 /**
- * Agentic Scraper
+ * Agentic Scraper — Plan-Act-Observe-Reflect Loop
  *
- * Orchestrates LLM-driven extraction for custom user-defined sections.
- * Supports two modes:
- *   - DIRECTORY: input URL is a listing page → collects entity URLs ("Collected URLs" tab)
- *   - PROFILE: input URL is an entity's own website → extracts user-defined fields + follows sub-links
+ * Replaces the old fixed pipeline (fetch → classify → extract → 5 hops → done)
+ * with a true agent loop that:
  *
- * Builds on existing primitives: directoryExtractor, jinaFetcher, queuedLLMCall.
+ *   1. PLAN   — LLM decides the next action (fetch_url | web_search | done)
+ *   2. ACT    — Execute the action
+ *   3. OBSERVE — Extract all fields from the result, score confidence per field
+ *   4. REFLECT — If all fields are confident enough, stop. Otherwise, loop.
+ *
+ * Key improvements over the old pipeline:
+ *   - No classifyPage() — the agent never misclassifies a company site as a directory
+ *   - Web search fallback — if the website has no data, search the web
+ *   - Per-field confidence scoring — stops when it has enough, not when a counter hits 0
+ *   - Source attribution — every field value records which URL it came from
+ *   - Intent-aware — always knows it is enriching a specific company, not crawling
+ *
+ * The old classifyPage / directory-expansion path is preserved as a separate
+ * opt-in export (scrapeUrlAsDirectory) for the "Collected URLs" tab use-case.
  */
 
 import { fetchViaJina, fetchWebsiteContentHybrid } from "./jinaFetcher";
 import { extractDirectory, type DirectoryEntry as DirEntry } from "./directoryExtractor";
 import { queuedLLMCall } from "./_core/llmQueue";
+import { webSearch, searchQueryForField } from "./_core/webSearch";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -56,47 +68,81 @@ export type AgentScrapeResult =
   | { type: "directory"; entries: DirectoryEntry[] }
   | { type: "profile"; data: Record<string, string>; fieldResults: FieldResultMap; stats: ScrapeStats };
 
-type PageClass = "directory" | "directory-entry" | "profile";
-
-interface PageClassification {
-  type: PageClass;
-  /** Inferred entity label for directory pages (e.g. "VC firms", "real-estate agents") */
-  entityLabel: string;
-  reasoning: string;
-}
-
 // ---------------------------------------------------------------------------
-// 1. Page classifier
+// Agent action types
 // ---------------------------------------------------------------------------
 
-async function classifyPage(
-  content: string,
-  url: string,
+type AgentAction =
+  | { action: "fetch_url"; target: string; reason: string }
+  | { action: "web_search"; query: string; reason: string }
+  | { action: "done"; reason: string };
+
+// ---------------------------------------------------------------------------
+// 1. PLAN — LLM decides what to do next
+// ---------------------------------------------------------------------------
+
+async function planNextAction(
+  companyName: string,
+  websiteUrl: string,
   objective: string,
-): Promise<PageClassification> {
-  const KNOWN_DIRECTORIES = ['goodfirms.co', 'clutch.co', 'g2.com', 'yelp.com', 'capterra.com', 'trustpilot.com'];
-  const urlHost = (() => { try { return new URL(url).hostname; } catch { return ""; } })();
-  const directoryHint = KNOWN_DIRECTORIES.some(d => urlHost.includes(d))
-    ? `\nNote: This URL is from a known directory site (${urlHost}). If it shows ONE specific company's profile, classify as "directory-entry".`
-    : "";
+  sections: AgentSection[],
+  fieldResults: FieldResultMap,
+  visitedUrls: Set<string>,
+  availableLinks: string[],
+  hopsUsed: number,
+  maxHops: number,
+): Promise<AgentAction> {
+  // Build a summary of current state
+  const fieldSummary = sections.map(s => {
+    const r = fieldResults[s.key];
+    const conf = r ? r.confidence.toFixed(2) : "0.00";
+    const val = r?.value ? `"${r.value.slice(0, 60)}${r.value.length > 60 ? "..." : ""}"` : "(empty)";
+    return `  ${s.key} [conf=${conf}]: ${val}`;
+  }).join("\n");
 
-  const prompt = `You are analyzing a web page to classify its type.
+  const weakFields = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) < CONFIDENCE_THRESHOLD);
+  const allDone = weakFields.length === 0;
 
-URL: ${url}${directoryHint}
-User's objective: ${objective}
+  if (allDone || hopsUsed >= maxHops) {
+    return { action: "done", reason: allDone ? "All fields have sufficient confidence" : "Max hops reached" };
+  }
 
-Page content (first 20000 chars):
-${content.substring(0, 20000)}
+  const visitedList = [...visitedUrls].slice(-10).join("\n  ");
+  const linkList = availableLinks.slice(0, 20).join("\n  ");
+  const weakList = weakFields.map(s => `${s.key} (${s.label})`).join(", ");
 
-Classify this page as ONE of:
-- "directory": A listing/index page with many individual entries (companies, people, etc.) linked from it. Examples: VC firm databases, agent directories, company lists.
-- "directory-entry": A page WITHIN a directory that is ABOUT a specific entity, but not the entity's own website. Contains info about the entity + usually a link to their native website.
-- "profile": The actual website of a single entity (company, person, etc.). This is what we want to extract data from.
+  const prompt = `You are an AI agent enriching data for a company. Your goal is to fill in all required fields with high confidence.
 
-Also infer the entity label (e.g. "VC firms", "real-estate agents", "companies", "people") — used for directory extraction.
+Company: ${companyName}
+Website: ${websiteUrl}
+Objective: ${objective}
+
+Current field values and confidence scores (0.0 = not found, 1.0 = certain):
+${fieldSummary}
+
+Fields still needing data (confidence < ${CONFIDENCE_THRESHOLD}): ${weakList}
+
+URLs already visited (do not repeat):
+  ${visitedList || "(none yet)"}
+
+Available links on the last page visited:
+  ${linkList || "(none)"}
+
+Hops used: ${hopsUsed} / ${maxHops}
+
+Decide the SINGLE best next action:
+- "fetch_url": fetch one of the available links that is most likely to contain the missing fields
+- "web_search": search the web for the missing data (use when website has no useful links left)
+- "done": stop if you believe no more data can be found
+
+Rules:
+- NEVER fetch a URL that is already in the visited list
+- Prefer fetch_url over web_search when good links are available
+- Use web_search when the website is thin, blocked, or has no relevant links
+- Choose "done" if all weak fields are unlikely to be found anywhere
 
 Return ONLY valid JSON:
-{"type":"directory"|"directory-entry"|"profile","entityLabel":"string","reasoning":"one sentence"}`;
+{"action":"fetch_url"|"web_search"|"done","target":"url if fetch_url else null","query":"search query if web_search else null","reason":"one sentence"}`;
 
   try {
     const response = await queuedLLMCall({
@@ -105,16 +151,17 @@ Return ONLY valid JSON:
       response_format: {
         type: "json_schema",
         json_schema: {
-          name: "page_classification",
+          name: "agent_action",
           strict: true,
           schema: {
             type: "object",
             properties: {
-              type: { type: "string", enum: ["directory", "directory-entry", "profile"] },
-              entityLabel: { type: "string" },
-              reasoning: { type: "string" },
+              action: { type: "string", enum: ["fetch_url", "web_search", "done"] },
+              target: { type: ["string", "null"] },
+              query: { type: ["string", "null"] },
+              reason: { type: "string" },
             },
-            required: ["type", "entityLabel", "reasoning"],
+            required: ["action", "target", "query", "reason"],
             additionalProperties: false,
           },
         },
@@ -123,87 +170,35 @@ Return ONLY valid JSON:
 
     const raw = response.choices[0]?.message?.content ?? "{}";
     const parsed = JSON.parse(typeof raw === "string" ? raw : "{}");
-    return {
-      type: parsed.type ?? "profile",
-      entityLabel: parsed.entityLabel ?? "entities",
-      reasoning: parsed.reasoning ?? "",
-    };
-  } catch (err) {
-    console.error("[agentScraper] classifyPage error:", err);
-    // Default to profile to attempt extraction
-    return { type: "profile", entityLabel: "entities", reasoning: "classification failed" };
-  }
-}
 
-// ---------------------------------------------------------------------------
-// 2. Directory-entry: extract native URL
-// ---------------------------------------------------------------------------
-
-async function extractNativeUrl(content: string, pageUrl: string): Promise<string | undefined> {
-  // Fast regex scan of full content before spending an LLM call
-  try {
-    const directoryDomain = new URL(pageUrl).hostname;
-    const urlPattern = /https?:\/\/([a-zA-Z0-9-]+\.[a-zA-Z]{2,}[^\s"'<>]*)/g;
-    const candidates = [...content.matchAll(urlPattern)]
-      .map(m => m[0].replace(/[.,;)>]+$/, ""))
-      .filter(u => {
-        try {
-          const h = new URL(u).hostname;
-          return h !== directoryDomain &&
-            !h.includes("goodfirms") && !h.includes("clutch.co") &&
-            !h.includes("g2.com") && !h.includes("yelp.") &&
-            !h.includes("capterra") && !h.includes("trustpilot") &&
-            !h.includes("google.") && !h.includes("facebook.") &&
-            !h.includes("linkedin.") && !h.includes("twitter.") &&
-            !h.includes("instagram.");
-        } catch { return false; }
-      });
-    if (candidates.length > 0) {
-      console.log(`[agentScraper] Regex found native URL: ${candidates[0]}`);
-      return candidates[0];
+    if (parsed.action === "fetch_url" && parsed.target) {
+      // Validate the URL is not already visited
+      if (visitedUrls.has(parsed.target)) {
+        console.log(`[agentScraper] PLAN: LLM chose already-visited URL, switching to web_search`);
+        const weakField = weakFields[0];
+        return {
+          action: "web_search",
+          query: searchQueryForField(companyName, websiteUrl, weakField.label),
+          reason: "Chosen URL already visited, falling back to web search",
+        };
+      }
+      return { action: "fetch_url", target: parsed.target, reason: parsed.reason ?? "" };
     }
-  } catch { /* fall through to LLM */ }
 
-  const prompt = `This is a directory entry page about a specific company/organization.
-Page URL: ${pageUrl}
-Content (first 6000 chars):
-${content.substring(0, 6000)}
+    if (parsed.action === "web_search") {
+      const query = parsed.query || searchQueryForField(companyName, websiteUrl, weakFields[0]?.label ?? "company info");
+      return { action: "web_search", query, reason: parsed.reason ?? "" };
+    }
 
-Find the native website URL of the company/organization this page is about.
-This is their own website (e.g. "https://acmecapital.com"), NOT a link to another directory page.
-Look for links labelled "Website", "Visit website", "Homepage", or similar.
-
-Return ONLY valid JSON: {"nativeUrl":"string or null"}`;
-
-  try {
-    const response = await queuedLLMCall({
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0,
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: "native_url",
-          strict: true,
-          schema: {
-            type: "object",
-            properties: { nativeUrl: { type: ["string", "null"] } },
-            required: ["nativeUrl"],
-            additionalProperties: false,
-          },
-        },
-      },
-    });
-
-    const raw = response.choices[0]?.message?.content ?? "{}";
-    const parsed = JSON.parse(typeof raw === "string" ? raw : "{}");
-    return parsed.nativeUrl ?? undefined;
-  } catch {
-    return undefined;
+    return { action: "done", reason: parsed.reason ?? "LLM decided done" };
+  } catch (err) {
+    console.error("[agentScraper] planNextAction error:", err instanceof Error ? err.message : String(err).slice(0, 200));
+    return { action: "done", reason: "Planning error — stopping safely" };
   }
 }
 
 // ---------------------------------------------------------------------------
-// 3. Profile field extraction
+// 2. OBSERVE — extract fields from page content (with confidence + source)
 // ---------------------------------------------------------------------------
 
 async function extractProfileFields(
@@ -301,279 +296,244 @@ Return ONLY valid JSON with these keys: ${sections.map((s) => s.key).join(", ")}
 }
 
 // ---------------------------------------------------------------------------
-// 4. Link decision — which sub-links to follow
+// 3. REFLECT — merge two FieldResultMaps, keeping the higher-confidence value
 // ---------------------------------------------------------------------------
 
-interface LinkDecision {
-  shouldStop: boolean;
-  linksToFollow: string[];
-}
+function mergeFieldResults(base: FieldResultMap, incoming: FieldResultMap): FieldResultMap {
+  const merged: FieldResultMap = { ...base };
+  for (const [key, incomingResult] of Object.entries(incoming)) {
+    const existing = merged[key];
+    if (!existing) { merged[key] = incomingResult; continue; }
 
-async function decideNextLinks(
-  partialData: Record<string, string>,
-  sections: AgentSection[],
-  pageContent: string,
-  objective: string,
-  visitedUrls: Set<string>,
-): Promise<LinkDecision> {
-  // Find fields that are still empty
-  const missingFields = sections
-    .filter((s) => !partialData[s.key]?.trim())
-    .map((s) => s.label);
+    const incomingVal = incomingResult.value?.trim() ?? "";
+    const existingVal = existing.value?.trim() ?? "";
 
-  if (missingFields.length === 0) {
-    return { shouldStop: true, linksToFollow: [] };
-  }
+    // If incoming is empty, keep existing
+    if (!incomingVal) continue;
 
-  // Extract all in-domain links from the page (simple regex, Jina provides markdown links)
-  const linkMatches = pageContent.match(/\[([^\]]*)\]\((https?:\/\/[^)]+)\)/g) ?? [];
-  const candidateLinks = linkMatches
-    .map((m) => {
-      const match = m.match(/\]\((https?:\/\/[^)]+)\)/);
-      return match ? match[1] : null;
-    })
-    .filter((u): u is string => !!u && !visitedUrls.has(u))
-    .slice(0, 30); // limit candidates to avoid huge prompts
+    // If existing is empty, use incoming
+    if (!existingVal) { merged[key] = incomingResult; continue; }
 
-  if (candidateLinks.length === 0) {
-    return { shouldStop: true, linksToFollow: [] };
-  }
+    // Both have content — prefer higher confidence
+    if (incomingResult.confidence > existing.confidence) {
+      merged[key] = incomingResult;
+      continue;
+    }
 
-  const prompt = `You are helping extract data from a website.
+    // Same confidence — prefer longer (more complete) value
+    if (incomingResult.confidence === existing.confidence && incomingVal.length > existingVal.length) {
+      merged[key] = incomingResult;
+      continue;
+    }
 
-Objective: ${objective}
-Missing fields still needed: ${missingFields.join(", ")}
-
-Available links on the current page (pick the most likely to contain missing data):
-${candidateLinks.map((u, i) => `${i + 1}. ${u}`).join("\n")}
-
-Which of these links should be followed to find the missing fields? Pick at most 3.
-If none are useful or all data has been found, set shouldStop=true.
-
-Return ONLY valid JSON: {"shouldStop":boolean,"linksToFollow":["url1","url2"]}`;
-
-  try {
-    const response = await queuedLLMCall({
-      messages: [{ role: "user", content: prompt }],
-      temperature: 0,
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: "link_decision",
-          strict: true,
-          schema: {
-            type: "object",
-            properties: {
-              shouldStop: { type: "boolean" },
-              linksToFollow: { type: "array", items: { type: "string" } },
-            },
-            required: ["shouldStop", "linksToFollow"],
-            additionalProperties: false,
-          },
-        },
-      },
-    });
-
-    const raw = response.choices[0]?.message?.content ?? "{}";
-    const parsed = JSON.parse(typeof raw === "string" ? raw : "{}");
-    return {
-      shouldStop: parsed.shouldStop ?? true,
-      linksToFollow: (parsed.linksToFollow ?? []).filter(
-        (u: string) => !visitedUrls.has(u),
-      ),
-    };
-  } catch {
-    return { shouldStop: true, linksToFollow: [] };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 5. Merge extraction results (prefer non-empty values)
-// ---------------------------------------------------------------------------
-
-function mergeResults(
-  base: Record<string, string>,
-  incoming: Record<string, string>,
-): Record<string, string> {
-  const merged = { ...base };
-  for (const [key, val] of Object.entries(incoming)) {
-    const incomingTrimmed = val?.trim() ?? "";
-    const existingTrimmed = merged[key]?.trim() ?? "";
-
-    if (!incomingTrimmed) continue; // incoming empty — keep existing
-    if (!existingTrimmed) { merged[key] = incomingTrimmed; continue; } // existing empty — use incoming
-
-    // Both have content — deduplicate before appending
-    const existingLower = existingTrimmed.toLowerCase();
-    const incomingLower = incomingTrimmed.toLowerCase();
-
-    // If incoming is a substring of existing, skip (already captured)
-    if (existingLower.includes(incomingLower)) continue;
-    // If existing is a substring of incoming, replace (incoming is more complete)
-    if (incomingLower.includes(existingLower)) { merged[key] = incomingTrimmed; continue; }
-
-    // Check individual semicolon-separated segments for duplicates
-    const existingSegments = existingTrimmed.split(";").map(s => s.trim().toLowerCase());
-    const newSegments = incomingTrimmed.split(";").map(s => s.trim()).filter(
-      seg => !existingSegments.includes(seg.toLowerCase())
-    );
-
-    if (newSegments.length > 0) {
-      merged[key] = `${existingTrimmed}; ${newSegments.join("; ")}`;
+    // Append if incoming adds genuinely new information (not a substring)
+    const existingLower = existingVal.toLowerCase();
+    const incomingLower = incomingVal.toLowerCase();
+    if (!existingLower.includes(incomingLower) && !incomingLower.includes(existingLower)) {
+      // Combine, keeping the higher-confidence source attribution
+      const combinedValue = `${existingVal}; ${incomingVal}`;
+      const combinedConf = Math.max(existing.confidence, incomingResult.confidence);
+      merged[key] = { value: combinedValue, confidence: combinedConf, sourceUrl: existing.sourceUrl };
     }
   }
   return merged;
 }
 
 // ---------------------------------------------------------------------------
-// 6. Main entry point
+// 4. Extract available links from page content (for PLAN step)
+// ---------------------------------------------------------------------------
+
+function extractLinksFromContent(content: string, baseUrl: string): string[] {
+  const links: string[] = [];
+  const seen = new Set<string>();
+
+  // Match markdown-style links: [text](url)
+  const mdPattern = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+  let m: RegExpExecArray | null;
+  while ((m = mdPattern.exec(content)) !== null) {
+    const url = m[2];
+    if (!seen.has(url)) { seen.add(url); links.push(url); }
+  }
+
+  // Match bare URLs
+  const barePattern = /https?:\/\/[^\s"'<>)\]]+/g;
+  while ((m = barePattern.exec(content)) !== null) {
+    const url = m[0].replace(/[.,;)>\]]+$/, "");
+    if (!seen.has(url)) { seen.add(url); links.push(url); }
+  }
+
+  // Prioritize same-domain links (sub-pages of the company website)
+  let baseDomain = "";
+  try { baseDomain = new URL(baseUrl).hostname; } catch { /* ignore */ }
+
+  const sameDomain = links.filter(u => { try { return new URL(u).hostname === baseDomain; } catch { return false; } });
+  const otherLinks = links.filter(u => !sameDomain.includes(u));
+
+  return [...sameDomain, ...otherLinks].slice(0, 50);
+}
+
+// ---------------------------------------------------------------------------
+// 5. Fetch a URL and return content + extracted links
+// ---------------------------------------------------------------------------
+
+async function fetchAndExtract(url: string): Promise<{ content: string; links: string[] } | null> {
+  const result = await fetchWebsiteContentHybrid(url, async () => {
+    try {
+      const { scrapeWebsite } = await import("./scraper");
+      const r = await scrapeWebsite({ url, cache: true, cacheTTL: 7 * 24 * 60 * 60, timeout: 45000 });
+      return r.success ? r.text || r.html || null : null;
+    } catch { return null; }
+  });
+
+  if (!result?.success || !result.content) return null;
+  const links = extractLinksFromContent(result.content, url);
+  return { content: result.content, links };
+}
+
+// ---------------------------------------------------------------------------
+// 6. Main entry point — Plan-Act-Observe-Reflect loop
 // ---------------------------------------------------------------------------
 
 /**
  * Scrape a URL with the given objective + custom sections.
  *
- * - If the URL is a directory/listing page → returns entries for "Collected URLs" tab
- * - If the URL is a profile → extracts user-defined fields, follows sub-links
+ * This is the new agentic implementation. It runs a Plan-Act-Observe-Reflect
+ * loop per company, stopping when all fields have sufficient confidence or
+ * the hop limit is reached.
+ *
+ * The optional `isCancelled` callback is checked at every loop iteration.
  */
 export async function scrapeUrl(
   url: string,
   objective: string,
   sections: AgentSection[],
   systemPrompt: string,
-  maxHops = 5,
+  maxHops = 8,
+  isCancelled?: () => boolean,
 ): Promise<AgentScrapeResult> {
-  console.log(`[agentScraper] Starting: ${url}`);
+  console.log(`[agentScraper] 🚀 Starting agent loop: ${url}`);
 
-  // Fetch the initial page with up to 3 attempts + exponential backoff
-  let jinaResult = await fetchWebsiteContentHybrid(url, async () => {
-    try {
-      const { scrapeWebsite } = await import("./scraper");
-      const result = await scrapeWebsite({ url, cache: true, cacheTTL: 7 * 24 * 60 * 60, timeout: 45000 });
-      return result.success ? result.text || result.html || null : null;
-    } catch {
-      return null;
-    }
-  });
+  // Extract company name from URL for search queries
+  let companyName = "";
+  try { companyName = new URL(url).hostname.replace(/^www\./, "").split(".")[0]; } catch { companyName = url; }
 
-  for (let attempt = 1; attempt < 3 && (!jinaResult.success || !jinaResult.content); attempt++) {
-    const delay = 2000 * Math.pow(2, attempt - 1); // 2s, 4s
-    console.log(`[agentScraper] Retry ${attempt} for ${url} after ${delay}ms`);
-    await new Promise(r => setTimeout(r, delay));
-    jinaResult = await fetchWebsiteContentHybrid(url, async () => {
-      try {
-        const { scrapeWebsite } = await import("./scraper");
-        const result = await scrapeWebsite({ url, cache: false, timeout: 60000 });
-        return result.success ? result.text || result.html || null : null;
-      } catch { return null; }
-    });
-  }
+  // Agent state
+  let fieldResults: FieldResultMap = {};
+  for (const s of sections) fieldResults[s.key] = { value: "", confidence: 0.0 };
 
-  if (!jinaResult.success || !jinaResult.content) {
-    console.error(`[agentScraper] ❌ Both Jina and Puppeteer failed for: ${url}`);
-    if (sections.length === 0) return { type: "directory", entries: [] };
-    const empty: Record<string, string> = {};
-    for (const s of sections) empty[s.key] = "";
-    return { type: "profile", data: empty, stats: { fieldsTotal: sections.length, fieldsFilled: 0, emptyFields: sections.map(s => s.key) } };
-  }
+  const visitedUrls = new Set<string>();
+  let availableLinks: string[] = [];
+  let hopsUsed = 0;
 
-  if (jinaResult.source === "puppeteer") {
-    console.log(`[agentScraper] ✅ Puppeteer fallback succeeded for: ${url} (${jinaResult.content.length} chars)`);
-  }
+  // ── STEP 0: Fetch the primary URL first (always) ──────────────────────────
+  console.log(`[agentScraper] Fetching primary URL: ${url}`);
+  const primary = await fetchAndExtract(url);
 
-  const content = jinaResult.content;
+  if (!primary) {
+    console.warn(`[agentScraper] ❌ Primary URL fetch failed: ${url} — will rely on web search`);
+  } else {
+    visitedUrls.add(url);
+    availableLinks = primary.links;
 
-  // Classify the page
-  const classification = await classifyPage(content, url, objective);
-  console.log(`[agentScraper] Page type: ${classification.type} (${classification.reasoning})`);
-
-  // ── DIRECTORY ──────────────────────────────────────────────────────────────
-  if (classification.type === "directory") {
-    const dirResult = await extractDirectory(url, {
-      entryLabel: classification.entityLabel,
-      maxPages: 500,
-      delayMs: 500,
-    });
-    const entries: DirectoryEntry[] = dirResult.entries.map((e: DirEntry) => ({
-      name: e.name,
-      directoryUrl: e.url,
-      nativeUrl: undefined,
-    }));
-    console.log(`[agentScraper] Directory: ${entries.length} entries found`);
-    return { type: "directory", entries };
-  }
-
-  // ── DIRECTORY-ENTRY ────────────────────────────────────────────────────────
-  if (classification.type === "directory-entry") {
-    const nativeUrl = await extractNativeUrl(content, url);
-    console.log(`[agentScraper] Directory-entry: nativeUrl=${nativeUrl}`);
-
-    if (nativeUrl && maxHops > 0) {
-      // Follow the company's native website and return its profile data directly.
-      // This makes directory-entry pages transparent to the caller.
-      console.log(`[agentScraper] Following native URL: ${nativeUrl}`);
-      return await scrapeUrl(nativeUrl, objective, sections, systemPrompt, maxHops - 1);
-    }
-
-    // Fallback: no native URL found — still return profile data (don't discard it)
-    let data: Record<string, string> = {};
     if (sections.length > 0) {
-      data = await extractProfileFields(content, sections, systemPrompt);
+      const extracted = await extractProfileFields(primary.content, sections, systemPrompt, url);
+      fieldResults = mergeFieldResults(fieldResults, extracted);
+      const filled = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD).length;
+      console.log(`[agentScraper] Primary page: ${filled}/${sections.length} fields confident`);
     }
-    const emptyFields = sections.map(s => s.key).filter(k => !data[k] || data[k].trim() === "");
-    const stats: ScrapeStats = {
-      fieldsTotal: sections.length,
-      fieldsFilled: sections.length - emptyFields.length,
-      emptyFields,
-    };
-    console.log(`[agentScraper] No native URL found, extracting directly (${stats.fieldsFilled}/${stats.fieldsTotal} fields)`);
-    return { type: "profile", data, stats };
+    hopsUsed++;
   }
 
-  // ── PROFILE ────────────────────────────────────────────────────────────────
-  if (sections.length === 0) {
-    return { type: "profile", data: {}, stats: { fieldsTotal: 0, fieldsFilled: 0, emptyFields: [] } };
-  }
+  // ── AGENT LOOP ─────────────────────────────────────────────────────────────
+  while (hopsUsed < maxHops) {
+    // Check cancellation at the top of every loop iteration
+    if (isCancelled?.()) throw new Error("JOB_CANCELLED");
 
-  const visitedUrls = new Set<string>([url]);
-
-  // Initial extraction from the homepage
-  let data = await extractProfileFields(content, sections, systemPrompt);
-  let currentContent = content;
-
-  for (let hop = 0; hop < maxHops; hop++) {
-    const decision = await decideNextLinks(
-      data,
-      sections,
-      currentContent,
+    // PLAN — decide what to do next
+    const plan = await planNextAction(
+      companyName,
+      url,
       objective,
+      sections,
+      fieldResults,
       visitedUrls,
+      availableLinks,
+      hopsUsed,
+      maxHops,
     );
 
-    if (decision.shouldStop || decision.linksToFollow.length === 0) {
-      console.log(`[agentScraper] Stopping after ${hop} hops (done or no useful links)`);
-      break;
+    console.log(`[agentScraper] PLAN [hop ${hopsUsed}/${maxHops}]: ${plan.action} — ${plan.reason}`);
+
+    if (plan.action === "done") break;
+
+    // ACT
+    if (plan.action === "fetch_url") {
+      if (isCancelled?.()) throw new Error("JOB_CANCELLED");
+
+      const fetched = await fetchAndExtract(plan.target);
+      hopsUsed++;
+
+      if (!fetched) {
+        console.warn(`[agentScraper] ⚠️ fetch_url failed: ${plan.target}`);
+        availableLinks = availableLinks.filter(l => l !== plan.target);
+        continue;
+      }
+
+      visitedUrls.add(plan.target);
+      availableLinks = [...new Set([...availableLinks, ...fetched.links])].filter(l => !visitedUrls.has(l));
+
+      // OBSERVE
+      if (isCancelled?.()) throw new Error("JOB_CANCELLED");
+      const extracted = await extractProfileFields(fetched.content, sections, systemPrompt, plan.target);
+
+      // REFLECT — merge, keeping higher-confidence values
+      fieldResults = mergeFieldResults(fieldResults, extracted);
+      const filled = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD).length;
+      console.log(`[agentScraper] After fetch_url: ${filled}/${sections.length} fields confident`);
+
+    } else if (plan.action === "web_search") {
+      if (isCancelled?.()) throw new Error("JOB_CANCELLED");
+
+      console.log(`[agentScraper] 🔍 Web search: "${plan.query}"`);
+      const searchResults = await webSearch(plan.query, 5);
+      hopsUsed++;
+
+      if (searchResults.length === 0) {
+        console.warn(`[agentScraper] Web search returned no results`);
+        continue;
+      }
+
+      // Fetch the top search result that hasn't been visited
+      const topResult = searchResults.find(r => !visitedUrls.has(r.url));
+      if (!topResult) continue;
+
+      if (isCancelled?.()) throw new Error("JOB_CANCELLED");
+      const fetched = await fetchAndExtract(topResult.url);
+
+      if (!fetched) {
+        // Use the snippet directly as content if the page can't be fetched
+        const snippetContent = searchResults.map(r => `${r.title}\n${r.snippet}`).join("\n\n");
+        visitedUrls.add(topResult.url);
+        const extracted = await extractProfileFields(snippetContent, sections, systemPrompt, topResult.url);
+        fieldResults = mergeFieldResults(fieldResults, extracted);
+      } else {
+        visitedUrls.add(topResult.url);
+        availableLinks = [...new Set([...availableLinks, ...fetched.links])].filter(l => !visitedUrls.has(l));
+        if (isCancelled?.()) throw new Error("JOB_CANCELLED");
+        const extracted = await extractProfileFields(fetched.content, sections, systemPrompt, topResult.url);
+        fieldResults = mergeFieldResults(fieldResults, extracted);
+      }
+
+      const filled = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD).length;
+      console.log(`[agentScraper] After web_search: ${filled}/${sections.length} fields confident`);
     }
+  }
 
-    console.log(`[agentScraper] Following ${decision.linksToFollow.length} link(s) at hop ${hop + 1}`);
-
-    for (const link of decision.linksToFollow.slice(0, 3)) {
-      if (visitedUrls.has(link)) continue;
-      visitedUrls.add(link);
-
-      // Use hybrid fetch (Jina + Puppeteer fallback) for sub-pages too
-      const subResult = await fetchWebsiteContentHybrid(link, async () => {
-        try {
-          const { scrapeWebsite } = await import("./scraper");
-          const r = await scrapeWebsite({ url: link, cache: true, cacheTTL: 7 * 24 * 60 * 60, timeout: 30000 });
-          return r.success ? r.text || r.html || null : null;
-        } catch { return null; }
-      });
-      if (!subResult?.success || !subResult.content) continue;
-
-      currentContent = subResult.content; // use last fetched page for next link decision
-      const subData = await extractProfileFields(subResult.content, sections, systemPrompt);
-      data = mergeResults(data, subData);
-    }
+  // ── BUILD FINAL RESULT ─────────────────────────────────────────────────────
+  // Flatten fieldResults into plain data map (backward compatible)
+  const data: Record<string, string> = {};
+  for (const s of sections) {
+    data[s.key] = fieldResults[s.key]?.value ?? "";
   }
 
   const emptyFields = sections.map(s => s.key).filter(k => !data[k] || data[k].trim() === "");
@@ -582,6 +542,78 @@ export async function scrapeUrl(
     fieldsFilled: sections.length - emptyFields.length,
     emptyFields,
   };
-  console.log(`[agentScraper] Profile extracted (${visitedUrls.size} pages visited, ${stats.fieldsFilled}/${stats.fieldsTotal} fields filled)`);
-  return { type: "profile", data, stats };
+
+  const filledCount = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD).length;
+  console.log(
+    `[agentScraper] ✅ Done: ${visitedUrls.size} pages visited, ` +
+    `${filledCount}/${sections.length} fields confident, ` +
+    `${stats.fieldsFilled}/${sections.length} fields non-empty`
+  );
+
+  return { type: "profile", data, fieldResults, stats };
+}
+
+// ---------------------------------------------------------------------------
+// 7. Directory scraping — preserved as opt-in for "Collected URLs" tab
+// ---------------------------------------------------------------------------
+
+/**
+ * Scrape a URL as a directory (listing page).
+ * Only used when the user explicitly provides a directory URL in their input.
+ * This is NOT called automatically during profile enrichment.
+ */
+export async function scrapeUrlAsDirectory(
+  url: string,
+  objective: string,
+): Promise<AgentScrapeResult> {
+  console.log(`[agentScraper] Directory mode: ${url}`);
+
+  const KNOWN_DIRECTORIES = ['goodfirms.co', 'clutch.co', 'g2.com', 'yelp.com', 'capterra.com', 'trustpilot.com'];
+  const urlHost = (() => { try { return new URL(url).hostname; } catch { return ""; } })();
+  const isKnownDir = KNOWN_DIRECTORIES.some(d => urlHost.includes(d));
+
+  // Fetch and do a quick LLM check to confirm it's actually a directory
+  const fetched = await fetchAndExtract(url);
+  if (!fetched) {
+    return { type: "directory", entries: [] };
+  }
+
+  // Quick heuristic: if it's a known directory domain, trust it
+  // Otherwise, do a fast LLM check
+  let isDirectory = isKnownDir;
+  if (!isKnownDir) {
+    try {
+      const checkPrompt = `Is this page a listing/directory of multiple companies or entities, or is it a single company's own website?
+URL: ${url}
+Content (first 3000 chars): ${fetched.content.substring(0, 3000)}
+Return ONLY: {"isDirectory":true|false}`;
+      const resp = await queuedLLMCall({
+        messages: [{ role: "user", content: checkPrompt }],
+        temperature: 0,
+        response_format: { type: "json_schema", json_schema: { name: "dir_check", strict: true, schema: { type: "object", properties: { isDirectory: { type: "boolean" } }, required: ["isDirectory"], additionalProperties: false } } },
+      });
+      const raw = resp.choices[0]?.message?.content ?? "{}";
+      isDirectory = JSON.parse(typeof raw === "string" ? raw : "{}").isDirectory ?? false;
+    } catch { isDirectory = false; }
+  }
+
+  if (!isDirectory) {
+    console.log(`[agentScraper] URL is not a directory — use scrapeUrl() for profile enrichment`);
+    return { type: "directory", entries: [] };
+  }
+
+  const dirResult = await extractDirectory(url, {
+    entryLabel: objective || "entities",
+    maxPages: 500,
+    delayMs: 500,
+  });
+
+  const entries: DirectoryEntry[] = dirResult.entries.map((e: DirEntry) => ({
+    name: e.name,
+    directoryUrl: e.url,
+    nativeUrl: undefined,
+  }));
+
+  console.log(`[agentScraper] Directory: ${entries.length} entries found`);
+  return { type: "directory", entries };
 }
