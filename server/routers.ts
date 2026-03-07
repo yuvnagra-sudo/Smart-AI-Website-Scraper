@@ -402,6 +402,31 @@ Return ONLY valid JSON (no markdown, no code fences):
         };
       }),
 
+    cancelJob: protectedProcedure
+      .input(z.object({ jobId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        const job = await getEnrichmentJob(input.jobId);
+        if (!job || job.userId !== ctx.user.id) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
+        }
+        if (job.status === "completed" || job.status === "cancelled") {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: `Job is already ${job.status}`,
+          });
+        }
+        // Write cancelled status to DB. The worker's cancellation poller (every 5s)
+        // will detect this and call markJobCancelled(jobId), which causes
+        // processAgentJob / scrapeUrl to throw JOB_CANCELLED and stop cleanly.
+        await updateEnrichmentJob(input.jobId, {
+          status: "cancelled",
+          completedAt: new Date(),
+          errorMessage: "Cancelled by user",
+        });
+        console.log(`[cancelJob] Job ${input.jobId} marked as cancelled in DB`);
+        return { message: "Job cancellation requested — worker will stop within 5 seconds" };
+      }),
+
     // Generate results file on-demand
     generateResults: protectedProcedure
       .input(z.object({ 
