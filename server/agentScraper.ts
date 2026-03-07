@@ -35,9 +35,26 @@ export interface ScrapeStats {
   emptyFields: string[];
 }
 
+/**
+ * Per-field extraction result with a confidence score.
+ * confidence: 0.0 = not found / guessed, 1.0 = explicitly stated on page.
+ * The agent loop uses this to decide whether to keep searching.
+ */
+export interface FieldResult {
+  value: string;
+  confidence: number; // 0.0 – 1.0
+  sourceUrl?: string; // which URL this value was extracted from
+}
+
+/** Map of field key → FieldResult */
+export type FieldResultMap = Record<string, FieldResult>;
+
+/** Confidence threshold: fields below this are considered "needs more search" */
+export const CONFIDENCE_THRESHOLD = 0.7;
+
 export type AgentScrapeResult =
   | { type: "directory"; entries: DirectoryEntry[] }
-  | { type: "profile"; data: Record<string, string>; stats: ScrapeStats };
+  | { type: "profile"; data: Record<string, string>; fieldResults: FieldResultMap; stats: ScrapeStats };
 
 type PageClass = "directory" | "directory-entry" | "profile";
 
@@ -193,32 +210,49 @@ async function extractProfileFields(
   content: string,
   sections: AgentSection[],
   systemPrompt: string,
-): Promise<Record<string, string>> {
-  // Build per-section schema properties
-  const props: Record<string, { type: string; description: string }> = {};
+  sourceUrl?: string,
+): Promise<FieldResultMap> {
+  // Build per-section schema properties — each field now returns value + confidence
+  const props: Record<string, { type: string; properties?: object; required?: string[]; additionalProperties?: boolean; description?: string }> = {};
   for (const s of sections) {
-    props[s.key] = { type: "string", description: `${s.label}: ${s.desc}` };
+    props[s.key] = {
+      type: "object",
+      description: `${s.label}: ${s.desc}`,
+      properties: {
+        value: { type: "string" },
+        confidence: { type: "number" },
+      },
+      required: ["value", "confidence"],
+      additionalProperties: false,
+    };
   }
 
   // Build a brief example from the first 2 sections so the LLM sees expected format
-  const exampleObj: Record<string, string> = {};
+  const exampleObj: Record<string, { value: string; confidence: number }> = {};
   for (const s of sections.slice(0, 2)) {
-    exampleObj[s.key] = `[extracted ${s.label.toLowerCase()} from page]`;
+    exampleObj[s.key] = { value: `[extracted ${s.label.toLowerCase()} from page]`, confidence: 0.9 };
   }
   for (const s of sections.slice(2)) {
-    exampleObj[s.key] = "";
+    exampleObj[s.key] = { value: "", confidence: 0.0 };
   }
   const exampleJson = JSON.stringify(exampleObj, null, 2);
 
   const userMsg = `${systemPrompt}
 
 Page content:
-${content.substring(0, 25000)}
+${content.substring(0, 60000)}
 
 Extract each field about THIS company only (the entity being profiled on this page).
 Ignore client testimonials, reviewer names, case study client companies, partner logos, and any third-party content.
 Be specific and concrete — use actual data from the page, not summaries.
-If a field cannot be determined from the content, return an empty string "".
+
+For each field, return:
+- "value": the extracted text, or "" if not found
+- "confidence": a score from 0.0 to 1.0:
+    1.0 = explicitly and clearly stated on the page
+    0.7 = strongly implied or inferable from context
+    0.4 = partially found or uncertain
+    0.0 = not found on this page
 
 Example output format:
 ${exampleJson}
@@ -247,16 +281,21 @@ Return ONLY valid JSON with these keys: ${sections.map((s) => s.key).join(", ")}
     const raw = response.choices[0]?.message?.content ?? "{}";
     const parsed = JSON.parse(typeof raw === "string" ? raw : "{}");
 
-    // Ensure all section keys are present
-    const result: Record<string, string> = {};
+    // Build FieldResultMap — ensure all section keys are present
+    const result: FieldResultMap = {};
     for (const s of sections) {
-      result[s.key] = String(parsed[s.key] ?? "");
+      const field = parsed[s.key];
+      const value = String(field?.value ?? "").trim();
+      const confidence = typeof field?.confidence === "number"
+        ? Math.max(0, Math.min(1, field.confidence))
+        : value ? 0.5 : 0.0; // fallback: non-empty = 0.5, empty = 0.0
+      result[s.key] = { value, confidence, sourceUrl };
     }
     return result;
   } catch (err) {
-    console.error("[agentScraper] extractProfileFields error:", err);
-    const empty: Record<string, string> = {};
-    for (const s of sections) empty[s.key] = "";
+    console.error("[agentScraper] extractProfileFields error:", err instanceof Error ? err.message : String(err).slice(0, 200));
+    const empty: FieldResultMap = {};
+    for (const s of sections) empty[s.key] = { value: "", confidence: 0.0, sourceUrl };
     return empty;
   }
 }
