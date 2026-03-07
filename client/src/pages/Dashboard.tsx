@@ -295,6 +295,16 @@ export default function Dashboard() {
     },
   });
 
+  const cancelMutation = trpc.enrichment.cancelJob.useMutation({
+    onSuccess: () => {
+      toast.success("Job cancellation requested — will stop within 5 seconds.");
+      refetch();
+    },
+    onError: (error) => {
+      toast.error(`Failed to cancel job: ${error.message}`);
+    },
+  });
+
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -1197,6 +1207,7 @@ export default function Dashboard() {
                               {job.status === "failed"     && <XCircle className="h-5 w-5 text-red-600" />}
                               {job.status === "processing" && <Loader2 className="h-5 w-5 animate-spin text-blue-600" />}
                               {job.status === "pending"    && <Clock className="h-5 w-5 text-gray-600" />}
+                              {job.status === "cancelled"  && <XCircle className="h-5 w-5 text-orange-500" />}
                               <span className="font-semibold capitalize">{job.status}</span>
                               {isAgentJob ? (
                                 <Badge variant="outline" className="text-xs text-violet-700">
@@ -1269,6 +1280,22 @@ export default function Dashboard() {
                                   <Clock className="h-4 w-4 mr-2" />
                                 )}
                                 Resume
+                              </Button>
+                            )}
+                            {(job.status === "processing" || job.status === "pending") && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="text-red-600 border-red-300 hover:bg-red-50"
+                                onClick={() => cancelMutation.mutate({ jobId: job.id })}
+                                disabled={cancelMutation.isPending}
+                              >
+                                {cancelMutation.isPending ? (
+                                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                ) : (
+                                  <XCircle className="h-4 w-4 mr-2" />
+                                )}
+                                Cancel
                               </Button>
                             )}
                           </div>

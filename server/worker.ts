@@ -13,15 +13,18 @@
 import { drizzle } from 'drizzle-orm/mysql2';
 import mysql from 'mysql2/promise';
 import { enrichmentJobs } from '../drizzle/schema';
-import { eq, and, or, lt, isNull, ne } from 'drizzle-orm';
+import { eq, and, or, lt, isNull } from 'drizzle-orm';
 import { processEnrichmentJob, processAgentJob } from './routers';
+import { markJobCancelled, clearJobCancelled } from './_core/jobCancellation';
 
 const POLL_INTERVAL = 5000; // Check for new jobs every 5 seconds
 const HEARTBEAT_INTERVAL = 30000; // Send heartbeat every 30 seconds
 const STALE_THRESHOLD = 5 * 60 * 1000; // 5 minutes without heartbeat = stale
+const CANCEL_CHECK_INTERVAL = 5000; // Poll DB for cancellation every 5 seconds
 
 let currentJobId: number | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
+let cancellationTimer: NodeJS.Timeout | null = null;
 let isShuttingDown = false;
 
 /**
@@ -65,7 +68,8 @@ async function findNextJob() {
     .where(
       and(
         eq(enrichmentJobs.status, "processing"),
-        ne(enrichmentJobs.status, "cancelled" as any), // FIX: guard against cancelled jobs
+        // Note: eq(status, "processing") already excludes "cancelled" jobs.
+        // The ne guard was removed since "cancelled" != "processing" by definition.
         or(
           lt(enrichmentJobs.heartbeatAt!, staleThreshold),
           isNull(enrichmentJobs.heartbeatAt)
@@ -178,6 +182,43 @@ function stopHeartbeat() {
 }
 
 /**
+ * Start polling the DB for cancellation requests.
+ * When the web server sets status="cancelled", this timer detects it and
+ * calls markJobCancelled() so processAgentJob/scrapeUrl can abort promptly.
+ */
+function startCancellationPoller(jobId: number) {
+  if (cancellationTimer) clearInterval(cancellationTimer);
+  cancellationTimer = setInterval(async () => {
+    if (isShuttingDown) return;
+    try {
+      const db = await getDb();
+      const rows = await db.select({ status: enrichmentJobs.status })
+        .from(enrichmentJobs)
+        .where(eq(enrichmentJobs.id, jobId))
+        .limit(1);
+      if (rows[0]?.status === 'cancelled') {
+        console.log(`[Worker] Detected cancellation for job ${jobId} — flagging in-process`);
+        markJobCancelled(jobId);
+        clearInterval(cancellationTimer!);
+        cancellationTimer = null;
+      }
+    } catch (err) {
+      // Non-fatal: next tick will retry
+    }
+  }, CANCEL_CHECK_INTERVAL);
+}
+
+/**
+ * Stop the cancellation poller
+ */
+function stopCancellationPoller() {
+  if (cancellationTimer) {
+    clearInterval(cancellationTimer);
+    cancellationTimer = null;
+  }
+}
+
+/**
  * Process a single job
  */
 async function processJob(job: any) {
@@ -192,8 +233,9 @@ async function processJob(job: any) {
   }
   console.log(`${'='.repeat(60)}\n`);
   
-  // Start sending heartbeats
+  // Start sending heartbeats and cancellation poller
   startHeartbeat(job.id);
+  startCancellationPoller(job.id);
   
   try {
     // Route to correct processor: agent jobs have sectionsJson, VC jobs do not
@@ -204,21 +246,28 @@ async function processJob(job: any) {
     }
 
     console.log(`\n[Worker] ✅ Job ${job.id} completed successfully!`);
-  } catch (error) {
-    console.error(`\n[Worker] ❌ Job ${job.id} failed:`, error);
-    
-    // Update job status to failed
-    const db = await getDb();
-    await db.update(enrichmentJobs)
-      .set({
-        status: "failed",
-        errorMessage: error instanceof Error ? error.message : String(error),
-        completedAt: new Date(),
-      })
-      .where(eq(enrichmentJobs.id, job.id));
+  } catch (error: any) {
+    const isCancelledError = error?.message === 'JOB_CANCELLED';
+    if (isCancelledError) {
+      console.log(`\n[Worker] 🛑 Job ${job.id} was cancelled by user — stopping cleanly`);
+      // Status is already "cancelled" in DB (set by cancelJob mutation)
+    } else {
+      console.error(`\n[Worker] ❌ Job ${job.id} failed:`, error);
+      // Update job status to failed
+      const db = await getDb();
+      await db.update(enrichmentJobs)
+        .set({
+          status: "failed",
+          errorMessage: error instanceof Error ? error.message : String(error),
+          completedAt: new Date(),
+        })
+        .where(eq(enrichmentJobs.id, job.id));
+    }
   } finally {
-    // Stop heartbeat
+    // Stop heartbeat and cancellation poller, clean up in-memory flag
     stopHeartbeat();
+    stopCancellationPoller();
+    clearJobCancelled(job.id);
     currentJobId = null;
   }
 }
