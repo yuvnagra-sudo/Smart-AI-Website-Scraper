@@ -914,12 +914,15 @@ function classifyAgentError(err: unknown): string {
 
 export async function processAgentJob(jobId: number) {
   const keepAlive = new ConnectionKeepAlive();
-
   try {
     const job = await getEnrichmentJob(jobId);
     if (!job) throw new Error(`Job ${jobId} not found`);
-
     await updateEnrichmentJob(jobId, { status: "processing", startedAt: new Date() });
+    // Capture LLM stats baseline so we only count tokens used by THIS job
+    const statsBaseline = getOpenAIStats();
+    const costBaseline   = statsBaseline.totalCost;
+    const inputBaseline  = statsBaseline.totalInputTokens;
+    const outputBaseline = statsBaseline.totalOutputTokens;
 
     const sections: AgentSection[] = JSON.parse(job.sectionsJson ?? "[]");
     const systemPrompt = job.systemPrompt ?? "";
@@ -1065,14 +1068,22 @@ export async function processAgentJob(jobId: number) {
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     );
 
+    // Write confirmed real cost to DB
+    const finalStats = getOpenAIStats();
+    const confirmedCost         = Math.round((finalStats.totalCost         - costBaseline)   * 10000) / 10000;
+    const confirmedInputTokens  = finalStats.totalInputTokens  - inputBaseline;
+    const confirmedOutputTokens = finalStats.totalOutputTokens - outputBaseline;
+    console.log(`[processAgentJob] 💰 Job ${jobId} cost: $${confirmedCost.toFixed(4)} (${confirmedInputTokens} in / ${confirmedOutputTokens} out tokens)`);
     await updateEnrichmentJob(jobId, {
       status: "completed",
       outputFileUrl: outputUrl,
       outputFileKey: outputKey,
       processedCount: processed,
       completedAt: new Date(),
+      totalCostUSD:       String(confirmedCost),
+      totalInputTokens:   confirmedInputTokens,
+      totalOutputTokens:  confirmedOutputTokens,
     });
-
     console.log(
       `[processAgentJob] ✅ Job ${jobId} complete. ${profileResults.length} profiles + ${collectedUrls.length} directory entries.`,
     );
