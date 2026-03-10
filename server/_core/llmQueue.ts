@@ -1,31 +1,41 @@
 /**
- * LLM Request Queue with Parallel Batch Processing
+ * LLM Request Queue — Token Bucket + Concurrency Cap
  *
- * Replaces the original serial queue (one request at a time) with a parallel
- * dispatcher that fires multiple requests simultaneously while respecting the
- * configured RPM cap.
+ * DESIGN GOALS:
+ *   1. Never exceed the Gemini API RPM limit (causes 429 storms)
+ *   2. Never have more than MAX_CONCURRENT requests in-flight simultaneously
+ *   3. Retry 429s with exponential backoff + jitter
+ *   4. Keep the dispatcher simple and predictable
  *
- * WHY THIS MATTERS:
- *   Old design: 1 request at a time → ~12 actual RPM (bottlenecked by 5s API latency)
- *   New design: N parallel requests → ~500 actual RPM at 800 RPM cap
- *   Speed improvement: ~40× for large jobs (1900 firms: 21h → ~30 min)
+ * WHY THE PREVIOUS VERSION FAILED:
+ *   The sliding-window dispatcher computed budget = RPM_LIMIT - windowUsed.
+ *   On the very first tick, windowUsed = 0, so budget = 800.
+ *   It immediately fired 800 requests in parallel, which saturated the API
+ *   and caused every single call to return 429 RESOURCE_EXHAUSTED.
+ *   The retry logic then made it worse by queuing even more retries.
  *
- * HOW IT WORKS:
- *   - A sliding window tracks how many requests have been dispatched in the
- *     current 60-second window.
- *   - The dispatcher loop wakes up every TICK_MS (50ms) and dispatches as many
- *     requests as the remaining window budget allows.
- *   - Each dispatched request runs independently (fire-and-forget from the
- *     dispatcher's perspective); the Promise resolves/rejects when the API responds.
- *   - 429 responses are retried with exponential backoff without blocking the
- *     dispatcher loop.
+ * HOW THIS VERSION WORKS:
+ *   - A token bucket refills at rate = RPM_LIMIT / 60 tokens per second.
+ *   - Each dispatch consumes one token. If no tokens are available, the
+ *     dispatcher sleeps until the next refill.
+ *   - A hard MAX_CONCURRENT cap prevents more than N in-flight requests
+ *     regardless of token availability.
+ *   - 429 responses are retried with exponential backoff + jitter.
+ *     The request is re-queued (not retried in a tight loop) so the
+ *     dispatcher can continue processing other requests while waiting.
  *
  * CONFIGURATION (Railway env vars):
- *   LLM_RPM_LIMIT — requests per minute cap (default: 800)
- *                   Set to 2000 on Tier 2, 4000 on Tier 3
+ *   LLM_RPM_LIMIT    — requests per minute (default: 60, safe for Tier 1)
+ *   LLM_CONCURRENCY  — max simultaneous in-flight requests (default: 10)
+ *
+ * SAFE DEFAULTS:
+ *   Gemini Tier 1 allows 15 RPM on gemini-3-flash-preview (free tier) or
+ *   1000 RPM on paid Tier 1. Start conservative and increase if no 429s.
+ *   Default is 60 RPM / 10 concurrent — works reliably on paid Tier 1.
  */
 
-import { invokeLLM, type InvokeParams, type InvokeResult } from './openaiLLM';
+import { invokeLLM } from './openaiLLM';
+import type { InvokeParams, InvokeResult } from './llm';
 
 interface QueuedRequest {
   params: InvokeParams;
@@ -33,180 +43,193 @@ interface QueuedRequest {
   reject: (error: Error) => void;
   priority: number;
   enqueuedAt: number;
+  attempt: number;          // retry attempt count
+  retryAfter?: number;      // earliest timestamp to retry (for backoff)
 }
 
-const TICK_MS = 50;          // Dispatcher wakes up every 50ms
-const WINDOW_MS = 60_000;    // RPM window duration
+// ---------------------------------------------------------------------------
+// Configuration
+// ---------------------------------------------------------------------------
+const DEFAULT_RPM        = 60;   // conservative default — override with LLM_RPM_LIMIT
+const DEFAULT_CONCURRENT = 10;   // max parallel in-flight — override with LLM_CONCURRENCY
+const MAX_ATTEMPTS       = 6;    // total attempts before giving up (1 original + 5 retries)
+const TICK_MS            = 200;  // dispatcher poll interval
 
+// ---------------------------------------------------------------------------
+// Queue implementation
+// ---------------------------------------------------------------------------
 export class LLMRequestQueue {
   private queue: QueuedRequest[] = [];
   private dispatcherRunning = false;
 
-  // Sliding window: timestamps of requests dispatched in the last WINDOW_MS
-  private windowTimestamps: number[] = [];
+  // Token bucket state
+  private tokens: number;
+  private lastRefillTime: number = Date.now();
+  private readonly tokensPerMs: number;   // refill rate
+  private readonly maxTokens: number;     // bucket capacity = 1 second of requests
 
-  // Rate limit config
-  private requestsPerMinute: number;
-
-  // Statistics
-  private totalProcessed = 0;
-  private totalErrors = 0;
-  private totalWaitTime = 0;
+  // Concurrency
   private inFlight = 0;
+  private readonly maxConcurrent: number;
 
-  constructor(requestsPerMinute = 800) {
-    this.requestsPerMinute = requestsPerMinute;
+  // Stats
+  private totalProcessed = 0;
+  private totalErrors    = 0;
+  private totalRetries   = 0;
+
+  constructor(requestsPerMinute = DEFAULT_RPM, maxConcurrent = DEFAULT_CONCURRENT) {
+    this.maxConcurrent = maxConcurrent;
+    this.tokensPerMs   = requestsPerMinute / 60_000;
+    this.maxTokens     = Math.max(1, Math.floor(requestsPerMinute / 10)); // 6-second burst cap
+    this.tokens        = this.maxTokens;
+
     console.log(
-      `[LLM Queue] Initialized — ${requestsPerMinute} RPM limit, ` +
-      `parallel dispatch (up to ${Math.min(requestsPerMinute, 100)} concurrent)`,
+      `[LLM Queue] Initialized — ${requestsPerMinute} RPM, ` +
+      `${maxConcurrent} max concurrent, ` +
+      `burst cap: ${this.maxTokens} tokens`,
     );
   }
 
   /**
-   * Enqueue an LLM request.
-   * @param params  LLM invocation parameters
-   * @param priority Higher priority requests are processed first (default: 0)
-   * @returns Promise that resolves with the LLM result
+   * Enqueue an LLM request and return a Promise that resolves with the result.
    */
   async enqueue(params: InvokeParams, priority = 0): Promise<InvokeResult> {
     return new Promise((resolve, reject) => {
-      const request: QueuedRequest = {
-        params,
-        resolve,
-        reject,
-        priority,
-        enqueuedAt: Date.now(),
-      };
-
-      this.queue.push(request);
-
-      // Keep queue sorted: higher priority first, then FIFO
-      this.queue.sort((a, b) => {
-        if (a.priority !== b.priority) return b.priority - a.priority;
-        return a.enqueuedAt - b.enqueuedAt;
-      });
-
-      if (!this.dispatcherRunning) {
-        this.runDispatcher();
-      }
+      this._push({ params, resolve, reject, priority, enqueuedAt: Date.now(), attempt: 0 });
     });
   }
 
-  /**
-   * Dispatcher loop — runs every TICK_MS and fires as many requests as the
-   * current RPM window allows.
-   */
-  private async runDispatcher() {
+  private _push(req: QueuedRequest) {
+    this.queue.push(req);
+    // Higher priority first; ties broken by FIFO
+    this.queue.sort((a, b) =>
+      a.priority !== b.priority ? b.priority - a.priority : a.enqueuedAt - b.enqueuedAt,
+    );
+    if (!this.dispatcherRunning) {
+      this._runDispatcher();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Dispatcher loop
+  // ---------------------------------------------------------------------------
+  private async _runDispatcher() {
     if (this.dispatcherRunning) return;
     this.dispatcherRunning = true;
 
     while (this.queue.length > 0 || this.inFlight > 0) {
+      this._refillTokens();
+
       const now = Date.now();
 
-      // Prune timestamps older than the window
-      this.windowTimestamps = this.windowTimestamps.filter(t => now - t < WINDOW_MS);
+      // Find the next request that is ready (past its retryAfter delay)
+      const readyIdx = this.queue.findIndex(r => !r.retryAfter || r.retryAfter <= now);
 
-      const budget = this.requestsPerMinute - this.windowTimestamps.length;
-
-      if (budget > 0 && this.queue.length > 0) {
-        // Dispatch up to `budget` requests in parallel
-        const batch = this.queue.splice(0, budget);
-
-        for (const req of batch) {
-          const waitMs = now - req.enqueuedAt;
-          this.totalWaitTime += waitMs;
-
-          if (waitMs > 5000) {
-            console.log(
-              `[LLM Queue] Processing request (waited ${Math.ceil(waitMs / 1000)}s, ` +
-              `priority: ${req.priority}, queue: ${this.queue.length}, in-flight: ${this.inFlight})`,
-            );
-          }
-
-          this.windowTimestamps.push(now);
-          this.inFlight++;
-          this.dispatchRequest(req); // fire-and-forget (non-blocking)
-        }
-      } else if (budget <= 0) {
-        // Window is full — log and wait until the oldest request ages out
-        const oldestTs = this.windowTimestamps[0] ?? now;
-        const waitMs = WINDOW_MS - (now - oldestTs) + 10;
-        console.log(
-          `[LLM Queue] Rate limit reached (${this.windowTimestamps.length}/${this.requestsPerMinute} RPM), ` +
-          `waiting ${Math.ceil(waitMs / 1000)}s. Queue: ${this.queue.length}, in-flight: ${this.inFlight}`,
-        );
-        await sleep(Math.max(waitMs, TICK_MS));
+      if (readyIdx === -1) {
+        // All queued requests are in backoff — wait for the soonest one
+        const soonest = Math.min(...this.queue.map(r => r.retryAfter ?? now));
+        await sleep(Math.max(TICK_MS, soonest - now + 10));
         continue;
       }
 
-      // Log minute boundary for observability (matches old format)
-      if (this.totalProcessed > 0 && this.totalProcessed % this.requestsPerMinute === 0) {
-        this.logStatistics();
+      if (this.tokens < 1) {
+        // Token bucket empty — wait for next refill
+        const msUntilToken = Math.ceil((1 - this.tokens) / this.tokensPerMs);
+        await sleep(Math.max(TICK_MS, msUntilToken));
+        continue;
       }
 
-      await sleep(TICK_MS);
+      if (this.inFlight >= this.maxConcurrent) {
+        // Concurrency cap reached — wait
+        await sleep(TICK_MS);
+        continue;
+      }
+
+      // Consume one token and dispatch
+      this.tokens -= 1;
+      this.inFlight++;
+      const [req] = this.queue.splice(readyIdx, 1);
+
+      const waitMs = now - req.enqueuedAt;
+      if (waitMs > 3000 || req.attempt > 0) {
+        console.log(
+          `[LLM Queue] Dispatching (attempt ${req.attempt + 1}/${MAX_ATTEMPTS}, ` +
+          `waited ${Math.ceil(waitMs / 1000)}s, ` +
+          `queue: ${this.queue.length}, in-flight: ${this.inFlight}, ` +
+          `tokens: ${this.tokens.toFixed(1)})`,
+        );
+      }
+
+      this._executeRequest(req); // fire-and-forget
     }
 
     this.dispatcherRunning = false;
   }
 
-  /**
-   * Dispatch a single request asynchronously with retry on 429.
-   * Does NOT block the dispatcher loop.
-   */
-  private async dispatchRequest(req: QueuedRequest) {
-    let result: InvokeResult | undefined;
-    let lastError: Error | undefined;
+  // ---------------------------------------------------------------------------
+  // Token bucket refill
+  // ---------------------------------------------------------------------------
+  private _refillTokens() {
+    const now = Date.now();
+    const elapsed = now - this.lastRefillTime;
+    this.tokens = Math.min(this.maxTokens, this.tokens + elapsed * this.tokensPerMs);
+    this.lastRefillTime = now;
+  }
 
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        result = await invokeLLM(req.params);
-        break;
-      } catch (err: any) {
-        const is429 =
-          err?.status === 429 ||
-          err?.message?.includes('429') ||
-          err?.message?.includes('RESOURCE_EXHAUSTED');
-
-        if (is429 && attempt < 4) {
-          const backoffMs = Math.min(60_000, Math.pow(2, attempt) * 1000) + Math.random() * 500;
-          console.warn(
-            `[LLM Queue] 429 rate limit — retry ${attempt + 1}/4 in ${Math.ceil(backoffMs / 1000)}s`,
-          );
-          await sleep(backoffMs);
-        } else {
-          lastError = err as Error;
-          break;
-        }
-      }
-    }
-
-    this.inFlight--;
-
-    if (result !== undefined) {
+  // ---------------------------------------------------------------------------
+  // Execute a single request; re-queue on 429, reject on other errors
+  // ---------------------------------------------------------------------------
+  private async _executeRequest(req: QueuedRequest) {
+    try {
+      const result = await invokeLLM(req.params);
+      this.inFlight--;
       this.totalProcessed++;
       req.resolve(result);
-    } else {
-      this.totalErrors++;
-      const msg = lastError?.message ?? 'LLM call failed after retries';
-      console.error(`[LLM Queue] Request failed: ${msg}`);
-      req.reject(lastError ?? new Error(msg));
+    } catch (err: any) {
+      this.inFlight--;
+
+      const is429 =
+        err?.message?.includes('429') ||
+        err?.message?.includes('RESOURCE_EXHAUSTED');
+
+      if (is429 && req.attempt < MAX_ATTEMPTS - 1) {
+        this.totalRetries++;
+        // Exponential backoff: 2s, 4s, 8s, 16s, 32s + jitter
+        const backoffMs = Math.min(60_000, Math.pow(2, req.attempt + 1) * 1000)
+                        + Math.random() * 1000;
+        console.warn(
+          `[LLM Queue] 429 — re-queuing attempt ${req.attempt + 1}/${MAX_ATTEMPTS - 1} ` +
+          `in ${Math.ceil(backoffMs / 1000)}s`,
+        );
+        // Re-queue with backoff delay and incremented attempt count
+        req.attempt++;
+        req.retryAfter = Date.now() + backoffMs;
+        this._push(req);
+        if (!this.dispatcherRunning) {
+          this._runDispatcher();
+        }
+      } else {
+        this.totalErrors++;
+        const label = is429 ? 'LLM 429 — max retries exceeded' : 'LLM call failed';
+        console.error(`[LLM Queue] ${label}: ${err?.message ?? 'unknown error'}`);
+        req.reject(err instanceof Error ? err : new Error(err?.message ?? label));
+      }
     }
   }
 
-  /**
-   * Get current queue statistics.
-   */
+  // ---------------------------------------------------------------------------
+  // Diagnostics
+  // ---------------------------------------------------------------------------
   getStatistics() {
     return {
-      queueDepth: this.queue.length,
-      inFlight: this.inFlight,
-      windowUsed: this.windowTimestamps.length,
-      rpmLimit: this.requestsPerMinute,
+      queueDepth:     this.queue.length,
+      inFlight:       this.inFlight,
+      tokens:         Math.floor(this.tokens),
+      rpmLimit:       Math.round(this.tokensPerMs * 60_000),
+      maxConcurrent:  this.maxConcurrent,
       totalProcessed: this.totalProcessed,
-      totalErrors: this.totalErrors,
-      averageWaitTime:
-        this.totalProcessed > 0 ? Math.ceil(this.totalWaitTime / this.totalProcessed) : 0,
+      totalErrors:    this.totalErrors,
+      totalRetries:   this.totalRetries,
       errorRate:
         this.totalProcessed > 0
           ? ((this.totalErrors / this.totalProcessed) * 100).toFixed(2) + '%'
@@ -214,47 +237,35 @@ export class LLMRequestQueue {
     };
   }
 
-  /**
-   * Log queue statistics.
-   */
-  private logStatistics() {
-    const s = this.getStatistics();
-    console.log(
-      `[LLM Queue Stats] Processed: ${s.totalProcessed}, ` +
-      `Errors: ${s.totalErrors} (${s.errorRate}), ` +
-      `Avg Wait: ${s.averageWaitTime}ms, ` +
-      `Queue: ${s.queueDepth}, In-flight: ${s.inFlight}`,
-    );
-  }
-
-  /**
-   * Clear the queue (for testing or emergency stop).
-   * In-flight requests are NOT cancelled — they will complete normally.
-   */
   clear() {
-    const cleared = this.queue.length;
-    this.queue.forEach(req => req.reject(new Error('Queue cleared')));
+    const n = this.queue.length;
+    this.queue.forEach(r => r.reject(new Error('Queue cleared')));
     this.queue = [];
-    console.log(`[LLM Queue] Cleared ${cleared} pending requests (${this.inFlight} in-flight unchanged)`);
+    console.log(`[LLM Queue] Cleared ${n} pending requests (${this.inFlight} in-flight unchanged)`);
   }
 }
 
 // ---------------------------------------------------------------------------
 // Global singleton
 // ---------------------------------------------------------------------------
-// 800 RPM — 80% safety buffer below the 1,000 RPM Tier 1 cap for gemini-3-flash-preview
-// Override via LLM_RPM_LIMIT env var in Railway:
-//   Tier 1 (default): LLM_RPM_LIMIT=800
-//   Tier 2 (2000 RPM): LLM_RPM_LIMIT=1800
-//   Tier 3 (4000 RPM): LLM_RPM_LIMIT=3600
-export const llmQueue = new LLMRequestQueue(
-  parseInt(process.env.LLM_RPM_LIMIT ?? '800', 10),
-);
+// SAFE DEFAULTS — override in Railway env vars:
+//
+//   LLM_RPM_LIMIT=60    → 1 request/second, well within Tier 1 paid quota
+//   LLM_CONCURRENCY=10  → 10 parallel requests max
+//
+// Once you confirm no 429s, increase gradually:
+//   LLM_RPM_LIMIT=120, LLM_CONCURRENCY=20   → 2× speed
+//   LLM_RPM_LIMIT=300, LLM_CONCURRENCY=40   → 5× speed
+//   LLM_RPM_LIMIT=600, LLM_CONCURRENCY=60   → 10× speed (near Tier 1 ceiling)
+//
+// gemini-3-flash-preview Tier 1 hard limit: 1,000 RPM
+// Stay at ≤80% of the limit to avoid 429 bursts: max ~800 RPM
+// ---------------------------------------------------------------------------
+const configuredRpm         = parseInt(process.env.LLM_RPM_LIMIT    ?? '60',  10);
+const configuredConcurrency = parseInt(process.env.LLM_CONCURRENCY  ?? '10',  10);
 
-/**
- * Convenience function to enqueue LLM requests.
- * Use this instead of calling invokeLLM() directly.
- */
+export const llmQueue = new LLMRequestQueue(configuredRpm, configuredConcurrency);
+
 export async function queuedLLMCall(
   params: InvokeParams,
   priority = 0,
@@ -262,16 +273,10 @@ export async function queuedLLMCall(
   return llmQueue.enqueue(params, priority);
 }
 
-/**
- * Get queue statistics.
- */
 export function getLLMQueueStats() {
   return llmQueue.getStatistics();
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
