@@ -86,7 +86,10 @@ export class ComprehensiveScraper {
         return result;
       } catch (error) {
         lastError = error as Error;
-        console.log(`[Scraper] ${strategy.name} failed for ${options.url}:`, error);
+        // Log only the message — avoid dumping the full Axios request object
+        // which floods Railway's 500 log/sec limit and causes log lines to be dropped
+        const errMsg = error instanceof Error ? error.message : String(error).slice(0, 200);
+        console.log(`[Scraper] ${strategy.name} failed for ${options.url}: ${errMsg}`);
         continue;
       }
     }

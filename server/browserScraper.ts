@@ -84,7 +84,8 @@ export async function fetchWithBrowser(
 
     return html;
   } catch (error) {
-    console.error(`[Browser Scraper] Error fetching ${url}:`, error);
+    const errMsg = error instanceof Error ? error.message : String(error).slice(0, 200);
+    console.error(`[Browser Scraper] Error fetching ${url}: ${errMsg}`);
     return null;
   } finally {
     if (page) {

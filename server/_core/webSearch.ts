@@ -2,9 +2,10 @@
  * Web Search Module
  *
  * Provides a unified web search interface for the agent loop.
- * Strategy:
- *   1. Serper API (fast, reliable, requires SERPER_API_KEY env var)
- *   2. DuckDuckGo Instant Answer API (free, no key needed, rate-limited)
+ * Provider priority:
+ *   1. Jina Search (s.jina.ai) — primary, reliable on Railway, ~$0.0005/query
+ *   2. Serper API — secondary, requires SERPER_API_KEY, ~$0.001/query
+ *   3. DuckDuckGo HTML — last resort, free, unreliable on Railway (3s timeout)
  *
  * Returns a list of SearchResult objects with title, url, and snippet.
  * The agent uses these to decide which pages to fetch next when the
@@ -20,7 +21,38 @@ export interface SearchResult {
 }
 
 // ---------------------------------------------------------------------------
-// Serper API (primary — fast, reliable, ~$0.001/query)
+// Jina Search API (primary — reliable on Railway, ~$0.0005/query)
+// Uses s.jina.ai which returns structured JSON search results.
+// Reuses the same JINA_API_KEY as jinaFetcher — no extra credentials needed.
+// ---------------------------------------------------------------------------
+
+async function searchViaJina(query: string, numResults = 5): Promise<SearchResult[]> {
+  const apiKey = process.env.JINA_API_KEY;
+  if (!apiKey) throw new Error("JINA_API_KEY not set");
+
+  const encoded = encodeURIComponent(query);
+  const response = await axios.get(`https://s.jina.ai/${encoded}`, {
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      Accept: "application/json",
+      "X-Respond-With": "no-content", // metadata only (title, url, description) — faster
+    },
+    timeout: 15000,
+  });
+
+  // Jina returns: { data: [{ title, url, description }] }
+  const results: Array<{ title?: string; url?: string; description?: string; content?: string }> =
+    response.data?.data ?? response.data?.results ?? [];
+
+  return results.slice(0, numResults).map((r) => ({
+    title: r.title ?? "",
+    url: r.url ?? "",
+    snippet: r.description ?? r.content?.slice(0, 300) ?? "",
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Serper API (secondary — fast, reliable, ~$0.001/query)
 // ---------------------------------------------------------------------------
 
 async function searchViaSerper(query: string, numResults = 5): Promise<SearchResult[]> {
@@ -47,18 +79,19 @@ async function searchViaSerper(query: string, numResults = 5): Promise<SearchRes
 }
 
 // ---------------------------------------------------------------------------
-// DuckDuckGo HTML search (fallback — free, no key, rate-limited)
+// DuckDuckGo HTML search (last resort — free, no key, unreliable on Railway)
+// Timeout reduced to 3s: Railway blocks DuckDuckGo with immediate connection
+// refused — no need to wait 12s for a failure that happens in <100ms.
 // ---------------------------------------------------------------------------
 
 async function searchViaDuckDuckGo(query: string, numResults = 5): Promise<SearchResult[]> {
-  // Use DuckDuckGo's HTML endpoint (more reliable than the JSON API)
   const encoded = encodeURIComponent(query);
   const response = await axios.get(`https://html.duckduckgo.com/html/?q=${encoded}`, {
     headers: {
       "User-Agent":
         "Mozilla/5.0 (compatible; SmartScraper/1.0; +https://github.com/yuvnagra-sudo/Smart-AI-Website-Scraper)",
     },
-    timeout: 12000,
+    timeout: 3000, // Reduced from 12s — Railway blocks DDG immediately
   });
 
   const html: string = response.data ?? "";
@@ -101,10 +134,30 @@ async function searchViaDuckDuckGo(query: string, numResults = 5): Promise<Searc
 
 /**
  * Search the web for `query` and return up to `numResults` results.
- * Tries Serper first (if SERPER_API_KEY is set), falls back to DuckDuckGo.
+ *
+ * Provider priority:
+ *   1. Jina Search (if JINA_API_KEY set) — reliable on Railway
+ *   2. Serper (if SERPER_API_KEY set) — fast Google results
+ *   3. DuckDuckGo — free fallback (unreliable on Railway, 3s timeout)
  */
 export async function webSearch(query: string, numResults = 5): Promise<SearchResult[]> {
-  // Try Serper first
+  // 1. Try Jina Search first (reliable on Railway, reuses existing JINA_API_KEY)
+  if (process.env.JINA_API_KEY) {
+    try {
+      const results = await searchViaJina(query, numResults);
+      if (results.length > 0) {
+        console.log(`[webSearch] Jina: ${results.length} results for "${query}"`);
+        return results;
+      }
+      console.warn(`[webSearch] Jina returned 0 results — trying next provider`);
+    } catch (err) {
+      console.warn(
+        `[webSearch] Jina failed: ${err instanceof Error ? err.message : String(err).slice(0, 100)} — trying next provider`,
+      );
+    }
+  }
+
+  // 2. Try Serper
   if (process.env.SERPER_API_KEY) {
     try {
       const results = await searchViaSerper(query, numResults);
@@ -113,17 +166,25 @@ export async function webSearch(query: string, numResults = 5): Promise<SearchRe
         return results;
       }
     } catch (err) {
-      console.warn(`[webSearch] Serper failed: ${err instanceof Error ? err.message : String(err).slice(0, 100)} — falling back to DuckDuckGo`);
+      console.warn(
+        `[webSearch] Serper failed: ${err instanceof Error ? err.message : String(err).slice(0, 100)} — falling back to DuckDuckGo`,
+      );
     }
   }
 
-  // Fall back to DuckDuckGo
+  // 3. Last resort: DuckDuckGo (3s timeout)
   try {
     const results = await searchViaDuckDuckGo(query, numResults);
-    console.log(`[webSearch] DuckDuckGo: ${results.length} results for "${query}"`);
-    return results;
+    if (results.length > 0) {
+      console.log(`[webSearch] DuckDuckGo: ${results.length} results for "${query}"`);
+      return results;
+    }
+    console.warn(`[webSearch] DuckDuckGo returned 0 results`);
+    return [];
   } catch (err) {
-    console.error(`[webSearch] DuckDuckGo also failed: ${err instanceof Error ? err.message : String(err).slice(0, 100)}`);
+    console.error(
+      `[webSearch] All providers failed. Last error: ${err instanceof Error ? err.message : String(err).slice(0, 100)}`,
+    );
     return [];
   }
 }
