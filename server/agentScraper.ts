@@ -338,36 +338,197 @@ function mergeFieldResults(base: FieldResultMap, incoming: FieldResultMap): Fiel
 }
 
 // ---------------------------------------------------------------------------
-// 4. Extract available links from page content (for PLAN step)
+// 4a. Directory-exit helpers — extract the company's real website from a
+//     directory profile page before generic link extraction runs.
+// ---------------------------------------------------------------------------
+
+/**
+ * Known directory domains and their redirect/website-link patterns.
+ * For each directory, we define:
+ *   - domains: hostnames that identify this directory
+ *   - extractWebsite: function that extracts the company's real URL from raw page content
+ */
+const DIRECTORY_EXTRACTORS: Array<{
+  name: string;
+  domains: string[];
+  extractWebsite: (content: string) => string | null;
+}> = [
+  {
+    // Clutch: wraps links as https://r.clutch.co/redirect?...&provider_website=tbkcreative.com&...&u=http%3A%2F%2F...
+    // The `provider_website` param is the cleanest signal; `u=` param has the full URL.
+    name: "Clutch",
+    domains: ["clutch.co"],
+    extractWebsite: (content) => {
+      // Strategy 1: extract from `u=` query param inside a Clutch redirect URL (most reliable)
+      const uMatch = content.match(/[?&]u=(https?[^&"'\s>)]+)/);
+      if (uMatch) {
+        try {
+          const decoded = new URL(decodeURIComponent(uMatch[1]));
+          decoded.searchParams.delete("utm_source");
+          decoded.searchParams.delete("utm_medium");
+          decoded.searchParams.delete("utm_campaign");
+          return decoded.origin + decoded.pathname;
+        } catch { /* fall through */ }
+      }
+      // Strategy 2: extract from `provider_website=` param (domain only — prepend https://)
+      const pwMatch = content.match(/provider_website=([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+      if (pwMatch) return `https://${pwMatch[1]}`;
+      return null;
+    },
+  },
+  {
+    // GoodFirms: company website appears as plain text after "Website:" or as a bare URL
+    // in the company info section. GoodFirms does NOT use redirect URLs.
+    name: "GoodFirms",
+    domains: ["goodfirms.co"],
+    extractWebsite: (content) => {
+      // Look for "Website: https://..." pattern in the markdown
+      const m = content.match(/Website[:\s]+([a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(?:\/[^\s]*)?)/);
+      if (m) return m[1].startsWith("http") ? m[1] : `https://${m[1]}`;
+      return null;
+    },
+  },
+  {
+    // G2: company website is in a "Visit website" button or "Website" field.
+    // G2 uses a redirect: https://www.g2.com/products/X/go?utm_source=...
+    name: "G2",
+    domains: ["g2.com"],
+    extractWebsite: (content) => {
+      // G2 redirect: /go?utm_source=... does not contain the target URL in the link itself.
+      // Fall back to looking for a bare domain after "Website" label.
+      const m = content.match(/(?:Website|website)[:\s]+([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+      if (m && !m[1].includes("g2.com")) return `https://${m[1]}`;
+      return null;
+    },
+  },
+  {
+    // Yelp: company website is in a "Business website" link, sometimes obfuscated via
+    // https://www.yelp.com/biz_redir?url=https%3A%2F%2F...
+    name: "Yelp",
+    domains: ["yelp.com"],
+    extractWebsite: (content) => {
+      // Strategy 1: biz_redir URL
+      const redirMatch = content.match(/biz_redir\?url=(https?[^&"'\s>)]+)/);
+      if (redirMatch) {
+        try { return decodeURIComponent(redirMatch[1]); } catch { /* fall through */ }
+      }
+      // Strategy 2: plain text after "Business website"
+      const m = content.match(/Business website[:\s]+([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+      if (m) return `https://${m[1]}`;
+      return null;
+    },
+  },
+  {
+    // Capterra: uses /goto/software/... redirect links
+    name: "Capterra",
+    domains: ["capterra.com"],
+    extractWebsite: (content) => {
+      // Capterra does not embed the target URL in the redirect path.
+      // Fall back to looking for a bare domain after "Website" label.
+      const m = content.match(/(?:Website|website)[:\s]+([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+      if (m && !m[1].includes("capterra.com")) return `https://${m[1]}`;
+      return null;
+    },
+  },
+  {
+    // Trustpilot: company website in the business info section
+    name: "Trustpilot",
+    domains: ["trustpilot.com"],
+    extractWebsite: (content) => {
+      const m = content.match(/(?:Website|website)[:\s]+([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+      if (m && !m[1].includes("trustpilot.com")) return `https://${m[1]}`;
+      return null;
+    },
+  },
+];
+
+/**
+ * Given a directory page URL and its content, attempt to extract the company's
+ * real website URL using directory-specific logic.
+ * Returns null if the URL is not a known directory or no website is found.
+ */
+export function extractCompanyWebsiteFromDirectory(pageUrl: string, content: string): string | null {
+  let host = "";
+  try { host = new URL(pageUrl).hostname; } catch { return null; }
+
+  for (const extractor of DIRECTORY_EXTRACTORS) {
+    if (extractor.domains.some(d => host.includes(d))) {
+      const website = extractor.extractWebsite(content);
+      if (website) {
+        console.log(`[agentScraper] 🏠 ${extractor.name} directory-exit: found company website → ${website}`);
+        return website;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Returns true if the given URL is a known directory profile page.
+ */
+export function isDirectoryUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname;
+    return DIRECTORY_EXTRACTORS.some(e => e.domains.some(d => host.includes(d)));
+  } catch { return false; }
+}
+
+// ---------------------------------------------------------------------------
+// 4b. Extract available links from page content (for PLAN step)
 // ---------------------------------------------------------------------------
 
 function extractLinksFromContent(content: string, baseUrl: string): string[] {
   const links: string[] = [];
   const seen = new Set<string>();
 
+  // Noise domains: images, CDNs, social media, and all known directory domains.
+  // Links to these are deprioritised or filtered out.
+  const noiseDomains = [
+    'shgstatic.com', 'cloudfront.net', 'amazonaws.com', 'googleusercontent.com',
+    'facebook.com', 'twitter.com', 'x.com', 'linkedin.com', 'instagram.com',
+    'youtube.com', 'tiktok.com', 'pinterest.com',
+    ...DIRECTORY_EXTRACTORS.flatMap(e => e.domains),
+  ];
+  const isNoise = (u: string) => {
+    try { const h = new URL(u).hostname; return noiseDomains.some(d => h.includes(d)); }
+    catch { return true; }
+  };
+
   function addLink(raw: string) {
-    // Decode Clutch (and similar directory) redirect URLs.
-    // Clutch wraps company website links as:
-    //   https://r.clutch.co/redirect?...&u=http%3A%2F%2Fwww.tbkcreative.com%2F...
-    // The real company URL is in the `u` query parameter.
-    let url = raw.replace(/[.,;)>\]]+$/, "");
+    let url = raw.replace(/[.,;)>\]"']+$/, "");
     try {
       const parsed = new URL(url);
-      if (parsed.hostname.includes('clutch.co') || parsed.hostname.includes('r.clutch.co')) {
-        const uParam = parsed.searchParams.get('u');
+      const host = parsed.hostname;
+
+      // ── Directory redirect decoding ──────────────────────────────────────
+      // Clutch: extract from u= param
+      if (host.includes("clutch.co")) {
+        const uParam = parsed.searchParams.get("u");
         if (uParam) {
-          // Decode the nested URL and strip UTM params
-          const decoded = new URL(decodeURIComponent(uParam));
-          decoded.searchParams.delete('utm_source');
-          decoded.searchParams.delete('utm_medium');
-          decoded.searchParams.delete('utm_campaign');
-          url = decoded.origin + decoded.pathname;
+          try {
+            const decoded = new URL(decodeURIComponent(uParam));
+            decoded.searchParams.delete("utm_source");
+            decoded.searchParams.delete("utm_medium");
+            decoded.searchParams.delete("utm_campaign");
+            url = decoded.origin + decoded.pathname;
+          } catch { return; }
         } else {
-          // Skip internal Clutch navigation links
-          return;
+          return; // internal Clutch link — skip
         }
       }
-    } catch { /* not a valid URL, skip */ return; }
+      // Yelp: extract from biz_redir?url=
+      else if (host.includes("yelp.com") && parsed.pathname.includes("biz_redir")) {
+        const target = parsed.searchParams.get("url");
+        if (target) {
+          try { url = decodeURIComponent(target); } catch { return; }
+        } else { return; }
+      }
+      // Generic: skip obvious noise (images, CDN, social)
+      else if (isNoise(url)) {
+        return;
+      }
+    } catch { return; }
+
     if (!seen.has(url)) { seen.add(url); links.push(url); }
   }
 
@@ -384,20 +545,28 @@ function extractLinksFromContent(content: string, baseUrl: string): string[] {
     addLink(m[0]);
   }
 
-  // Prioritize same-domain links (sub-pages of the company website)
+  // ── Prioritization ───────────────────────────────────────────────────────
   let baseDomain = "";
   try { baseDomain = new URL(baseUrl).hostname; } catch { /* ignore */ }
 
-  // Also prioritize links that are NOT the directory domain (i.e. the company's own site)
-  const directoryDomains = ['clutch.co', 'goodfirms.co', 'g2.com', 'yelp.com', 'capterra.com', 'trustpilot.com', 'img.shgstatic.com'];
-  const isDirectoryLink = (u: string) => { try { const h = new URL(u).hostname; return directoryDomains.some(d => h.includes(d)); } catch { return true; } };
+  // Tier 1: sub-pages of the same domain as baseUrl (e.g. /about, /team, /contact)
+  const sameDomain = links.filter(u => {
+    try { return new URL(u).hostname === baseDomain; } catch { return false; }
+  });
 
-  const sameDomain   = links.filter(u => { try { return new URL(u).hostname === baseDomain; } catch { return false; } });
-  const companyLinks = links.filter(u => !sameDomain.includes(u) && !isDirectoryLink(u));
-  const otherLinks   = links.filter(u => !sameDomain.includes(u) && !companyLinks.includes(u));
+  // Tier 2: company's own external site (not a directory, not noise)
+  const companyLinks = links.filter(u => !sameDomain.includes(u));
 
-  // Order: same-domain sub-pages → company external site → everything else
-  return [...sameDomain, ...companyLinks, ...otherLinks].slice(0, 50);
+  // Within Tier 2, prefer high-value sub-pages (about, team, contact, leadership)
+  const HIGH_VALUE_PATHS = ['/about', '/team', '/contact', '/leadership', '/people', '/staff', '/management', '/founders', '/executives'];
+  const highValue = companyLinks.filter(u => {
+    try { const p = new URL(u).pathname.toLowerCase(); return HIGH_VALUE_PATHS.some(h => p.startsWith(h)); }
+    catch { return false; }
+  });
+  const otherCompany = companyLinks.filter(u => !highValue.includes(u));
+
+  // Order: same-domain sub-pages → high-value company pages → other company pages
+  return [...sameDomain, ...highValue, ...otherCompany].slice(0, 50);
 }
 
 // ---------------------------------------------------------------------------
@@ -470,6 +639,20 @@ export async function scrapeUrl(
       console.log(`[agentScraper] Primary page: ${filled}/${sections.length} fields confident`);
     }
     hopsUsed++;
+
+    // ── DIRECTORY-EXIT FAST PATH ─────────────────────────────────────────────
+    // If the primary URL is a known directory (Clutch, G2, GoodFirms, etc.),
+    // extract the company's real website URL immediately and inject it at the
+    // FRONT of availableLinks so the agent visits it on the very next hop.
+    // This avoids wasting hops on planNextAction trying to figure out where to go.
+    if (isDirectoryUrl(url)) {
+      const companyWebsite = extractCompanyWebsiteFromDirectory(url, primary.content);
+      if (companyWebsite && !visitedUrls.has(companyWebsite)) {
+        // Inject at front so it is the first link the planner sees
+        availableLinks = [companyWebsite, ...availableLinks.filter(l => l !== companyWebsite)];
+        console.log(`[agentScraper] 📌 Directory-exit: injected company website at top of queue: ${companyWebsite}`);
+      }
+    }
   }
 
   // ── AGENT LOOP ─────────────────────────────────────────────────────────────
