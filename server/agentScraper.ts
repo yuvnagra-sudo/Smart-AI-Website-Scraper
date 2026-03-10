@@ -274,7 +274,48 @@ stated here. Employee count and pricing are rarely on company websites — assig
 0.0 if not found rather than guessing.`;
   }
 
-  const userMsg = `${systemPrompt}${pageTypeGuidance}
+  // Build decision-maker priority guidance based on whether the system prompt
+  // mentions a specific partnership context (e.g. Calibre Consulting = tech partner for agencies)
+  const dmPriorityGuidance = `
+DECISION MAKER SELECTION RULES (apply when extracting contact / decision maker fields):
+
+Step 1 — Identify ALL people mentioned on this page who are employees of THIS company.
+  - EXCLUDE: client names, testimonial authors, case study subjects, partner company staff, reviewers
+  - INCLUDE: founders, owners, C-suite, directors, managers, developers, designers, strategists
+
+Step 2 — Rank candidates by their likelihood to approve a B2B technology partnership:
+  TIER 1 (most likely decision maker — pick first):
+    CEO, Founder, Co-Founder, Owner, President, Managing Director, Managing Partner,
+    Principal, Executive Director, Chief Executive Officer
+  TIER 2 (technical/digital decision maker — pick if no Tier 1 available):
+    CTO, Chief Technology Officer, VP Engineering, VP Technology, VP Digital,
+    Director of Technology, Head of Technology, Senior Developer, Lead Developer,
+    Technical Director, Director of Development, Head of Development,
+    VP Product, Head of Product, Director of Digital
+  TIER 3 (operational decision maker — pick if no Tier 1 or 2 available):
+    COO, VP Operations, Director of Operations, General Manager,
+    VP Client Services, Director of Client Services, Account Director,
+    VP Strategy, Director of Strategy, Head of Strategy
+  TIER 4 (creative/marketing — only if no higher tier available):
+    Creative Director, Art Director, Design Director, Marketing Director,
+    Brand Director, Content Director, Head of Creative
+  TIER 5 (individual contributors — last resort only):
+    Designer, Developer, Project Manager, Account Manager, Coordinator
+
+Step 3 — When multiple people are at the same tier, prefer:
+  - More senior title ("Senior" > "Junior", "Director" > "Manager")
+  - Person with most complete information (name + title both present)
+  - Person listed first on the page
+
+Step 4 — For Decision Maker 1: pick the highest-tier person
+         For Decision Maker 2: pick the second-highest-tier person (different from DM1)
+         For Decision Maker 3: pick the third-highest-tier person (different from DM1 and DM2)
+
+IMPORTANT: A "Creative Director" or "Art Director" should NEVER be chosen over a CEO, CTO,
+or Senior Developer when those roles are available. Technical and executive roles outrank
+creative roles for B2B technology partnership decisions.`;
+
+  const userMsg = `${systemPrompt}${pageTypeGuidance}${dmPriorityGuidance}
 
 Page content:
 ${content.substring(0, 60000)}

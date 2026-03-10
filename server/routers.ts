@@ -969,8 +969,10 @@ export async function processAgentJob(jobId: number) {
     const collectedUrls: AgentDirectoryEntry[] = [];
     let processed = 0;
 
-    // Smart stopping rules
-    const MAX_TOTAL_ENTRIES = Math.min(5000, Math.max(500, firms.length * 5));
+    // Hard cap: never process more firms than the original input file contained.
+    // Directory expansion is disabled for profile-enrichment jobs — it was the
+    // root cause of the job going past 100% (2000+ firms from a 1787-firm file).
+    const MAX_TOTAL_ENTRIES = firms.length; // NO expansion beyond original input
     const seenUrls = new Set<string>(firms.map(f => f.websiteUrl));
     let totalQueued = firms.length;
 
@@ -1007,30 +1009,16 @@ export async function processAgentJob(jobId: number) {
             rowObjective,
             sections,
             resolvedPrompt,
-            8, // maxHops increased from 5 to 8
+            5, // maxHops: 5 hops is enough for Clutch→company→about/team. 8 was causing cost overrun.
             () => isJobCancelled(jobId),
           );
 
           if (result.type === "directory") {
-            // This path is now only reached via scrapeUrlAsDirectory (explicit directory mode)
-            collectedUrls.push(...result.entries);
-            for (const entry of result.entries) {
-              const scrapeTarget = entry.nativeUrl || entry.directoryUrl;
-              if (scrapeTarget && scrapeTarget !== firm.websiteUrl && !seenUrls.has(scrapeTarget)) {
-                seenUrls.add(scrapeTarget);
-                if (totalQueued < MAX_TOTAL_ENTRIES) {
-                  firmQueue.push({
-                    companyName: entry.name || scrapeTarget,
-                    websiteUrl: scrapeTarget,
-                    description: rowObjective,
-                    isExpanded: true,
-                  });
-                  totalQueued++;
-                }
-              }
-            }
-            console.log(`[processAgentJob] Directory expanded: ${result.entries.length} entries queued`);
-            insertJobLog({ jobId, url: firm.websiteUrl, companyName: firm.companyName, status: "success", fieldsTotal: 0, fieldsFilled: 0, durationMs: Date.now() - startMs }).catch(() => {});
+            // Directory expansion is DISABLED for profile-enrichment jobs.
+            // scrapeUrl() returns type="profile" for all inputs now — this branch
+            // is dead code but kept as a safety net. Log and skip.
+            console.warn(`[processAgentJob] Unexpected directory result for ${firm.websiteUrl} — skipping expansion to prevent counter overflow`);
+            insertJobLog({ jobId, url: firm.websiteUrl, companyName: firm.companyName, status: "failed", fieldsTotal: 0, fieldsFilled: 0, durationMs: Date.now() - startMs }).catch(() => {});
           } else {
             profileResults.push({
               "Company Name": firm.companyName,
@@ -1080,10 +1068,27 @@ export async function processAgentJob(jobId: number) {
 
         processed++;
         await incrementJobProcessedCountSafely(jobId);
+
+        // Update live cost in DB every 25 firms so dashboard shows running spend
+        const currentStats = getOpenAIStats();
+        const liveCost = Math.round((currentStats.totalCost - costBaseline) * 10000) / 10000;
         await updateJobProgressSafely(jobId, {
           currentFirmName: firm.companyName,
           activeFirmsJson: null,
+          totalCostUSD: liveCost,
+          totalInputTokens:  currentStats.totalInputTokens  - inputBaseline,
+          totalOutputTokens: currentStats.totalOutputTokens - outputBaseline,
         });
+
+        // Cost safety cap: if actual spend exceeds 3x the original estimate, stop the job
+        // to prevent runaway costs. User can re-run with a higher budget if needed.
+        const estimatedCost = typeof job.totalCost === 'string' ? parseFloat(job.totalCost) : (job.totalCost ?? 0);
+        const costCap = Math.max(estimatedCost * 3, 10); // at least $10 cap
+        if (liveCost > costCap) {
+          console.warn(`[processAgentJob] 🛑 Cost cap hit: $${liveCost.toFixed(2)} > $${costCap.toFixed(2)} cap. Stopping job to prevent runaway spend.`);
+          markJobCancelled(jobId);
+          break;
+        }
       }
     };
 
