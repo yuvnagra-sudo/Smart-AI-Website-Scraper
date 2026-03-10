@@ -248,7 +248,12 @@ export const appRouter = router({
     generateExtractionPlan: protectedProcedure
       .input(z.object({ description: z.string().min(10) }))
       .mutation(async ({ input }) => {
-        const { queuedLLMCall } = await import("./_core/llmQueue");
+        // IMPORTANT: Do NOT use queuedLLMCall here.
+        // When a large job is running, the LLM queue is saturated and this
+        // interactive call would wait minutes before being dispatched, causing
+        // a 429 RESOURCE_EXHAUSTED timeout on the HTTP request.
+        // Instead, call invokeLLM directly with our own retry loop.
+        const { invokeLLM } = await import("./_core/openaiLLM");
 
         const systemMsg = `You are a web data extraction architect. Parse the user's intent into a structured extraction plan.
 
@@ -265,44 +270,67 @@ Return ONLY valid JSON (no markdown, no code fences):
   "systemPrompt": "Complete extraction prompt. Start with 'You are a [role]. Extract the following fields from the provided page content:' followed by numbered **Bold** sections with instructions. Include {companyName} and {websiteUrl} as placeholders."
 }`;
 
-        try {
-          const response = await queuedLLMCall({
-            messages: [
-              { role: "system", content: systemMsg },
-              { role: "user", content: input.description.trim() },
-            ],
-            response_format: {
-              type: "json_schema",
-              json_schema: {
-                name: "extraction_plan",
-                strict: true,
-                schema: {
-                  type: "object",
-                  properties: {
-                    objective: { type: "string" },
-                    sections: {
-                      type: "array",
-                      items: {
-                        type: "object",
-                        properties: {
-                          key: { type: "string" },
-                          label: { type: "string" },
-                          desc: { type: "string" },
+        // Retry up to 4 times with exponential backoff on 429
+        const callWithRetry = async () => {
+          for (let attempt = 0; attempt < 4; attempt++) {
+            try {
+              return await invokeLLM({
+                messages: [
+                  { role: "system", content: systemMsg },
+                  { role: "user", content: input.description.trim() },
+                ],
+                response_format: {
+                  type: "json_schema",
+                  json_schema: {
+                    name: "extraction_plan",
+                    strict: true,
+                    schema: {
+                      type: "object",
+                      properties: {
+                        objective: { type: "string" },
+                        sections: {
+                          type: "array",
+                          items: {
+                            type: "object",
+                            properties: {
+                              key: { type: "string" },
+                              label: { type: "string" },
+                              desc: { type: "string" },
+                            },
+                            required: ["key", "label", "desc"],
+                            additionalProperties: false,
+                          },
                         },
-                        required: ["key", "label", "desc"],
-                        additionalProperties: false,
+                        systemPrompt: { type: "string" },
                       },
+                      required: ["objective", "sections", "systemPrompt"],
+                      additionalProperties: false,
                     },
-                    systemPrompt: { type: "string" },
                   },
-                  required: ["objective", "sections", "systemPrompt"],
-                  additionalProperties: false,
                 },
-              },
-            },
-          });
+              });
+            } catch (err: any) {
+              const is429 =
+                err?.message?.includes("429") ||
+                err?.message?.includes("RESOURCE_EXHAUSTED");
+              if (is429 && attempt < 3) {
+                const backoffMs = Math.min(30_000, Math.pow(2, attempt) * 2000);
+                console.warn(
+                  `[generateExtractionPlan] 429 rate limit — retry ${attempt + 1}/3 in ${Math.ceil(backoffMs / 1000)}s`,
+                );
+                await new Promise(r => setTimeout(r, backoffMs));
+              } else {
+                throw err;
+              }
+            }
+          }
+          throw new Error("LLM call failed after retries");
+        };
 
-          const raw = response.choices[0]?.message?.content ?? "{}";
+        try {
+          const response = await callWithRetry();
+
+          const raw = response!.choices[0]?.message?.content ?? "{}";
           const parsed = JSON.parse(typeof raw === "string" ? raw : "{}");
 
           // Validate + clean sections
@@ -332,9 +360,13 @@ Return ONLY valid JSON (no markdown, no code fences):
           };
         } catch (err: any) {
           if (err instanceof TRPCError) throw err;
+          const msg = err?.message ?? "Unknown error";
+          const is429 = msg.includes("429") || msg.includes("RESOURCE_EXHAUSTED");
           throw new TRPCError({
             code: "INTERNAL_SERVER_ERROR",
-            message: `Generation failed: ${err.message ?? "Unknown error"}`,
+            message: is429
+              ? `LLM rate limit hit. The system is processing a large job — please try again in 30 seconds.`
+              : `Generation failed: ${msg}`,
           });
         }
       }),
