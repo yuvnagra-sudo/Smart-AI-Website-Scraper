@@ -25,13 +25,18 @@
  *     dispatcher can continue processing other requests while waiting.
  *
  * CONFIGURATION (Railway env vars):
- *   LLM_RPM_LIMIT    — requests per minute (default: 60, safe for Tier 1)
- *   LLM_CONCURRENCY  — max simultaneous in-flight requests (default: 10)
+ *   LLM_RPM_LIMIT    — requests per minute (default: 8000 for OpenAI Tier 4)
+ *   LLM_CONCURRENCY  — max simultaneous in-flight requests (default: 200)
  *
- * SAFE DEFAULTS:
- *   Gemini Tier 1 allows 15 RPM on gemini-3-flash-preview (free tier) or
- *   1000 RPM on paid Tier 1. Start conservative and increase if no 429s.
- *   Default is 60 RPM / 10 concurrent — works reliably on paid Tier 1.
+ * TIER REFERENCE (gpt-5-mini, source: platform.openai.com/docs/models/gpt-5-mini):
+ *   Tier 1:  500 RPM  /   500K TPM
+ *   Tier 2:  5,000 RPM /  2M TPM
+ *   Tier 3:  5,000 RPM /  4M TPM
+ *   Tier 4: 10,000 RPM / 10M TPM  ← current tier
+ *   Tier 5: 30,000 RPM / 180M TPM
+ *
+ * Default is 8,000 RPM (80% of Tier 4 hard limit) / 200 concurrent.
+ * The 80% buffer prevents 429s from burst variance while maximising throughput.
  */
 
 import { invokeLLM } from './openaiLLM';
@@ -50,8 +55,8 @@ interface QueuedRequest {
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
-const DEFAULT_RPM        = 60;   // conservative default — override with LLM_RPM_LIMIT
-const DEFAULT_CONCURRENT = 10;   // max parallel in-flight — override with LLM_CONCURRENCY
+const DEFAULT_RPM        = 8_000; // 80% of OpenAI Tier 4 limit (10,000 RPM for gpt-5-mini)
+const DEFAULT_CONCURRENT = 200;   // 200 parallel in-flight — tuned for Tier 4 throughput
 const MAX_ATTEMPTS       = 6;    // total attempts before giving up (1 original + 5 retries)
 const TICK_MS            = 200;  // dispatcher poll interval
 
@@ -248,21 +253,23 @@ export class LLMRequestQueue {
 // ---------------------------------------------------------------------------
 // Global singleton
 // ---------------------------------------------------------------------------
-// SAFE DEFAULTS — override in Railway env vars:
+// Defaults are tuned for OpenAI Tier 4 (gpt-5-mini).
+// Override in Railway env vars if on a different tier:
 //
-//   LLM_RPM_LIMIT=60    → 1 request/second, well within Tier 1 paid quota
-//   LLM_CONCURRENCY=10  → 10 parallel requests max
+//   Tier 1:  LLM_RPM_LIMIT=400,  LLM_CONCURRENCY=20
+//   Tier 2:  LLM_RPM_LIMIT=4000, LLM_CONCURRENCY=80
+//   Tier 3:  LLM_RPM_LIMIT=4000, LLM_CONCURRENCY=80
+//   Tier 4:  LLM_RPM_LIMIT=8000, LLM_CONCURRENCY=200  ← default
+//   Tier 5:  LLM_RPM_LIMIT=24000,LLM_CONCURRENCY=500
 //
-// Once you confirm no 429s, increase gradually:
-//   LLM_RPM_LIMIT=120, LLM_CONCURRENCY=20   → 2× speed
-//   LLM_RPM_LIMIT=300, LLM_CONCURRENCY=40   → 5× speed
-//   LLM_RPM_LIMIT=600, LLM_CONCURRENCY=60   → 10× speed (near Tier 1 ceiling)
+// For Gemini (primary provider), override with your Gemini RPM cap:
+//   gemini-3-flash-preview Tier 1: LLM_RPM_LIMIT=800, LLM_CONCURRENCY=60
 //
-// gemini-3-flash-preview Tier 1 hard limit: 1,000 RPM
-// Stay at ≤80% of the limit to avoid 429 bursts: max ~800 RPM
+// Throughput at Tier 4 defaults (8,000 RPM / 200 concurrent):
+//   1,900-firm job = ~15,200 LLM calls → completes in ~2 minutes
 // ---------------------------------------------------------------------------
-const configuredRpm         = parseInt(process.env.LLM_RPM_LIMIT    ?? '60',  10);
-const configuredConcurrency = parseInt(process.env.LLM_CONCURRENCY  ?? '10',  10);
+const configuredRpm         = parseInt(process.env.LLM_RPM_LIMIT    ?? '8000', 10);
+const configuredConcurrency = parseInt(process.env.LLM_CONCURRENCY  ?? '200',  10);
 
 export const llmQueue = new LLMRequestQueue(configuredRpm, configuredConcurrency);
 
