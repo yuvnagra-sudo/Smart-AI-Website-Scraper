@@ -82,7 +82,13 @@ async function findNextJob() {
     const job = staleJobs[0];
     console.log(`[Worker] Found stale job ${job.id} (last heartbeat: ${job.heartbeatAt})`);
     console.log(`[Worker] Resetting job ${job.id} to pending for recovery`);
-    
+
+    // CRITICAL: Clear any in-memory cancellation flag from a previous run.
+    // If the job was cancelled before (status was set to "cancelled" in DB),
+    // the in-process Set still has the job ID. Without clearing it here,
+    // every firm in the recovered job immediately throws JOB_CANCELLED.
+    clearJobCancelled(job.id);
+
     // Reset to pending so it can be picked up
     await db.update(enrichmentJobs)
       .set({ 

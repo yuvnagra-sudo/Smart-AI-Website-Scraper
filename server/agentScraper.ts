@@ -147,7 +147,6 @@ Return ONLY valid JSON:
   try {
     const response = await queuedLLMCall({
       messages: [{ role: "user", content: prompt }],
-      temperature: 0,
       response_format: {
         type: "json_schema",
         json_schema: {
@@ -257,7 +256,6 @@ Return ONLY valid JSON with these keys: ${sections.map((s) => s.key).join(", ")}
   try {
     const response = await queuedLLMCall({
       messages: [{ role: "user", content: userMsg }],
-      temperature: 0,
       response_format: {
         type: "json_schema",
         json_schema: {
@@ -589,7 +587,6 @@ Content (first 3000 chars): ${fetched.content.substring(0, 3000)}
 Return ONLY: {"isDirectory":true|false}`;
       const resp = await queuedLLMCall({
         messages: [{ role: "user", content: checkPrompt }],
-        temperature: 0,
         response_format: { type: "json_schema", json_schema: { name: "dir_check", strict: true, schema: { type: "object", properties: { isDirectory: { type: "boolean" } }, required: ["isDirectory"], additionalProperties: false } } },
       });
       const raw = resp.choices[0]?.message?.content ?? "{}";
