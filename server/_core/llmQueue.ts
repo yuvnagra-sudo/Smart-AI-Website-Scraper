@@ -83,9 +83,17 @@ export class LLMRequestQueue {
   private totalRetries   = 0;
 
   constructor(requestsPerMinute = DEFAULT_RPM, maxConcurrent = DEFAULT_CONCURRENT) {
-    this.maxConcurrent = maxConcurrent;
-    this.tokensPerMs   = requestsPerMinute / 60_000;
-    this.maxTokens     = Math.max(1, Math.floor(requestsPerMinute / 10)); // 6-second burst cap
+    // Guard against NaN/0 from bad env var parsing — fall back to safe defaults
+    const safeRpm      = (Number.isFinite(requestsPerMinute) && requestsPerMinute > 0)
+                           ? requestsPerMinute
+                           : DEFAULT_RPM;
+    const safeConcurrent = (Number.isFinite(maxConcurrent) && maxConcurrent > 0)
+                           ? maxConcurrent
+                           : DEFAULT_CONCURRENT;
+
+    this.maxConcurrent = safeConcurrent;
+    this.tokensPerMs   = safeRpm / 60_000;                         // always > 0
+    this.maxTokens     = Math.max(1, Math.floor(safeRpm / 10));    // 6-second burst cap
     this.tokens        = this.maxTokens;
 
     console.log(
@@ -133,13 +141,21 @@ export class LLMRequestQueue {
       if (readyIdx === -1) {
         // All queued requests are in backoff — wait for the soonest one
         const soonest = Math.min(...this.queue.map(r => r.retryAfter ?? now));
-        await sleep(Math.max(TICK_MS, soonest - now + 10));
+        const waitMs  = soonest - now + 10;
+        // Clamp to prevent Infinity/NaN from reaching setTimeout
+        await sleep(Math.max(TICK_MS, Math.min(30_000, Number.isFinite(waitMs) ? waitMs : TICK_MS)));
         continue;
       }
 
       if (this.tokens < 1) {
         // Token bucket empty — wait for next refill
-        const msUntilToken = Math.ceil((1 - this.tokens) / this.tokensPerMs);
+        // Guard: tokensPerMs is always > 0 after constructor validation, but
+        // clamp the result to MAX_SAFE_TIMEOUT to prevent TimeoutOverflowWarning.
+        const MAX_SAFE_TIMEOUT = 30_000; // 30 seconds max sleep
+        const msUntilToken = Math.min(
+          MAX_SAFE_TIMEOUT,
+          Math.ceil((1 - this.tokens) / this.tokensPerMs),
+        );
         await sleep(Math.max(TICK_MS, msUntilToken));
         continue;
       }
