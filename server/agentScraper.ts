@@ -205,6 +205,7 @@ async function extractProfileFields(
   sections: AgentSection[],
   systemPrompt: string,
   sourceUrl?: string,
+  pageType?: "directory" | "company" | "search",
 ): Promise<FieldResultMap> {
   // Build per-section schema properties — each field now returns value + confidence
   const props: Record<string, { type: string; properties?: object; required?: string[]; additionalProperties?: boolean; description?: string }> = {};
@@ -231,7 +232,49 @@ async function extractProfileFields(
   }
   const exampleJson = JSON.stringify(exampleObj, null, 2);
 
-  const userMsg = `${systemPrompt}
+  // Build page-type-specific extraction guidance so the LLM assigns
+  // appropriate confidence to data from each source type.
+  let pageTypeGuidance = "";
+  if (pageType === "directory") {
+    pageTypeGuidance = `
+PAGE TYPE: Business directory profile (e.g. Clutch, G2, GoodFirms, Yelp, Capterra)
+
+Directories contain HIGHLY RELIABLE structured data for operational fields:
+  - Employee count, company size tier (e.g. "10-49") → confidence 0.95
+  - Hourly rate / pricing range (e.g. "$150-$199/hr") → confidence 0.95
+  - Min project size (e.g. "$10,000+") → confidence 0.95
+  - Year founded (e.g. "Founded 2009") → confidence 0.95
+  - Headquarters / office locations → confidence 0.95
+  - Service lines and focus areas with percentages → confidence 0.90
+  - Company description / About text → confidence 0.85
+  - Clutch rating and review count → confidence 0.95
+  - Business entity name (legal name) → confidence 0.95
+
+Directories contain UNRELIABLE or ABSENT data for:
+  - Individual contact names and titles → confidence 0.2 (directories rarely list staff)
+  - Email addresses → confidence 0.1 (almost never shown)
+  - Direct phone numbers → confidence 0.3
+  - Specific technology stack details → confidence 0.3
+
+Assign HIGH confidence (0.9+) to operational fields that are explicitly shown in
+structured directory fields (not in client reviews or testimonials).
+Assign LOW confidence (0.1–0.3) to contact/personnel fields even if a name appears,
+because it is likely a reviewer or client, not an employee.`;
+  } else if (pageType === "search") {
+    pageTypeGuidance = `
+PAGE TYPE: Web search result snippets
+Data is partial and may be out of date. Assign confidence 0.4–0.6 for any field
+extracted from snippets. Only assign 0.7+ if the snippet explicitly states the value.`;
+  } else {
+    pageTypeGuidance = `
+PAGE TYPE: Company's own website
+This is the most authoritative source for contact names, team members, services
+description, and company culture. Assign confidence 0.9+ for fields explicitly
+stated here. Employee count and pricing are rarely on company websites — assign
+0.0 if not found rather than guessing.`;
+  }
+
+  const userMsg = `${systemPrompt}${pageTypeGuidance}
 
 Page content:
 ${content.substring(0, 60000)}
@@ -633,7 +676,10 @@ export async function scrapeUrl(
     availableLinks = primary.links;
 
     if (sections.length > 0) {
-      const extracted = await extractProfileFields(primary.content, sections, systemPrompt, url);
+      const extracted = await extractProfileFields(
+        primary.content, sections, systemPrompt, url,
+        isDirectoryUrl(url) ? "directory" : "company",
+      );
       fieldResults = mergeFieldResults(fieldResults, extracted);
       const filled = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD).length;
       console.log(`[agentScraper] Primary page: ${filled}/${sections.length} fields confident`);
@@ -695,12 +741,13 @@ export async function scrapeUrl(
 
       // OBSERVE
       if (isCancelled?.()) throw new Error("JOB_CANCELLED");
-      const extracted = await extractProfileFields(fetched.content, sections, systemPrompt, plan.target);
+      const fetchPageType = isDirectoryUrl(plan.target) ? "directory" : "company";
+      const extracted = await extractProfileFields(fetched.content, sections, systemPrompt, plan.target, fetchPageType);
 
       // REFLECT — merge, keeping higher-confidence values
       fieldResults = mergeFieldResults(fieldResults, extracted);
       const filled = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD).length;
-      console.log(`[agentScraper] After fetch_url: ${filled}/${sections.length} fields confident`);
+      console.log(`[agentScraper] After fetch_url (${fetchPageType}): ${filled}/${sections.length} fields confident`);
 
     } else if (plan.action === "web_search") {
       if (isCancelled?.()) throw new Error("JOB_CANCELLED");
@@ -725,13 +772,14 @@ export async function scrapeUrl(
         // Use the snippet directly as content if the page can't be fetched
         const snippetContent = searchResults.map(r => `${r.title}\n${r.snippet}`).join("\n\n");
         visitedUrls.add(topResult.url);
-        const extracted = await extractProfileFields(snippetContent, sections, systemPrompt, topResult.url);
+        const extracted = await extractProfileFields(snippetContent, sections, systemPrompt, topResult.url, "search");
         fieldResults = mergeFieldResults(fieldResults, extracted);
       } else {
         visitedUrls.add(topResult.url);
         availableLinks = [...new Set([...availableLinks, ...fetched.links])].filter(l => !visitedUrls.has(l));
         if (isCancelled?.()) throw new Error("JOB_CANCELLED");
-        const extracted = await extractProfileFields(fetched.content, sections, systemPrompt, topResult.url);
+        const searchPageType = isDirectoryUrl(topResult.url) ? "directory" : "company";
+        const extracted = await extractProfileFields(fetched.content, sections, systemPrompt, topResult.url, searchPageType);
         fieldResults = mergeFieldResults(fieldResults, extracted);
       }
 
