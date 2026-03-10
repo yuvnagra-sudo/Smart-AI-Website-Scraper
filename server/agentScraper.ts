@@ -345,29 +345,59 @@ function extractLinksFromContent(content: string, baseUrl: string): string[] {
   const links: string[] = [];
   const seen = new Set<string>();
 
+  function addLink(raw: string) {
+    // Decode Clutch (and similar directory) redirect URLs.
+    // Clutch wraps company website links as:
+    //   https://r.clutch.co/redirect?...&u=http%3A%2F%2Fwww.tbkcreative.com%2F...
+    // The real company URL is in the `u` query parameter.
+    let url = raw.replace(/[.,;)>\]]+$/, "");
+    try {
+      const parsed = new URL(url);
+      if (parsed.hostname.includes('clutch.co') || parsed.hostname.includes('r.clutch.co')) {
+        const uParam = parsed.searchParams.get('u');
+        if (uParam) {
+          // Decode the nested URL and strip UTM params
+          const decoded = new URL(decodeURIComponent(uParam));
+          decoded.searchParams.delete('utm_source');
+          decoded.searchParams.delete('utm_medium');
+          decoded.searchParams.delete('utm_campaign');
+          url = decoded.origin + decoded.pathname;
+        } else {
+          // Skip internal Clutch navigation links
+          return;
+        }
+      }
+    } catch { /* not a valid URL, skip */ return; }
+    if (!seen.has(url)) { seen.add(url); links.push(url); }
+  }
+
   // Match markdown-style links: [text](url)
   const mdPattern = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
   let m: RegExpExecArray | null;
   while ((m = mdPattern.exec(content)) !== null) {
-    const url = m[2];
-    if (!seen.has(url)) { seen.add(url); links.push(url); }
+    addLink(m[2]);
   }
 
   // Match bare URLs
   const barePattern = /https?:\/\/[^\s"'<>)\]]+/g;
   while ((m = barePattern.exec(content)) !== null) {
-    const url = m[0].replace(/[.,;)>\]]+$/, "");
-    if (!seen.has(url)) { seen.add(url); links.push(url); }
+    addLink(m[0]);
   }
 
   // Prioritize same-domain links (sub-pages of the company website)
   let baseDomain = "";
   try { baseDomain = new URL(baseUrl).hostname; } catch { /* ignore */ }
 
-  const sameDomain = links.filter(u => { try { return new URL(u).hostname === baseDomain; } catch { return false; } });
-  const otherLinks = links.filter(u => !sameDomain.includes(u));
+  // Also prioritize links that are NOT the directory domain (i.e. the company's own site)
+  const directoryDomains = ['clutch.co', 'goodfirms.co', 'g2.com', 'yelp.com', 'capterra.com', 'trustpilot.com', 'img.shgstatic.com'];
+  const isDirectoryLink = (u: string) => { try { const h = new URL(u).hostname; return directoryDomains.some(d => h.includes(d)); } catch { return true; } };
 
-  return [...sameDomain, ...otherLinks].slice(0, 50);
+  const sameDomain   = links.filter(u => { try { return new URL(u).hostname === baseDomain; } catch { return false; } });
+  const companyLinks = links.filter(u => !sameDomain.includes(u) && !isDirectoryLink(u));
+  const otherLinks   = links.filter(u => !sameDomain.includes(u) && !companyLinks.includes(u));
+
+  // Order: same-domain sub-pages → company external site → everything else
+  return [...sameDomain, ...companyLinks, ...otherLinks].slice(0, 50);
 }
 
 // ---------------------------------------------------------------------------
