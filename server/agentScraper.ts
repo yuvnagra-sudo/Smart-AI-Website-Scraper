@@ -111,38 +111,64 @@ async function planNextAction(
   const linkList = availableLinks.slice(0, 20).join("\n  ");
   const weakList = weakFields.map(s => `${s.key} (${s.label})`).join(", ");
 
-  const prompt = `You are an AI agent enriching data for a company. Your goal is to fill in all required fields with high confidence.
+  // Build a smart hint about what kind of page to look for next
+  const needsPeople = weakFields.some(s =>
+    /decision.maker|contact|ceo|founder|owner|director|manager|team|people|staff|leadership/i.test(s.key + " " + s.label)
+  );
+  const needsTechScore = weakFields.some(s =>
+    /tech|score|dev|digital|software|website/i.test(s.key + " " + s.label)
+  );
+  const needsDomain = weakFields.some(s =>
+    /domain|website|url|web/i.test(s.key + " " + s.label)
+  );
+
+  const linkHints = needsPeople
+    ? `PRIORITY LINKS for people/contacts: prefer URLs containing /about, /team, /people, /leadership, /founders, /executives, /our-team, /staff, /meet-the-team`
+    : needsTechScore
+    ? `PRIORITY LINKS for tech assessment: prefer URLs containing /services, /work, /portfolio, /case-studies, /technology, /solutions`
+    : needsDomain
+    ? `PRIORITY LINKS for company domain: prefer the company homepage or any non-directory URL`
+    : `PRIORITY LINKS: prefer pages most likely to contain the missing fields listed above`;
+
+  const hopsRemaining = maxHops - hopsUsed;
+  const urgency = hopsRemaining <= 1
+    ? `URGENT: Only ${hopsRemaining} hop(s) remaining. If no good link is available, use web_search immediately.`
+    : hopsRemaining <= 2
+    ? `${hopsRemaining} hops remaining. Be selective — only fetch a page if it is very likely to have the missing data.`
+    : ``;
+
+  const prompt = `You are an autonomous data enrichment agent. Your mission: fill in all missing fields for this company using the fewest possible page fetches.
 
 Company: ${companyName}
 Website: ${websiteUrl}
 Objective: ${objective}
 
-Current field values and confidence scores (0.0 = not found, 1.0 = certain):
+Current extraction state (confidence 0.0=not found, 1.0=certain):
 ${fieldSummary}
 
-Fields still needing data (confidence < ${CONFIDENCE_THRESHOLD}): ${weakList}
+Missing fields (need confidence ≥ ${CONFIDENCE_THRESHOLD}): ${weakList}
 
-URLs already visited (do not repeat):
+URLs already visited — DO NOT revisit these:
   ${visitedList || "(none yet)"}
 
-Available links on the last page visited:
-  ${linkList || "(none)"}
+Available links from last page:
+  ${linkList || "(none — use web_search)"}
 
-Hops used: ${hopsUsed} / ${maxHops}
+Hops used: ${hopsUsed} / ${maxHops}${urgency ? "\n" + urgency : ""}
 
-Decide the SINGLE best next action:
-- "fetch_url": fetch one of the available links that is most likely to contain the missing fields
-- "web_search": search the web for the missing data (use when website has no useful links left)
-- "done": stop if you believe no more data can be found
+${linkHints}
 
-Rules:
-- NEVER fetch a URL that is already in the visited list
-- Prefer fetch_url over web_search when good links are available
-- Use web_search when the website is thin, blocked, or has no relevant links
-- Choose "done" if all weak fields are unlikely to be found anywhere
+DECISION RULES (follow in order):
+1. If a link in the available list clearly matches the missing field type (e.g. /about or /team for contacts), choose fetch_url with that link.
+2. If no available link is relevant AND the missing fields are people/contacts, choose web_search with a targeted query like "${companyName} CEO founder team site:${websiteUrl.replace(/https?:\/\//, '').split('/')[0]}" or "${companyName} leadership team".
+3. If the company website is a one-page site, a social media profile, or completely irrelevant to the missing fields, choose web_search.
+4. Choose done ONLY if: all fields are filled, OR you have already searched the web and found nothing, OR the data genuinely does not exist publicly.
+5. NEVER fetch a URL already in the visited list.
+6. NEVER fetch social media profiles (linkedin.com/in/, twitter.com, instagram.com, facebook.com) — they are blocked.
+7. NEVER fetch image files, PDFs, or asset URLs.
 
-Return ONLY valid JSON:
-{"action":"fetch_url"|"web_search"|"done","target":"url if fetch_url else null","query":"search query if web_search else null","reason":"one sentence"}`;
+Return ONLY valid JSON (no markdown):
+{"action":"fetch_url"|"web_search"|"done","target":"full URL if fetch_url, else null","query":"search query if web_search, else null","reason":"one sentence explaining why this is the best next step"}`;
 
   try {
     const response = await queuedLLMCall({
@@ -317,20 +343,24 @@ creative roles for B2B technology partnership decisions.`;
 
   const userMsg = `${systemPrompt}${pageTypeGuidance}${dmPriorityGuidance}
 
-Page content:
+━━━ CRITICAL EXTRACTION RULES ━━━
+1. ANTI-HALLUCINATION: If a field is not found on this page, return value="" and confidence=0.0. NEVER infer, guess, fabricate, or use general knowledge to fill a field. An empty string is always correct; a wrong answer is never acceptable.
+2. SOURCE AWARENESS: Only extract data about the company being profiled (${sourceUrl ? `the company at ${sourceUrl}` : 'the target company'}). Ignore ALL of the following:
+   - Client names and logos in case studies or portfolio sections
+   - Testimonial authors and reviewer names
+   - Partner company names
+   - Award bodies and certification organisations
+   - Any person who is described as a client, customer, or external collaborator
+3. PEOPLE FIELDS: Only include people who are clearly employees, founders, or officers of the target company. If you cannot confirm someone is an employee (not a client or reviewer), return "" for that field.
+4. DOMAIN FIELDS: Return only the bare domain (e.g. "tbkcreative.com"), not the full URL with https:// or trailing paths.
+5. SPECIFICITY: Use exact text from the page. Do not paraphrase, summarise, or reformat unless the field description explicitly asks for a specific format.
+
+Page content (source: ${sourceUrl || 'unknown'}):
 ${content.substring(0, 60000)}
 
-Extract each field about THIS company only (the entity being profiled on this page).
-Ignore client testimonials, reviewer names, case study client companies, partner logos, and any third-party content.
-Be specific and concrete — use actual data from the page, not summaries.
-
 For each field, return:
-- "value": the extracted text, or "" if not found
-- "confidence": a score from 0.0 to 1.0:
-    1.0 = explicitly and clearly stated on the page
-    0.7 = strongly implied or inferable from context
-    0.4 = partially found or uncertain
-    0.0 = not found on this page
+- "value": exact extracted text, or "" if not found
+- "confidence": 0.0–1.0 (1.0=explicitly stated, 0.7=strongly implied, 0.4=uncertain, 0.0=not found)
 
 Example output format:
 ${exampleJson}

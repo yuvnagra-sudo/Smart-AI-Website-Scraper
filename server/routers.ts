@@ -255,19 +255,43 @@ export const appRouter = router({
         // Instead, call invokeLLM directly with our own retry loop.
         const { invokeLLM } = await import("./_core/openaiLLM");
 
-        const systemMsg = `You are a web data extraction architect. Parse the user's intent into a structured extraction plan.
+        const systemMsg = `You are a senior data extraction architect. Your job is to convert a user's plain-English data request into a precise, idiot-proof extraction plan that an AI agent will follow autonomously across hundreds or thousands of web pages — with NO human review in the loop.
 
-Rules for sections:
-- 3-8 sections total
-- Each section key: snake_case, max 40 chars
-- Each section label: 2-4 words, suitable as a CSV column header
-- Each section desc: 1-2 sentence research instruction
+The plan must be so specific and unambiguous that:
+1. A junior analyst reading the section descriptions would know exactly what to look for and what to exclude
+2. The AI agent never has to guess what the user meant
+3. The output columns are immediately usable in a CRM or spreadsheet without post-processing
+4. Edge cases (multiple people, missing data, ambiguous titles) are handled by explicit rules in the section descriptions
 
+━━━ RULES FOR SECTIONS ━━━
+- 3-10 sections total (use as many as needed to capture all requested data cleanly)
+- Each section key: snake_case, max 40 chars, no spaces
+- Each section label: 2-5 words, clean CSV column header (e.g. "CEO Name", "Company Website", "Tech Score")
+- Each section desc: 2-4 sentences that specify:
+    a) WHAT exactly to extract (be specific about format: full name, domain only, 0-100 score, etc.)
+    b) WHERE to look (which page types, which HTML sections)
+    c) WHAT TO EXCLUDE (common false positives: client names, testimonial authors, partner logos)
+    d) WHAT TO DO when not found (return empty string, never guess or infer)
+- If the user asks for "decision makers" or "contacts", split into separate Name and Title columns
+- If the user asks for a score or rating, define the scoring rubric explicitly in the desc
+- If the user asks for a list (e.g. "services"), specify the format (comma-separated, max N items)
+
+━━━ RULES FOR systemPrompt ━━━
+The systemPrompt is injected verbatim into every LLM extraction call. It must:
+- Open with: "You are a precise data extraction specialist. Extract the following fields for {companyName} ({websiteUrl}) from the page content provided."
+- List every field with its exact extraction rule, numbered and bolded
+- Include explicit anti-hallucination rules: "If a field is not found, return an empty string. NEVER infer, guess, or fabricate values."
+- Include source-awareness rules: "Ignore client testimonials, case study clients, partner logos, reviewer names, and any third-party content. Only extract data about the company being profiled."
+- For contact/people fields: include the decision-maker priority hierarchy relevant to the user's use case
+- For scoring fields: include the exact rubric with examples
+- End with: "Return only what is explicitly stated on the page. Empty string is always better than a wrong answer."
+
+━━━ RETURN FORMAT ━━━
 Return ONLY valid JSON (no markdown, no code fences):
 {
-  "objective": "one concise sentence describing what to find",
-  "sections": [{"key":"snake_case_key","label":"Display Name","desc":"Research instruction"}],
-  "systemPrompt": "Complete extraction prompt. Start with 'You are a [role]. Extract the following fields from the provided page content:' followed by numbered **Bold** sections with instructions. Include {companyName} and {websiteUrl} as placeholders."
+  "objective": "one precise sentence: what company data to find and why",
+  "sections": [{"key":"snake_case_key","label":"Column Header","desc":"2-4 sentence extraction instruction with what/where/exclude/fallback"}],
+  "systemPrompt": "Complete multi-paragraph extraction prompt as described above. Must be at least 300 words."
 }`;
 
         // Retry up to 4 times with exponential backoff on 429
