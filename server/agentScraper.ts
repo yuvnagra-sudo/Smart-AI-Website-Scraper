@@ -226,7 +226,7 @@ Return ONLY valid JSON (no markdown):
 // 2. OBSERVE — extract fields from page content (with confidence + source)
 // ---------------------------------------------------------------------------
 
-async function extractProfileFields(
+export async function extractProfileFields(
   content: string,
   sections: AgentSection[],
   systemPrompt: string,
@@ -341,7 +341,14 @@ IMPORTANT: A "Creative Director" or "Art Director" should NEVER be chosen over a
 or Senior Developer when those roles are available. Technical and executive roles outrank
 creative roles for B2B technology partnership decisions.`;
 
+  // Build per-field type hints to help the LLM recognize specific field formats
+  const fieldTypeHints = buildFieldTypeHints(sections);
+
   const userMsg = `${systemPrompt}${pageTypeGuidance}${dmPriorityGuidance}
+
+━━━ FIELD FORMAT HINTS ━━━
+Use these hints to recognize and correctly extract each field type:
+${fieldTypeHints}
 
 ━━━ CRITICAL EXTRACTION RULES ━━━
 1. ANTI-HALLUCINATION: If a field is not found on this page, return value="" and confidence=0.0. NEVER infer, guess, fabricate, or use general knowledge to fill a field. An empty string is always correct; a wrong answer is never acceptable.
@@ -354,6 +361,8 @@ creative roles for B2B technology partnership decisions.`;
 3. PEOPLE FIELDS: Only include people who are clearly employees, founders, or officers of the target company. If you cannot confirm someone is an employee (not a client or reviewer), return "" for that field.
 4. DOMAIN FIELDS: Return only the bare domain (e.g. "tbkcreative.com"), not the full URL with https:// or trailing paths.
 5. SPECIFICITY: Use exact text from the page. Do not paraphrase, summarise, or reformat unless the field description explicitly asks for a specific format.
+6. NUMERIC RANGES: For fields like employee count, hourly rate, or project size, preserve the exact range format shown on the page (e.g. "10 - 49", "$150 - $199 / hr", "$10,000+"). Do not convert ranges to single numbers.
+7. LOCATION FIELDS: For headquarters or location fields, include the full location as shown (city, state/province, country). Do not abbreviate or truncate.
 
 Page content (source: ${sourceUrl || 'unknown'}):
 ${content.substring(0, 60000)}
@@ -405,6 +414,79 @@ Return ONLY valid JSON with these keys: ${sections.map((s) => s.key).join(", ")}
     for (const s of sections) empty[s.key] = { value: "", confidence: 0.0, sourceUrl };
     return empty;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: Build per-field type hints based on field keys and labels
+// ---------------------------------------------------------------------------
+
+function buildFieldTypeHints(sections: AgentSection[]): string {
+  const hints: string[] = [];
+
+  for (const s of sections) {
+    const keyLower = s.key.toLowerCase();
+    const labelLower = s.label.toLowerCase();
+    const combined = keyLower + " " + labelLower;
+
+    // Employee count / company size
+    if (/employee|company.?size|team.?size|staff.?count|headcount|num.?employees/i.test(combined)) {
+      hints.push(`• ${s.key}: Look for employee count ranges like "10-49", "50-249", "250-999", "1,000-9,999" or exact numbers like "45 employees". On directories, this is often in a sidebar or structured info section labeled "Employees", "Company Size", or "Team Size". Return the range or number exactly as shown.`);
+    }
+    // Hourly rate
+    else if (/hourly.?rate|avg.?hourly|billing.?rate|rate.?per.?hour/i.test(combined)) {
+      hints.push(`• ${s.key}: Look for hourly rate ranges like "$150 - $199 / hr", "$100 - $149/hr", "$200+/hr", or "< $25/hr". On directories (Clutch, GoodFirms), this appears in a sidebar or header section. Return the exact range with currency symbol.`);
+    }
+    // Min project size
+    else if (/min.?project|project.?size|minimum.?budget|starting.?price/i.test(combined)) {
+      hints.push(`• ${s.key}: Look for minimum project budget like "$10,000+", "$25,000+", "$5,000+", "$1,000+", "Undisclosed". On directories, this is labeled "Min. Project Size" or "Minimum Budget". Return with dollar sign and plus sign as shown.`);
+    }
+    // Founded year
+    else if (/founded|year.?founded|established|year.?established|since/i.test(combined)) {
+      hints.push(`• ${s.key}: Look for founding year like "Founded 2009", "Est. 2015", "Since 2001", or just a 4-digit year in the company info section. Return ONLY the 4-digit year (e.g. "2009"), not the full phrase.`);
+    }
+    // Location / headquarters
+    else if (/headquarter|hq|location|city|office|address|based.?in/i.test(combined)) {
+      hints.push(`• ${s.key}: Look for city, state/province, and country. Examples: "Austin, TX", "Toronto, Canada", "London, United Kingdom". On directories, check the sidebar for "Headquarters" or "Location". Return the full location string.`);
+    }
+    // Domain / website
+    else if (/domain|website|web.?url|company.?url|homepage/i.test(combined)) {
+      hints.push(`• ${s.key}: Return ONLY the bare domain without protocol or path. Examples: "tbkcreative.com", "example.co.uk". Do NOT include "https://" or "www." prefix or any trailing path like "/about".`);
+    }
+    // Service lines / focus areas
+    else if (/service|focus|specialt|expertise|capability|practice/i.test(combined)) {
+      hints.push(`• ${s.key}: Look for service offerings, focus areas, or specialties. On directories, these often appear with percentage breakdowns like "Web Design (40%), SEO (30%), PPC (30%)". Include the percentages if shown. On company sites, list the main services mentioned.`);
+    }
+    // Decision maker / contact name
+    else if (/decision.?maker|contact.?name|dm\d|key.?person/i.test(combined)) {
+      hints.push(`• ${s.key}: Extract the FULL NAME (first + last) of an employee. Must be an employee/founder/officer of the target company, NOT a client, reviewer, or testimonial author. Return "" if uncertain whether the person is an employee.`);
+    }
+    // Decision maker title
+    else if (/title|role|position|job.?title|dm\d.*title/i.test(combined)) {
+      hints.push(`• ${s.key}: Extract the exact job title as shown on the page (e.g. "CEO", "Founder & Creative Director", "VP of Engineering"). Do not abbreviate or expand titles.`);
+    }
+    // Email
+    else if (/email|e-mail|contact.?email/i.test(combined)) {
+      hints.push(`• ${s.key}: Look for email addresses in contact sections, footer, or team pages. Must be a real email (user@domain.com), not a contact form URL. Return "" if no email is explicitly shown.`);
+    }
+    // Phone
+    else if (/phone|tel|telephone|call/i.test(combined)) {
+      hints.push(`• ${s.key}: Look for phone numbers in contact sections or footer. Include country code if shown. Return the number exactly as displayed.`);
+    }
+    // Rating / reviews
+    else if (/rating|review|score|stars/i.test(combined)) {
+      hints.push(`• ${s.key}: Look for numerical ratings (e.g. "4.8", "4.5/5.0") or review counts (e.g. "47 reviews"). On Clutch, look for the large rating number near the top. Return the exact number.`);
+    }
+    // Description / tagline / about
+    else if (/description|tagline|about|overview|summary|bio/i.test(combined)) {
+      hints.push(`• ${s.key}: Extract the company description or tagline. Prefer the structured "About" or "Summary" section. On directories, use the company description, not individual review text.`);
+    }
+  }
+
+  if (hints.length === 0) {
+    return "(No specific format hints — extract values exactly as they appear on the page.)";
+  }
+
+  return hints.join("\n");
 }
 
 // ---------------------------------------------------------------------------
