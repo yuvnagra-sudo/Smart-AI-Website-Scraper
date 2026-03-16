@@ -40,3 +40,24 @@ export function markJobCancelled(jobId: number): void {
 export function clearJobCancelled(jobId: number): void {
   cancelledJobs.delete(jobId);
 }
+
+// ---------------------------------------------------------------------------
+// Pause registry — separate from cancel so paused jobs can be resumed cleanly
+// ---------------------------------------------------------------------------
+
+const pausedJobs = new Set<number>();
+
+/** Returns true if the given job has been flagged for pause in this process. */
+export function isJobPaused(jobId: number): boolean {
+  return pausedJobs.has(jobId);
+}
+
+/** Mark a job as paused. Should only be called by the worker after detecting DB status = "paused". */
+export function markJobPaused(jobId: number): void {
+  pausedJobs.add(jobId);
+}
+
+/** Remove a job from the pause registry (call after the job stops or is resumed). */
+export function clearJobPaused(jobId: number): void {
+  pausedJobs.delete(jobId);
+}

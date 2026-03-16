@@ -16,6 +16,7 @@ import {
   Bot, Download, Upload, Clock, CheckCircle, XCircle, Loader2, LogOut,
   FileSpreadsheet, Table2, DollarSign, TrendingUp, Building2, Users,
   HeartPulse, ShoppingCart, Home, MapPin, Info, Sparkles, X, Plus, List, Search,
+  PauseCircle, PlayCircle,
 } from "lucide-react";
 import { useState, useRef } from "react";
 import { toast } from "sonner";
@@ -301,6 +302,16 @@ export default function Dashboard() {
     },
     onError: (error) => {
       toast.error(`Failed to cancel job: ${error.message}`);
+    },
+  });
+
+  const pauseMutation = trpc.enrichment.pauseJob.useMutation({
+    onSuccess: () => {
+      toast.success("Job paused — partial results will be available for download shortly.");
+      refetch();
+    },
+    onError: (error) => {
+      toast.error(`Failed to pause job: ${error.message}`);
     },
   });
 
@@ -1207,6 +1218,7 @@ export default function Dashboard() {
                               {job.status === "cancelled"  && <XCircle className="h-5 w-5 text-orange-500" />}
                               {job.status === "processing" && <Loader2 className="h-5 w-5 animate-spin text-blue-600" />}
                               {job.status === "pending"    && <Clock className="h-5 w-5 text-gray-600" />}
+                              {(job.status as string) === "paused" && <PauseCircle className="h-5 w-5 text-amber-500" />}
                               <span className="font-semibold capitalize">{job.status}</span>
                               {isAgentJob ? (
                                 <Badge variant="outline" className="text-xs text-violet-700">
@@ -1252,7 +1264,7 @@ export default function Dashboard() {
                             )}
                           </div>
 
-                          <div className="flex gap-2">
+                          <div className="flex gap-2 flex-wrap">
                             {job.status === "completed" && (
                               <>
                                 <Button
@@ -1266,7 +1278,7 @@ export default function Dashboard() {
                                 <DownloadResultsButton jobId={job.id} outputFileUrl={job.outputFileUrl} />
                               </>
                             )}
-                            {job.status === "failed" && (
+                            {(job.status === "failed" || job.status === "paused") && (
                               <Button
                                 size="sm"
                                 variant="outline"
@@ -1276,26 +1288,49 @@ export default function Dashboard() {
                                 {resumeMutation.isPending ? (
                                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
                                 ) : (
-                                  <Clock className="h-4 w-4 mr-2" />
+                                  <PlayCircle className="h-4 w-4 mr-2" />
                                 )}
                                 Resume
                               </Button>
                             )}
+                            {job.status === "paused" && (job as any).outputFileKey && (
+                              <DownloadResultsButton jobId={job.id} outputFileUrl={job.outputFileUrl} />
+                            )}
                             {(job.status === "processing" || job.status === "pending") && (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className="text-red-600 border-red-300 hover:bg-red-50"
-                                onClick={() => cancelMutation.mutate({ jobId: job.id })}
-                                disabled={cancelMutation.isPending}
-                              >
-                                {cancelMutation.isPending ? (
-                                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                ) : (
-                                  <XCircle className="h-4 w-4 mr-2" />
+                              <>
+                                {/* Export partial results while job is running (agent jobs only, available after 5 firms) */}
+                                {(job as any).sectionsJson && (job.processedCount ?? 0) >= 5 && (
+                                  <DownloadResultsButton jobId={job.id} outputFileUrl={null} />
                                 )}
-                                Cancel
-                              </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="text-amber-600 border-amber-300 hover:bg-amber-50"
+                                  onClick={() => pauseMutation.mutate({ jobId: job.id })}
+                                  disabled={pauseMutation.isPending}
+                                >
+                                  {pauseMutation.isPending ? (
+                                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                  ) : (
+                                    <PauseCircle className="h-4 w-4 mr-2" />
+                                  )}
+                                  Pause
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="text-red-600 border-red-300 hover:bg-red-50"
+                                  onClick={() => cancelMutation.mutate({ jobId: job.id })}
+                                  disabled={cancelMutation.isPending}
+                                >
+                                  {cancelMutation.isPending ? (
+                                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                  ) : (
+                                    <XCircle className="h-4 w-4 mr-2" />
+                                  )}
+                                  Cancel
+                                </Button>
+                              </>
                             )}
                           </div>
                         </div>

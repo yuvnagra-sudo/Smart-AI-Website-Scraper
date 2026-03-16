@@ -33,7 +33,7 @@ export async function canResumeJob(jobId: number): Promise<{
       totalCount: job.firmCount || 0,
     };
   }
-  
+
   if (job.status === "processing") {
     return {
       canResume: false,
@@ -42,6 +42,8 @@ export async function canResumeJob(jobId: number): Promise<{
       totalCount: job.firmCount || 0,
     };
   }
+
+  // "paused", "failed", and "cancelled" are all resumable (if firms remain)
   
   const processedCount = job.processedCount || 0;
   const totalCount = job.firmCount || 0;

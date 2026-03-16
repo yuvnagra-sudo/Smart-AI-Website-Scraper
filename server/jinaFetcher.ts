@@ -119,9 +119,12 @@ export async function fetchWebsiteContentHybrid(
     .then(validateJina)
     .catch(() => null);
 
-  // Puppeteer starts after 4s delay — won't launch at all for fast Jina pages
+  // Puppeteer starts after 4s delay — won't launch at all for fast Jina pages.
+  // We capture the timer ID so we can cancel it if Jina wins before the delay fires.
+  let puppeteerDelayTimer: ReturnType<typeof setTimeout> | null = null;
+
   const puppeteerPromise: Promise<JinaFetchResult | null> = new Promise<void>(
-    resolve => setTimeout(resolve, 4000)
+    resolve => { puppeteerDelayTimer = setTimeout(resolve, 4000); }
   )
     .then(() => puppeteerFallback())
     .then(content => {
@@ -143,6 +146,14 @@ export async function fetchWebsiteContentHybrid(
     jinaPromise.then(r => { if (!r) throw new Error('empty'); return r; }),
     puppeteerPromise.then(r => { if (!r) throw new Error('empty'); return r; }),
   ]).catch(() => null);
+
+  // Cancel the Puppeteer delay if it hasn't fired yet (i.e., Jina won in <4s).
+  // Without this, every Jina-won race leaves a pending 4s timer that fires
+  // puppeteerFallback() as orphaned background work — a major memory leak at scale.
+  if (puppeteerDelayTimer !== null) {
+    clearTimeout(puppeteerDelayTimer);
+    puppeteerDelayTimer = null;
+  }
 
   if (result) {
     const duration = Date.now() - startTime;

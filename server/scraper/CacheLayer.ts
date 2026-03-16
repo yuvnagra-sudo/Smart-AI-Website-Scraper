@@ -4,6 +4,8 @@
 
 import { CacheEntry } from "./types";
 
+const MAX_CACHE_ENTRIES = 500; // ~100–200 MB cap at ~200–400 KB per entry
+
 export class CacheLayer {
   private cache: Map<string, CacheEntry<any>> = new Map();
   private cleanupInterval: NodeJS.Timeout | null = null;
@@ -35,12 +37,21 @@ export class CacheLayer {
    * Set cached value
    */
   set<T>(key: string, data: T, ttl: number): void {
+    // Evict oldest entry when at capacity (simple LRU-like behaviour using
+    // Map insertion order — the first key is the oldest).
+    if (this.cache.size >= MAX_CACHE_ENTRIES && !this.cache.has(key)) {
+      const oldestKey = this.cache.keys().next().value;
+      if (oldestKey !== undefined) this.cache.delete(oldestKey);
+    }
+
     const entry: CacheEntry<T> = {
       key,
       data,
       timestamp: Date.now(),
       ttl,
     };
+    // Delete-then-set moves the key to the "newest" position in Map order.
+    this.cache.delete(key);
     this.cache.set(key, entry);
   }
 

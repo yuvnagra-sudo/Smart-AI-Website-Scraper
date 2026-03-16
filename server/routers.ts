@@ -17,7 +17,7 @@ import { generateResultsFile } from "./generateResultsService";
 import { createCSVExport } from "./csvExporter";
 import { updateJobProgressSafely, incrementJobProcessedCountSafely } from "./batchProcessor";
 import { ConnectionKeepAlive } from "./dbConnectionManager";
-import { isJobCancelled } from "./_core/jobCancellation";
+import { isJobCancelled, isJobPaused } from "./_core/jobCancellation";
 import { VCEnrichmentService } from "./vcEnrichment";
 import { getOpenAIStats } from "./_core/openaiLLM";
 import { classifyDecisionMakerTier } from './decisionMakerTiers';
@@ -443,13 +443,19 @@ Return ONLY valid JSON (no markdown, no code fences):
           });
         }
 
-        // Prepare job for resume
+        // Prepare job for resume (sets status back to "pending")
         await prepareJobForResume(input.jobId);
 
-        // Restart processing
-        processEnrichmentJob(input.jobId).catch((error) => {
-          console.error(`Error resuming job ${input.jobId}:`, error);
-        });
+        // Restart processing — agent jobs use processAgentJob, VC jobs use processEnrichmentJob
+        if (job.sectionsJson) {
+          processAgentJob(input.jobId).catch((error) => {
+            console.error(`Error resuming agent job ${input.jobId}:`, error);
+          });
+        } else {
+          processEnrichmentJob(input.jobId).catch((error) => {
+            console.error(`Error resuming job ${input.jobId}:`, error);
+          });
+        }
 
         const progress = await getResumeProgress(input.jobId);
         return {
@@ -483,6 +489,27 @@ Return ONLY valid JSON (no markdown, no code fences):
         return { message: "Job cancellation requested — worker will stop within 5 seconds" };
       }),
 
+    pauseJob: protectedProcedure
+      .input(z.object({ jobId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        const job = await getEnrichmentJob(input.jobId);
+        if (!job || job.userId !== ctx.user.id) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
+        }
+        if (job.status !== "processing" && job.status !== "pending") {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: `Cannot pause a job with status "${job.status}"`,
+          });
+        }
+        // Write paused status to DB. The worker's cancellation poller (every 5s)
+        // will detect this and call markJobPaused(jobId), which causes
+        // processAgentJob to break cleanly and save partial results to S3.
+        await updateEnrichmentJob(input.jobId, { status: "paused" });
+        console.log(`[pauseJob] Job ${input.jobId} marked as paused in DB`);
+        return { message: "Job pause requested — worker will stop within 5 seconds" };
+      }),
+
     // Generate results file on-demand
     generateResults: protectedProcedure
       .input(z.object({ 
@@ -498,18 +525,30 @@ Return ONLY valid JSON (no markdown, no code fences):
           });
         }
 
-        // Agent jobs (AI Custom extraction): results are stored in S3, not in enrichedFirms
-        if (job.sectionsJson && job.outputFileKey) {
+        // Agent jobs (AI Custom extraction): results are stored in S3, not in enrichedFirms.
+        // Works for completed, paused, and in-progress jobs (partial file saved every 5 firms).
+        if (job.sectionsJson) {
+          if (!job.outputFileKey) {
+            throw new TRPCError({
+              code: "BAD_REQUEST",
+              message: job.status === "processing"
+                ? "Results not available yet — check back after 5 firms have been processed"
+                : "No results file available for this job",
+            });
+          }
           const { url } = await storageGet(job.outputFileKey);
           const response = await fetch(url);
           if (!response.ok) {
             throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Results file not available in storage" });
           }
           const buffer = Buffer.from(await response.arrayBuffer());
+          const isPartial = job.status !== "completed";
           return {
             success: true,
             fileData: buffer.toString("base64"),
-            fileName: `agent-results-${input.jobId}.xlsx`,
+            fileName: isPartial
+              ? `agent-results-${input.jobId}-partial.xlsx`
+              : `agent-results-${input.jobId}.xlsx`,
             firmCount: job.processedCount ?? 0,
             teamMemberCount: 0,
           };
@@ -991,7 +1030,14 @@ export async function processAgentJob(jobId: number) {
     const profileResults: Array<Record<string, string>> = [];
     const fieldResultsMapArr: Array<{ companyName: string; websiteUrl: string; fieldResults: import("./agentScraper").FieldResultMap }> = [];
     const collectedUrls: AgentDirectoryEntry[] = [];
-    let processed = 0;
+
+    // Resume support: skip firms already processed in a prior run (paused/failed).
+    // processedCount is incremented after every firm so it's a reliable checkpoint.
+    const resumeFrom = job.processedCount ?? 0;
+    let processed = resumeFrom;
+    if (resumeFrom > 0) {
+      console.log(`[processAgentJob] Resuming from firm ${resumeFrom + 1} (${firms.length - resumeFrom} remaining)`);
+    }
 
     // Hard cap: never process more firms than the original input file contained.
     // Directory expansion is disabled for profile-enrichment jobs — it was the
@@ -1006,12 +1052,27 @@ export async function processAgentJob(jobId: number) {
     // At 300 RPM: floor(300 / 7 / 2) = 21
     const RPM = parseInt(process.env.LLM_RPM_LIMIT ?? '800', 10);
     const CONCURRENCY = Math.min(50, Math.max(5, Math.floor(RPM / 7 / 2)));
-    const firmQueue = [...firms];
+    const firmQueue = [...firms.slice(resumeFrom)];
 
     keepAlive.start();
 
+    const savePartialResults = async () => {
+      try {
+        const partialBuffer = createAgentOutputExcel(sections, profileResults, collectedUrls, fieldResultsMapArr);
+        const partialKey = `enrichment/${job.userId}/${jobId}-results.xlsx`;
+        const { url: partialUrl } = await storagePut(partialKey, partialBuffer, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        await updateEnrichmentJob(jobId, { outputFileKey: partialKey, outputFileUrl: partialUrl });
+      } catch (err) {
+        console.warn(`[processAgentJob] Partial save failed (non-fatal):`, err);
+      }
+    };
+
     const runWorker = async () => {
       while (firmQueue.length > 0) {
+        // Check pause at the top of every iteration — stops cleanly without adding
+        // empty rows for unprocessed firms (unlike cancel, which uses scrapeUrl's check).
+        if (isJobPaused(jobId)) break;
+
         const firm = firmQueue.shift();
         if (!firm) break;
 
@@ -1093,6 +1154,10 @@ export async function processAgentJob(jobId: number) {
         processed++;
         await incrementJobProcessedCountSafely(jobId);
 
+        // Save partial Excel to S3 every 5 firms so users can export while the job runs.
+        // Fire-and-forget — failure is non-fatal; the final save at job end is authoritative.
+        if (processed % 5 === 0) savePartialResults().catch(() => {});
+
         // Update live cost in DB every 25 firms so dashboard shows running spend
         const currentStats = getOpenAIStats();
         const liveCost = Math.round((currentStats.totalCost - costBaseline) * 10000) / 10000;
@@ -1119,6 +1184,14 @@ export async function processAgentJob(jobId: number) {
     await Promise.allSettled(
       Array.from({ length: Math.min(CONCURRENCY, firms.length) }, runWorker),
     );
+
+    // If the job was paused, save partial results and exit without marking as completed.
+    // Status is already "paused" in DB (set by the pauseJob mutation).
+    if (isJobPaused(jobId)) {
+      console.log(`[processAgentJob] ⏸️ Job ${jobId} paused after ${profileResults.length} profiles. Saving partial results...`);
+      await savePartialResults();
+      return;
+    }
 
     // Generate output Excel and upload to S3
     const excelBuffer = createAgentOutputExcel(sections, profileResults, collectedUrls, fieldResultsMapArr);

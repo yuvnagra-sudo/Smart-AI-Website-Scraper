@@ -15,7 +15,7 @@ import mysql from 'mysql2/promise';
 import { enrichmentJobs } from '../drizzle/schema';
 import { eq, and, or, lt, isNull } from 'drizzle-orm';
 import { processEnrichmentJob, processAgentJob } from './routers';
-import { markJobCancelled, clearJobCancelled } from './_core/jobCancellation';
+import { markJobCancelled, clearJobCancelled, markJobPaused, clearJobPaused } from './_core/jobCancellation';
 
 const POLL_INTERVAL = 5000; // Check for new jobs every 5 seconds
 const HEARTBEAT_INTERVAL = 30000; // Send heartbeat every 30 seconds
@@ -207,6 +207,11 @@ function startCancellationPoller(jobId: number) {
         markJobCancelled(jobId);
         clearInterval(cancellationTimer!);
         cancellationTimer = null;
+      } else if (rows[0]?.status === 'paused') {
+        console.log(`[Worker] Detected pause for job ${jobId} — flagging in-process`);
+        markJobPaused(jobId);
+        clearInterval(cancellationTimer!);
+        cancellationTimer = null;
       }
     } catch (err) {
       // Non-fatal: next tick will retry
@@ -270,10 +275,11 @@ async function processJob(job: any) {
         .where(eq(enrichmentJobs.id, job.id));
     }
   } finally {
-    // Stop heartbeat and cancellation poller, clean up in-memory flag
+    // Stop heartbeat and cancellation poller, clean up in-memory flags
     stopHeartbeat();
     stopCancellationPoller();
     clearJobCancelled(job.id);
+    clearJobPaused(job.id);
     currentJobId = null;
   }
 }
