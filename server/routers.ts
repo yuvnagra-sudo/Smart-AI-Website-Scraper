@@ -1053,12 +1053,13 @@ export async function processAgentJob(jobId: number) {
     const RPM = parseInt(process.env.LLM_RPM_LIMIT ?? '800', 10);
     const CONCURRENCY = Math.min(50, Math.max(5, Math.floor(RPM / 7 / 2)));
     const firmQueue = [...firms.slice(resumeFrom)];
+    const originalColumns = firms[0] ? Object.keys(firms[0].originalRow) : [];
 
     keepAlive.start();
 
     const savePartialResults = async () => {
       try {
-        const partialBuffer = createAgentOutputExcel(sections, profileResults, collectedUrls, fieldResultsMapArr);
+        const partialBuffer = createAgentOutputExcel(sections, profileResults, collectedUrls, fieldResultsMapArr, originalColumns);
         const partialKey = `enrichment/${job.userId}/${jobId}-results.xlsx`;
         const { url: partialUrl } = await storagePut(partialKey, partialBuffer, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
         await updateEnrichmentJob(jobId, { outputFileKey: partialKey, outputFileUrl: partialUrl });
@@ -1106,9 +1107,8 @@ export async function processAgentJob(jobId: number) {
             insertJobLog({ jobId, url: firm.websiteUrl, companyName: firm.companyName, status: "failed", fieldsTotal: 0, fieldsFilled: 0, durationMs: Date.now() - startMs }).catch(() => {});
           } else {
             profileResults.push({
-              "Company Name": firm.companyName,
-              "Website": firm.websiteUrl,
               ...result.data,
+              ...firm.originalRow,
             });
             // Collect fieldResults for the Sources sheet
             if (result.fieldResults) {
@@ -1143,12 +1143,9 @@ export async function processAgentJob(jobId: number) {
             durationMs: Date.now() - startMs,
           }).catch(() => {});
           // Add empty row on error so we don't lose the firm from the output
-          const emptyRow: Record<string, string> = {
-            "Company Name": firm.companyName,
-            "Website": firm.websiteUrl,
-          };
+          const emptyRow: Record<string, string> = {};
           for (const s of sections) emptyRow[s.key] = "";
-          profileResults.push(emptyRow);
+          profileResults.push({ ...emptyRow, ...firm.originalRow });
         }
 
         processed++;
@@ -1194,7 +1191,7 @@ export async function processAgentJob(jobId: number) {
     }
 
     // Generate output Excel and upload to S3
-    const excelBuffer = createAgentOutputExcel(sections, profileResults, collectedUrls, fieldResultsMapArr);
+    const excelBuffer = createAgentOutputExcel(sections, profileResults, collectedUrls, fieldResultsMapArr, originalColumns);
     const outputKey = `enrichment/${job.userId}/${jobId}-results.xlsx`;
     const { url: outputUrl } = await storagePut(
       outputKey,

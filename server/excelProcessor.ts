@@ -6,6 +6,7 @@ export interface VCFirmInput {
   companyName: string;
   websiteUrl: string;
   description: string;
+  originalRow: Record<string, string>; // all raw columns from the input file
 }
 
 export interface ColumnMapping {
@@ -291,10 +292,15 @@ export async function parseInputExcel(fileUrl: string, columnMapping?: ColumnMap
     // Company name is optional — fall back to URL as identifier
     if (!companyName) companyName = websiteUrl;
 
+    // Capture all original columns as strings for pass-through to output
+    const originalRow: Record<string, string> = {};
+    for (const col of availableColumns) originalRow[col] = String(row[col] ?? "");
+
     firms.push({
       companyName,
       websiteUrl,
       description: description || '',
+      originalRow,
     });
   }
 
@@ -421,18 +427,27 @@ export function createAgentOutputExcel(
   profileResults: Array<Record<string, string>>,
   collectedUrls: DirectoryEntry[],
   fieldResultsMap?: Array<{ companyName: string; websiteUrl: string; fieldResults: FieldResultMap }>,
+  originalColumns?: string[],
 ): Buffer {
   const workbook = XLSX.utils.book_new();
+
+  // Section label set — used to avoid duplicating columns that appear in both
+  // the scraped output and the original input (scraped value takes precedence).
+  const sectionLabels = new Set(sections.map(s => s.label));
 
   // Sheet 1: Results (profile extractions — clean data only)
   if (profileResults.length > 0) {
     const rows = profileResults.map((r) => {
-      const row: Record<string, string> = {
-        "Company Name": r["Company Name"] ?? "",
-        "Website": r["Website"] ?? "",
-      };
+      const row: Record<string, string> = {};
+      // Scraped section fields first (new enriched data — left columns, like Anymail Finder)
       for (const s of sections) {
         row[s.label] = r[s.key] ?? "";
+      }
+      // Original input columns after — preserves every column from the source file
+      if (originalColumns) {
+        for (const col of originalColumns) {
+          if (!sectionLabels.has(col)) row[col] = r[col] ?? "";
+        }
       }
       return row;
     });
