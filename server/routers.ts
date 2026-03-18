@@ -1171,7 +1171,7 @@ export async function processAgentJob(jobId: number) {
 
         // Cost safety cap: if actual spend exceeds 3x the original estimate, stop the job
         // to prevent runaway costs. User can re-run with a higher budget if needed.
-        const estimatedCost = typeof job.totalCost === 'string' ? parseFloat(job.totalCost) : (job.totalCost ?? 0);
+        const estimatedCost = typeof job.estimatedCostUSD === 'string' ? parseFloat(job.estimatedCostUSD) : (job.estimatedCostUSD ?? 0);
         const costCap = Math.max(estimatedCost * 3, 10); // at least $10 cap
         if (liveCost > costCap) {
           console.warn(`[processAgentJob] 🛑 Cost cap hit: $${liveCost.toFixed(2)} > $${costCap.toFixed(2)} cap. Stopping job to prevent runaway spend.`);
