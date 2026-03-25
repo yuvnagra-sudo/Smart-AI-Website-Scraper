@@ -1743,60 +1743,62 @@ If you cannot determine the investment stages, return: {"stages": []}`;
       }
     }
 
-    // Step 5c: Apollo people-discovery fallback — when website scraping found < 2 Tier 1/2 contacts
-    const tier12Count = result.teamMembers.filter(
-      (m) => m.decisionMakerTier === "Tier 1" || m.decisionMakerTier === "Tier 2",
-    ).length;
+    // Step 5c: Apollo people-discovery — always runs when APOLLO_API_KEY is set.
+    // Website scraping already happened so we have rich context (specializations,
+    // LinkedIn URLs from the site) but Apollo fills gaps and catches people who
+    // aren't listed on the company website. Deduplication prevents double-counting.
+    try {
+      const domain = new URL(websiteUrl).hostname;
+      const apolloPeople = await apolloSearchPeople(domain);
 
-    if (tier12Count < 2) {
-      onProgress?.(`Few decision makers found on website (${tier12Count}), trying Apollo...`);
-      console.log(`[enrichVCFirm] 🔍 Apollo fallback: only ${tier12Count} Tier 1/2 from website`);
+      if (apolloPeople.length > 0) {
+        console.log(`[enrichVCFirm] Apollo returned ${apolloPeople.length} people`);
+        let apolloAdded = 0;
 
-      try {
-        const domain = new URL(websiteUrl).hostname;
-        const apolloPeople = await apolloSearchPeople(domain);
+        for (const person of apolloPeople) {
+          const tier = classifyDecisionMakerTier(person.title);
+          if (tier.tier === "Exclude") continue;
 
-        if (apolloPeople.length > 0) {
-          console.log(`[enrichVCFirm] Apollo returned ${apolloPeople.length} people`);
-          let apolloAdded = 0;
-
-          for (const person of apolloPeople) {
-            const tier = classifyDecisionMakerTier(person.title);
-            if (tier.tier === "Exclude") continue;
-
-            // Deduplicate against existing members
-            const existing = findPersonByName(result.teamMembers, person.name);
-            if (existing) continue;
-
-            result.teamMembers.push({
-              name: person.name,
-              title: person.title,
-              jobFunction: "",
-              specialization: "",
-              linkedinUrl: person.linkedinUrl,
-              email: "",
-              decisionMakerTier: tier.tier,
-              portfolioCompanies: "",
-              investmentFocus: "",
-              stagePreference: "",
-              checkSizeRange: "",
-              geographicFocus: "",
-              investmentThesis: "",
-              notableInvestments: "",
-              yearsExperience: "",
-              background: "",
-              dataSourceUrl: "apollo.io",
-              confidenceScore: "Medium",
-            });
-            apolloAdded++;
+          // Deduplicate against existing members
+          const existing = findPersonByName(result.teamMembers, person.name);
+          if (existing) {
+            // Backfill LinkedIn URL if website scraping didn't find one
+            if (!existing.linkedinUrl && person.linkedinUrl) {
+              existing.linkedinUrl = person.linkedinUrl;
+            }
+            continue;
           }
 
+          result.teamMembers.push({
+            name: person.name,
+            title: person.title,
+            jobFunction: "",
+            specialization: "",
+            linkedinUrl: person.linkedinUrl,
+            email: "",
+            decisionMakerTier: tier.tier,
+            portfolioCompanies: "",
+            investmentFocus: "",
+            stagePreference: "",
+            checkSizeRange: "",
+            geographicFocus: "",
+            investmentThesis: "",
+            notableInvestments: "",
+            yearsExperience: "",
+            background: "",
+            dataSourceUrl: "apollo.io",
+            confidenceScore: "Medium",
+          });
+          apolloAdded++;
+        }
+
+        if (apolloAdded > 0) {
           onProgress?.(`Apollo added ${apolloAdded} new contacts`);
           console.log(`[enrichVCFirm] Apollo added ${apolloAdded} new contacts`);
         }
-      } catch (apolloErr) {
-        console.warn("[enrichVCFirm] Apollo fallback error:", apolloErr);
       }
+    } catch (apolloErr) {
+      console.warn("[enrichVCFirm] Apollo error:", apolloErr);
     }
 
     // Step 5d: Agent contact selection — pick 2-3 most relevant people for email enrichment
