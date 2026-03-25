@@ -852,6 +852,34 @@ export async function scrapeUrl(
         console.log(`[agentScraper] 📌 Directory-exit: injected company website at top of queue: ${companyWebsite}`);
       }
     }
+
+    // ── PEOPLE BOOST: inject common team page paths when people fields are weak ──
+    // After the primary page, if sections need people/contact data and none was
+    // found, proactively add standard team page URLs so the planner sees them first.
+    const needsPeopleData = sections.some(s =>
+      /decision.maker|contact|ceo|founder|owner|director|manager|team|people|staff|leadership/i.test(
+        s.key + " " + s.label,
+      ),
+    );
+    if (needsPeopleData) {
+      const peopleConfident = sections
+        .filter(s => /decision.maker|contact|ceo|founder|owner|director|manager|team|people|staff|leadership/i.test(s.key + " " + s.label))
+        .every(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD);
+
+      if (!peopleConfident) {
+        try {
+          const origin = new URL(url).origin;
+          const teamPaths = ["/team", "/about/team", "/our-team", "/people", "/leadership", "/executives", "/management", "/meet-the-team", "/about"];
+          const teamCandidates = teamPaths
+            .map(p => origin + p)
+            .filter(u => !visitedUrls.has(u) && !availableLinks.includes(u));
+          if (teamCandidates.length > 0) {
+            availableLinks = [...teamCandidates, ...availableLinks];
+            console.log(`[agentScraper] 👥 People boost: injected ${teamCandidates.length} team page candidates`);
+          }
+        } catch { /* ignore URL parse error */ }
+      }
+    }
   }
 
   // ── AGENT LOOP ─────────────────────────────────────────────────────────────

@@ -14,6 +14,61 @@ export interface TeamUrlVariant {
 }
 
 /**
+ * General B2B team page paths to try before calling the LLM variant detector.
+ * These are checked by vcEnrichment.ts when no multi-page result is available.
+ */
+export const GENERAL_TEAM_PATHS = [
+  "/team",
+  "/our-team",
+  "/meet-the-team",
+  "/about/team",
+  "/people",
+  "/leadership",
+  "/executives",
+  "/management",
+  "/staff",
+  "/about-us/team",
+  "/company/team",
+  "/about",
+];
+
+/**
+ * Scan nav and footer links in HTML for people-related pages.
+ * Returns absolute URLs for links that contain people keywords.
+ *
+ * @param html    - Raw HTML of the homepage or any page
+ * @param baseUrl - Base URL for resolving relative links
+ */
+export function scanNavForTeamLinks(html: string, baseUrl: string): string[] {
+  const PEOPLE_KEYWORDS = /\b(team|leadership|people|about|management|staff|executives|founders|our\s*team|meet\s*the|who\s*we\s*are)\b/i;
+  const $ = cheerio.load(html);
+  const results: string[] = [];
+
+  let base: URL;
+  try { base = new URL(baseUrl); } catch { return []; }
+
+  $("nav a, footer a, header a, [role='navigation'] a").each((_, el) => {
+    const href = $(el).attr("href");
+    const text = $(el).text().trim();
+
+    if (!href || !PEOPLE_KEYWORDS.test(href + " " + text)) return;
+
+    try {
+      const resolved = new URL(href, base).href;
+      // Skip external links, social media, and already-added URLs
+      if (!resolved.startsWith(base.origin)) return;
+      if (!results.includes(resolved)) results.push(resolved);
+    } catch { /* ignore malformed URLs */ }
+  });
+
+  if (results.length > 0) {
+    console.log(`[TeamUrlDetector] Nav/footer scan found ${results.length} people links`);
+  }
+
+  return results;
+}
+
+/**
  * Detect region/stage-specific team URLs from HTML
  * Examples:
  * - Accel: /team#global, /team#bay-area, /team#london, /team#bangalore
@@ -24,6 +79,18 @@ export async function detectTeamUrlVariants(
   baseUrl: string,
   companyName: string
 ): Promise<TeamUrlVariant[]> {
+  // Fast path: scan nav/footer for people links before calling LLM
+  const navLinks = scanNavForTeamLinks(html, baseUrl);
+  const navVariants: TeamUrlVariant[] = navLinks.map(url => ({
+    url,
+    category: "other" as const,
+    label: new URL(url).pathname.replace(/^\//, "").replace(/-/g, " ") || "team",
+  }));
+
+  if (navVariants.length > 0) {
+    console.log(`[TeamUrlDetector] Returning ${navVariants.length} nav-found variants (skipping LLM)`);
+    return navVariants;
+  }
   console.log(`[TeamUrlDetector] Analyzing team page for ${companyName}`);
   
   // Try Jina Reader first for clean, structured markdown

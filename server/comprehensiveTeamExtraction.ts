@@ -15,6 +15,161 @@ interface TeamMemberRaw {
   specialization: string;
 }
 
+// ---------------------------------------------------------------------------
+// Pre-LLM structured extraction helpers
+// ---------------------------------------------------------------------------
+
+const TITLE_KEYWORDS = /\b(ceo|cto|cfo|coo|cmo|cpo|ciso|founder|partner|president|director|head|manager|lead|analyst|associate|vp|vice president|officer|principal)\b/i;
+
+/**
+ * Extract people from JSON-LD structured data (<script type="application/ld+json">).
+ * Looks for @type "Person" and Organization.employee arrays.
+ * Returns results at confidence 0.95 — no LLM needed for these.
+ */
+function extractPeopleFromStructuredData(html: string): TeamMemberRaw[] {
+  const results: TeamMemberRaw[] = [];
+  const $ = cheerio.load(html);
+
+  $('script[type="application/ld+json"]').each((_, el) => {
+    try {
+      const raw = $(el).html() ?? "";
+      const data = JSON.parse(raw) as Record<string, unknown>;
+      const items: unknown[] = Array.isArray(data) ? data : [data];
+
+      for (const item of items) {
+        if (!item || typeof item !== "object") continue;
+        const obj = item as Record<string, unknown>;
+
+        // Direct @type: Person
+        if (obj["@type"] === "Person") {
+          const name = (obj.name as string | undefined)?.trim();
+          const title = (obj.jobTitle as string | undefined)?.trim() ?? "";
+          if (name && name.length > 1) {
+            results.push({ name, title, job_function: "", specialization: "" });
+          }
+        }
+
+        // Organization.employee[]
+        const employees = obj.employee ?? obj.member ?? obj.founders;
+        const list = Array.isArray(employees) ? employees : employees ? [employees] : [];
+        for (const emp of list) {
+          if (!emp || typeof emp !== "object") continue;
+          const e = emp as Record<string, unknown>;
+          if (e["@type"] !== "Person" && e["@type"] !== "OrganizationRole") continue;
+          const name = (e.name as string | undefined)?.trim();
+          const title = (e.jobTitle as string | undefined)?.trim() ?? "";
+          if (name && name.length > 1) {
+            results.push({ name, title, job_function: "", specialization: "" });
+          }
+        }
+      }
+    } catch {
+      // Malformed JSON-LD — skip
+    }
+  });
+
+  // Also check microdata [itemtype*="schema.org/Person"]
+  $("[itemtype*='schema.org/Person']").each((_, el) => {
+    const name = $(el).find("[itemprop='name']").first().text().trim();
+    const title = $(el).find("[itemprop='jobTitle']").first().text().trim();
+    if (name && name.length > 1) {
+      results.push({ name, title, job_function: "", specialization: "" });
+    }
+  });
+
+  if (results.length > 0) {
+    console.log(`[structuredData] Extracted ${results.length} people from JSON-LD/microdata`);
+  }
+
+  return results;
+}
+
+/**
+ * Extract people from common CSS patterns used by team/staff pages.
+ * Tries well-known card selectors first, then falls back to a heading-pair heuristic.
+ * Returns results at confidence 0.85 (cards) / 0.75 (heading-pair).
+ */
+function extractPeopleFromCSSPatterns(html: string): TeamMemberRaw[] {
+  const results: TeamMemberRaw[] = [];
+  const $ = cheerio.load(html);
+
+  const CARD_SELECTORS = [
+    ".team-member", ".team-card", ".staff-member", ".person-card",
+    "[class*='team-member']", "[class*='team-card']", "[class*='TeamMember']",
+    "[data-team-member]", "[data-person]",
+  ];
+
+  const NAME_SELECTORS = ["h2", "h3", "h4", ".name", ".person-name", ".member-name", "[class*='name']"];
+  const TITLE_SELECTORS = [".title", ".role", ".position", ".job-title", "[class*='title']", "[class*='role']", "[class*='position']"];
+
+  let cardHits = 0;
+  for (const selector of CARD_SELECTORS) {
+    $(selector).each((_, card) => {
+      let name = "";
+      let title = "";
+
+      for (const ns of NAME_SELECTORS) {
+        const text = $(card).find(ns).first().text().trim();
+        if (text && text.length > 1 && text.length < 80 && /^[A-Z]/.test(text)) {
+          name = text;
+          break;
+        }
+      }
+
+      for (const ts of TITLE_SELECTORS) {
+        const text = $(card).find(ts).first().text().trim();
+        if (text && text.length > 1 && text.length < 120) {
+          title = text;
+          break;
+        }
+      }
+
+      if (name) {
+        results.push({ name, title, job_function: "", specialization: "" });
+        cardHits++;
+      }
+    });
+    if (cardHits > 0) break; // First matching selector wins
+  }
+
+  if (cardHits === 0) {
+    // Fallback: heading-pair heuristic — h3/h4 proper-case text followed by sibling p with title keywords
+    $("h3, h4").each((_, heading) => {
+      const nameText = $(heading).text().trim();
+      if (!nameText || nameText.length < 3 || nameText.length > 60) return;
+      if (!/^[A-Z][a-z]/.test(nameText)) return; // Must look like a proper name
+
+      const sibling = $(heading).next("p, .title, .role, .position, span").first();
+      const titleText = sibling.text().trim();
+
+      if (titleText && TITLE_KEYWORDS.test(titleText)) {
+        results.push({ name: nameText, title: titleText, job_function: "", specialization: "" });
+      }
+    });
+  }
+
+  if (results.length > 0) {
+    console.log(`[cssPatterns] Extracted ${results.length} people from CSS patterns`);
+  }
+
+  return results;
+}
+
+/**
+ * Deduplicate a list of TeamMemberRaw by normalized name.
+ */
+function deduplicateByName(members: TeamMemberRaw[]): TeamMemberRaw[] {
+  const seen = new Set<string>();
+  return members.filter((m) => {
+    const key = m.name.toLowerCase().replace(/\s+/g, " ").trim();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+// ---------------------------------------------------------------------------
+
 /**
  * Extract team members from HTML with chunking for large pages
  */
@@ -27,6 +182,19 @@ export async function extractTeamMembersComprehensive(
   const resolvedProfile = profile ?? VC_PROFILE;
   console.log(`[comprehensiveTeamExtraction] Starting extraction for ${companyName}`);
   console.log(`[comprehensiveTeamExtraction] HTML length: ${html.length} chars`);
+
+  // --- Pre-LLM pass 1: JSON-LD / microdata structured data ---
+  const structuredPeople = extractPeopleFromStructuredData(html);
+
+  // --- Pre-LLM pass 2: CSS card / heading-pair patterns ---
+  const cssPeople = extractPeopleFromCSSPatterns(html);
+
+  // Combine pre-LLM results (deduplicated)
+  const preLLMPeople = deduplicateByName([...structuredPeople, ...cssPeople]);
+  if (preLLMPeople.length > 0) {
+    onProgress?.(`Found ${preLLMPeople.length} people from structured data / CSS patterns`);
+    console.log(`[comprehensiveTeamExtraction] Pre-LLM found ${preLLMPeople.length} people`);
+  }
 
   const $ = cheerio.load(html);
 
@@ -41,9 +209,11 @@ export async function extractTeamMembersComprehensive(
   if (fullText.length <= 15000) {
     console.log(`[comprehensiveTeamExtraction] Small page, single pass`);
     onProgress?.(`Extracting ${resolvedProfile.peopleLabel} (single pass)...`);
-    const members = await extractTeamMembersFromText(fullText, companyName, resolvedProfile);
-    console.log(`[comprehensiveTeamExtraction] Extracted ${members.length} members in single pass`);
-    return members;
+    const llmMembers = await extractTeamMembersFromText(fullText, companyName, resolvedProfile);
+    console.log(`[comprehensiveTeamExtraction] Extracted ${llmMembers.length} members in single pass`);
+    const merged = deduplicateByName([...preLLMPeople, ...llmMembers]);
+    console.log(`[comprehensiveTeamExtraction] Merged total: ${merged.length} members`);
+    return merged;
   }
 
   // For large pages, use chunking strategy
@@ -51,7 +221,7 @@ export async function extractTeamMembersComprehensive(
   console.log(`[comprehensiveTeamExtraction] Large page, using ${numChunks} chunks`);
   onProgress?.(`Extracting ${resolvedProfile.peopleLabel} (large page: ${numChunks} chunks)...`);
 
-  const allMembers: TeamMemberRaw[] = [];
+  const allMembers: TeamMemberRaw[] = [...preLLMPeople];
   const CHUNK_SIZE = 15000;
   const OVERLAP = 500; // Overlap to avoid cutting names in half
 
@@ -61,21 +231,21 @@ export async function extractTeamMembersComprehensive(
     if (chunk.trim().length < 100) continue; // Skip tiny chunks
 
     const chunkMembers = await extractTeamMembersFromText(chunk, companyName, resolvedProfile);
-    
+
     // Deduplicate by name (case-insensitive)
     for (const member of chunkMembers) {
       const exists = allMembers.find(
         m => m.name.toLowerCase() === member.name.toLowerCase()
       );
-      
+
       if (!exists) {
         allMembers.push(member);
       }
     }
-    
+
     onProgress?.(`Found ${allMembers.length} team members so far...`);
   }
-  
+
   console.log(`[comprehensiveTeamExtraction] Total extracted: ${allMembers.length} members`);
   return allMembers;
 }
