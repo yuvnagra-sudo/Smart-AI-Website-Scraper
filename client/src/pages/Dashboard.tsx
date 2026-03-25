@@ -10,13 +10,17 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/
 import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogTitle, AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { trpc } from "@/lib/trpc";
 import { getLoginUrl } from "@/const";
 import {
   Bot, Download, Upload, Clock, CheckCircle, XCircle, Loader2, LogOut,
   FileSpreadsheet, Table2, DollarSign, TrendingUp, Building2, Users,
   HeartPulse, ShoppingCart, Home, MapPin, Info, Sparkles, X, Plus, List, Search,
-  PauseCircle, PlayCircle,
+  PauseCircle, PlayCircle, ChevronDown, ChevronUp, AlertCircle,
 } from "lucide-react";
 import { useState, useRef } from "react";
 import { toast } from "sonner";
@@ -178,6 +182,10 @@ export default function Dashboard() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   // Track whether the current uploadMutation call is a manual re-submit with explicit mapping
   const isManualMappingRef = useRef(false);
+
+  // Job list UI state
+  const [expandedJobIds, setExpandedJobIds] = useState<Set<number>>(new Set());
+  const [visibleJobCount, setVisibleJobCount] = useState(10);
 
   // Upload mode: file upload, paste URLs, or crawl a directory
   const [uploadMode, setUploadMode] = useState<"file" | "paste" | "crawl">("file");
@@ -652,6 +660,50 @@ export default function Dashboard() {
           <span>Works best on public websites. Social media profiles and login-protected pages have limited support.</span>
         </div>
 
+        {/* ── Wizard Progress Bar ── */}
+        {(showColumnMapping || wizardStep !== "idle") && (
+          <div className="flex items-center mb-6 px-1">
+            {[
+              { label: "Upload", step: 1 },
+              { label: "Configure", step: 2 },
+              { label: "Review & Start", step: 3 },
+            ].map(({ label, step }, i) => {
+              const current = showColumnMapping ? 1 : wizardStep === "configure" ? 2 : 3;
+              const done = step < current;
+              const active = step === current;
+              return (
+                <div key={step} className="flex items-center flex-1 last:flex-none">
+                  <button
+                    className="flex items-center gap-2 group"
+                    disabled={!done}
+                    onClick={() => {
+                      if (step === 1 && current > 1) {
+                        setWizardStep("configure");
+                        setShowColumnMapping(false);
+                      }
+                      if (step === 2 && current === 3) setWizardStep("configure");
+                    }}
+                  >
+                    <span className={`w-7 h-7 rounded-full flex items-center justify-center text-xs font-bold border-2 transition-colors
+                      ${active ? "bg-primary border-primary text-primary-foreground"
+                        : done ? "bg-green-500 border-green-500 text-white group-hover:bg-green-600 cursor-pointer"
+                        : "border-muted-foreground/30 text-muted-foreground/50"}`}>
+                      {done ? <CheckCircle className="h-4 w-4" /> : step}
+                    </span>
+                    <span className={`text-sm font-medium hidden sm:block
+                      ${active ? "text-foreground" : done ? "text-green-700" : "text-muted-foreground/50"}`}>
+                      {label}
+                    </span>
+                  </button>
+                  {i < 2 && (
+                    <div className={`flex-1 h-0.5 mx-3 ${done ? "bg-green-400" : "bg-muted-foreground/20"}`} />
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
         {/* ── Column Mapping Card (grid style) ── */}
         {showColumnMapping && fileHeaders && (
           <Card className="mb-6 border-2 border-amber-400">
@@ -706,9 +758,9 @@ export default function Dashboard() {
                                 <SelectValue />
                               </SelectTrigger>
                               <SelectContent>
-                                <SelectItem value="__skip__">-- Skip --</SelectItem>
+                                <SelectItem value="__skip__">-- Skip this column --</SelectItem>
                                 <SelectItem value="companyName">Company Name</SelectItem>
-                                <SelectItem value="websiteUrl">Website URL</SelectItem>
+                                <SelectItem value="websiteUrl">Website URL *</SelectItem>
                                 <SelectItem value="description">Description</SelectItem>
                               </SelectContent>
                             </Select>
@@ -751,6 +803,12 @@ export default function Dashboard() {
               </div>
 
               {/* Footer: status + confirm */}
+              {!Object.values(columnRoles).includes("websiteUrl") && (
+                <div className="flex items-center gap-2 mt-4 p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-700 text-sm">
+                  <AlertCircle className="h-4 w-4 shrink-0" />
+                  Assign the <strong>Website URL *</strong> column to continue
+                </div>
+              )}
               <div className="flex items-center justify-between mt-4">
                 <p className="text-xs text-muted-foreground">
                   {fileHeaders.sampleRows.length > 4
@@ -760,7 +818,7 @@ export default function Dashboard() {
                   {(() => {
                     const hasUrl = Object.values(columnRoles).includes("websiteUrl");
                     if (hasUrl) return <span className="text-green-600 font-medium">Ready</span>;
-                    return <span className="text-amber-600 font-medium">Missing: Website URL</span>;
+                    return <span className="text-amber-600 font-medium">Missing: Website URL *</span>;
                   })()}
                 </p>
                 <Button
@@ -773,7 +831,7 @@ export default function Dashboard() {
                   {uploadMutation.isPending ? (
                     <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Processing...</>
                   ) : (
-                    "Confirm & Continue"
+                    "Confirm & Continue →"
                   )}
                 </Button>
               </div>
@@ -805,13 +863,22 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent>
               <Tabs value={wizardMode} onValueChange={(v) => setWizardMode(v as WizardMode)}>
-                <TabsList className="mb-4">
-                  <TabsTrigger value="ai">
-                    <Sparkles className="h-4 w-4 mr-2" />
-                    AI Custom Extraction
-                  </TabsTrigger>
-                  <TabsTrigger value="template">Use Template</TabsTrigger>
-                </TabsList>
+                <div className="mb-4">
+                  <TabsList>
+                    <TabsTrigger value="ai">
+                      <Sparkles className="h-4 w-4 mr-2" />
+                      AI Custom Extraction
+                    </TabsTrigger>
+                    <TabsTrigger value="template">Use Template</TabsTrigger>
+                  </TabsList>
+                  {((wizardMode === "ai" && (description.trim().length > 0 || wizardSections.length > 0)) ||
+                    (wizardMode === "template" && templateSections.length > 0)) && (
+                    <p className="text-xs text-amber-600 mt-1.5 flex items-center gap-1">
+                      <AlertCircle className="h-3 w-3" />
+                      Switching modes will clear your current configuration
+                    </p>
+                  )}
+                </div>
 
                 {/* ── AI Custom tab ── */}
                 <TabsContent value="ai" className="space-y-5">
@@ -1196,8 +1263,8 @@ export default function Dashboard() {
                 <Loader2 className="h-8 w-8 animate-spin text-primary" />
               </div>
             ) : hasJobs ? (
-              <div className="space-y-4">
-                {displayedJobs.map((job) => {
+              <div className="space-y-3">
+                {displayedJobs.slice(0, visibleJobCount).map((job) => {
                   const progress = job.firmCount && job.firmCount > 0
                     ? Math.round(((job.processedCount || 0) / job.firmCount) * 100)
                     : 0;
@@ -1206,6 +1273,71 @@ export default function Dashboard() {
                   const tpl = getTemplate(jobTemplate);
                   const colors = TEMPLATE_COLORS[jobTemplate] ?? TEMPLATE_COLORS.vc;
                   const isAgentJob = !!(job as any).sectionsJson;
+
+                  // Compact view for done/failed/cancelled jobs (collapsed by default)
+                  const isDone = ["completed", "failed", "cancelled"].includes(job.status);
+                  const isExpanded = expandedJobIds.has(job.id);
+
+                  if (isDone && !isExpanded) {
+                    return (
+                      <div key={job.id} className="flex items-center gap-3 px-4 py-3 rounded-lg border bg-white hover:bg-muted/20 transition-colors">
+                        <span className="shrink-0">
+                          {job.status === "completed" && <CheckCircle className="h-4 w-4 text-green-600" />}
+                          {job.status === "failed"    && <XCircle className="h-4 w-4 text-red-500" />}
+                          {job.status === "cancelled" && <XCircle className="h-4 w-4 text-orange-400" />}
+                        </span>
+                        {isAgentJob ? (
+                          <span className="text-xs font-medium text-violet-700 shrink-0">AI Custom</span>
+                        ) : (
+                          <span className={`text-xs font-medium shrink-0 ${colors.text}`}>{tpl.name}</span>
+                        )}
+                        <span className="text-sm text-muted-foreground shrink-0">{job.firmCount} entries</span>
+                        {(job as any).totalCostUSD && (
+                          <span className="text-sm font-mono text-muted-foreground shrink-0">
+                            ${Number((job as any).totalCostUSD).toFixed(4)}
+                          </span>
+                        )}
+                        <span className="text-xs text-muted-foreground shrink-0">
+                          {new Date(job.createdAt).toLocaleDateString()}
+                        </span>
+                        <div className="flex items-center gap-2 ml-auto">
+                          {job.status === "completed" && (
+                            <>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 text-xs"
+                                onClick={() => setViewResultsJob({ id: job.id, template: jobTemplate, sectionsJson: (job as any).sectionsJson ?? undefined })}
+                              >
+                                <Table2 className="h-3 w-3 mr-1" />
+                                View
+                              </Button>
+                              <DownloadResultsButton jobId={job.id} outputFileUrl={job.outputFileUrl} compact />
+                            </>
+                          )}
+                          {job.status === "failed" && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 text-xs"
+                              onClick={() => resumeMutation.mutate({ jobId: job.id })}
+                              disabled={resumeMutation.isPending}
+                            >
+                              <PlayCircle className="h-3 w-3 mr-1" />
+                              Resume
+                            </Button>
+                          )}
+                          <button
+                            className="text-muted-foreground hover:text-foreground p-1 rounded"
+                            onClick={() => setExpandedJobIds(prev => { const next = new Set(prev); next.add(job.id); return next; })}
+                            title="Expand"
+                          >
+                            <ChevronDown className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  }
 
                   return (
                     <Card key={job.id} className="border-2">
@@ -1251,7 +1383,7 @@ export default function Dashboard() {
                               </div>
                             )}
 
-                            {/* Actual vs estimated cost (completed) */}
+                            {/* Actual vs estimated cost (completed, expanded) */}
                             {job.status === "completed" && (job as any).totalCostUSD && (
                               <div className="text-sm text-muted-foreground mt-1">
                                 Cost: <span className="font-mono font-medium">${Number((job as any).totalCostUSD).toFixed(4)}</span>
@@ -1264,7 +1396,7 @@ export default function Dashboard() {
                             )}
                           </div>
 
-                          <div className="flex gap-2 flex-wrap">
+                          <div className="flex gap-2 flex-wrap items-start">
                             {job.status === "completed" && (
                               <>
                                 <Button
@@ -1316,21 +1448,49 @@ export default function Dashboard() {
                                   )}
                                   Pause
                                 </Button>
-                                <Button
-                                  size="sm"
-                                  variant="outline"
-                                  className="text-red-600 border-red-300 hover:bg-red-50"
-                                  onClick={() => cancelMutation.mutate({ jobId: job.id })}
-                                  disabled={cancelMutation.isPending}
-                                >
-                                  {cancelMutation.isPending ? (
-                                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                  ) : (
-                                    <XCircle className="h-4 w-4 mr-2" />
-                                  )}
-                                  Cancel
-                                </Button>
+                                <AlertDialog>
+                                  <AlertDialogTrigger asChild>
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      className="text-red-600 border-red-300 hover:bg-red-50"
+                                      disabled={cancelMutation.isPending}
+                                    >
+                                      {cancelMutation.isPending ? (
+                                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                      ) : (
+                                        <XCircle className="h-4 w-4 mr-2" />
+                                      )}
+                                      Cancel
+                                    </Button>
+                                  </AlertDialogTrigger>
+                                  <AlertDialogContent>
+                                    <AlertDialogTitle>Cancel this job?</AlertDialogTitle>
+                                    <AlertDialogDescription>
+                                      Processing will stop within a few seconds. URLs already processed remain downloadable — no completed work is lost.
+                                    </AlertDialogDescription>
+                                    <div className="flex justify-end gap-3 mt-4">
+                                      <AlertDialogCancel>Keep Running</AlertDialogCancel>
+                                      <AlertDialogAction
+                                        className="bg-red-600 hover:bg-red-700 text-white"
+                                        onClick={() => cancelMutation.mutate({ jobId: job.id })}
+                                      >
+                                        Yes, Cancel Job
+                                      </AlertDialogAction>
+                                    </div>
+                                  </AlertDialogContent>
+                                </AlertDialog>
                               </>
+                            )}
+                            {/* Collapse button for expanded done jobs */}
+                            {isDone && (
+                              <button
+                                className="text-muted-foreground hover:text-foreground p-1.5 rounded border"
+                                onClick={() => setExpandedJobIds(prev => { const next = new Set(prev); next.delete(job.id); return next; })}
+                                title="Collapse"
+                              >
+                                <ChevronUp className="h-4 w-4" />
+                              </button>
                             )}
                           </div>
                         </div>
@@ -1374,6 +1534,16 @@ export default function Dashboard() {
                     </Card>
                   );
                 })}
+
+                {/* Show older jobs */}
+                {displayedJobs.length > visibleJobCount && (
+                  <button
+                    className="w-full py-2.5 text-sm text-muted-foreground hover:text-foreground border border-dashed rounded-lg hover:border-muted-foreground/40 transition-colors"
+                    onClick={() => setVisibleJobCount(c => c + 10)}
+                  >
+                    Show {Math.min(10, displayedJobs.length - visibleJobCount)} older jobs
+                  </button>
+                )}
               </div>
             ) : (
               /* Empty state onboarding */
@@ -1486,7 +1656,7 @@ function AddSectionRow({ onAdd }: { onAdd: (s: AgentSection) => void }) {
   );
 }
 
-function DownloadResultsButton({ jobId }: { jobId: number; outputFileUrl?: string | null }) {
+function DownloadResultsButton({ jobId, compact = false }: { jobId: number; outputFileUrl?: string | null; compact?: boolean }) {
   const [isGenerating, setIsGenerating] = useState(false);
   const generateMutation = trpc.enrichment.generateResults.useMutation({
     onSuccess: (data) => {
@@ -1514,6 +1684,24 @@ function DownloadResultsButton({ jobId }: { jobId: number; outputFileUrl?: strin
       setIsGenerating(false);
     },
   });
+
+  if (compact) {
+    return (
+      <Button
+        size="sm"
+        variant="outline"
+        className="h-7 text-xs"
+        onClick={() => { setIsGenerating(true); generateMutation.mutate({ jobId }); }}
+        disabled={isGenerating || generateMutation.isPending}
+      >
+        {isGenerating || generateMutation.isPending ? (
+          <Loader2 className="h-3 w-3 animate-spin" />
+        ) : (
+          <Download className="h-3 w-3" />
+        )}
+      </Button>
+    );
+  }
 
   return (
     <Button

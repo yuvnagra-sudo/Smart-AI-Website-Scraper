@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
@@ -9,6 +9,7 @@ import { Loader2, ChevronLeft, ChevronRight, Search, Sparkles, Download } from "
 import { toast } from "sonner";
 import { trpc } from "@/lib/trpc";
 import { getTemplate, type TemplateField } from "@/lib/templates";
+import { ContactCard } from "@/components/ContactCard";
 
 // Sheet keys that map to the backend query tab type
 type QueryTab = "firms" | "team" | "portfolio";
@@ -267,6 +268,8 @@ function TemplateJobSheet({ jobId, open, onClose, template }: {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [searchInput, setSearchInput] = useState("");
+  const [isDownloading, setIsDownloading] = useState(false);
+  const tableScrollRef = useRef<HTMLDivElement>(null);
 
   const activeSheet = validSheets.find(s => s.key === activeSheetKey) ?? validSheets[0];
 
@@ -274,6 +277,22 @@ function TemplateJobSheet({ jobId, open, onClose, template }: {
     { jobId, tab: activeSheetKey as QueryTab, page, search: search || undefined },
     { enabled: open, keepPreviousData: true }
   );
+
+  const downloadMutation = trpc.enrichment.generateResults.useMutation({
+    onSuccess: (data) => {
+      const byteChars = atob(data.fileData);
+      const bytes = new Uint8Array(byteChars.length);
+      for (let i = 0; i < byteChars.length; i++) bytes[i] = byteChars.charCodeAt(i);
+      const blob = new Blob([bytes], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = data.fileName;
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a); URL.revokeObjectURL(url);
+      setIsDownloading(false);
+    },
+    onError: (error: { message: string }) => { toast.error(`Failed to download: ${error.message}`); setIsDownloading(false); },
+  });
 
   const handleSearch = () => {
     setSearch(searchInput);
@@ -285,6 +304,12 @@ function TemplateJobSheet({ jobId, open, onClose, template }: {
     setPage(1);
     setSearch("");
     setSearchInput("");
+    tableScrollRef.current?.scrollTo({ top: 0 });
+  };
+
+  const handlePageChange = (newPage: number) => {
+    setPage(newPage);
+    tableScrollRef.current?.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   const searchPlaceholder = activeSheet
@@ -295,7 +320,19 @@ function TemplateJobSheet({ jobId, open, onClose, template }: {
     <Sheet open={open} onOpenChange={(o) => !o && onClose()}>
       <SheetContent side="bottom" className="h-[85vh] flex flex-col p-0">
         <SheetHeader className="px-6 pt-6 pb-4 border-b">
-          <SheetTitle>Results — Job #{jobId}</SheetTitle>
+          <div className="flex items-center justify-between">
+            <SheetTitle>Results — Job #{jobId}</SheetTitle>
+            <button
+              className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground border rounded px-3 py-1.5 transition-colors disabled:opacity-50"
+              onClick={() => { setIsDownloading(true); downloadMutation.mutate({ jobId }); }}
+              disabled={isDownloading || downloadMutation.isPending}
+            >
+              {isDownloading || downloadMutation.isPending
+                ? <Loader2 className="h-4 w-4 animate-spin" />
+                : <Download className="h-4 w-4" />}
+              Download
+            </button>
+          </div>
         </SheetHeader>
 
         <Tabs value={activeSheetKey} onValueChange={handleTabChange} className="flex flex-col flex-1 overflow-hidden">
@@ -329,7 +366,7 @@ function TemplateJobSheet({ jobId, open, onClose, template }: {
             )}
           </div>
 
-          <div className="flex-1 overflow-auto">
+          <div className="flex-1 overflow-auto" ref={tableScrollRef}>
             {isLoading ? (
               <div className="flex items-center justify-center h-full">
                 <Loader2 className="h-8 w-8 animate-spin text-primary" />
@@ -341,7 +378,19 @@ function TemplateJobSheet({ jobId, open, onClose, template }: {
             ) : (
               validSheets.map(sheet => (
                 <TabsContent key={sheet.key} value={sheet.key} className="mt-0">
-                  <DynamicTable rows={data.rows as any[]} fields={sheet.fields} />
+                  {sheet.key === "team" && (data.rows as any[]).some(r => r.name) ? (
+                    <div>
+                      {(data.rows as any[]).map((row, i) =>
+                        row.name ? (
+                          <ContactCard key={row.id ?? i} row={row} />
+                        ) : (
+                          <DynamicTable key={row.id ?? i} rows={[row]} fields={sheet.fields} />
+                        )
+                      )}
+                    </div>
+                  ) : (
+                    <DynamicTable rows={data.rows as any[]} fields={sheet.fields} />
+                  )}
                 </TabsContent>
               ))
             )}
@@ -354,7 +403,7 @@ function TemplateJobSheet({ jobId, open, onClose, template }: {
                 size="sm"
                 variant="outline"
                 disabled={page <= 1}
-                onClick={() => setPage(p => p - 1)}
+                onClick={() => handlePageChange(page - 1)}
               >
                 <ChevronLeft className="h-4 w-4" />
               </Button>
@@ -365,7 +414,7 @@ function TemplateJobSheet({ jobId, open, onClose, template }: {
                 size="sm"
                 variant="outline"
                 disabled={page >= data.pages}
-                onClick={() => setPage(p => p + 1)}
+                onClick={() => handlePageChange(page + 1)}
               >
                 <ChevronRight className="h-4 w-4" />
               </Button>

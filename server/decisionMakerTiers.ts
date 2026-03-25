@@ -1,14 +1,23 @@
 /**
- * Decision Maker Tier Classification for VC Deal Sourcing Roles
- * 
- * Focus: Identify people involved in DEAL SOURCING (finding and evaluating investments)
- * Exclude: LPs, Operating Partners (post-investment), support staff
- * 
- * Tier 1: Senior Partners - Make final investment decisions
- * Tier 2: Mid-level Deal Team - Lead due diligence and deal execution  
- * Tier 3: Junior Deal Team - Source deals, conduct initial evaluations
- * Exclude: Non-deal sourcing roles (LPs, ops, support)
+ * Decision Maker Tier Classification for General B2B Prospecting
+ *
+ * Classifies any job title into tiers relevant for B2B outreach.
+ * Works across all industries and company types (not VC-specific).
+ *
+ * Tier 1: Budget Authority / Decision Makers
+ *   C-suite, founders, owners, executive leadership — those who sign the deal
+ *
+ * Tier 2: Senior Influencers / Champions
+ *   VPs, Directors, Head of [dept], senior managers — those who drive the decision
+ *
+ * Tier 3: Junior Influencers / Gatekeepers
+ *   Managers, Leads, Analysts, Associates — those who may influence or block
+ *
+ * Exclude: Non-Decision-Makers
+ *   Admin, support, interns, advisors — unlikely to have purchasing authority
  */
+
+import { queuedLLMCall } from './_core/llmQueue';
 
 export type DecisionMakerTier = "Tier 1" | "Tier 2" | "Tier 3" | "Exclude";
 
@@ -16,360 +25,382 @@ export interface TierClassification {
   tier: DecisionMakerTier;
   priority: number;
   description: string;
+  needsLLMClassification?: boolean; // true when regex couldn't confidently classify
 }
 
 /**
- * TIER 1: Senior Partners (Decision Makers)
- * - Make final investment decisions
- * - Sit on Investment Committee
- * - Strategic direction of firm
+ * TIER 1: Budget Authority / Decision Makers
+ * Makes final purchase decisions, controls budget, signs contracts.
  */
 const TIER1_PATTERNS = [
-  // C-Suite (investment-focused)
-  "chief executive officer",
-  "ceo",
-  "chief investment officer",
-  "cio",
-  
-  // Core partner titles
+  // C-suite (general B2B)
+  "chief executive officer", "ceo",
+  "chief technology officer", "cto",
+  "chief financial officer", "cfo",
+  "chief operating officer", "coo",
+  "chief revenue officer", "cro",
+  "chief marketing officer", "cmo",
+  "chief product officer", "cpo",
+  "chief information officer", "cio",
+  "chief information security officer", "ciso",
+  "chief people officer",
+  "chief human resources officer", "chro",
+  "chief commercial officer",
+  "chief data officer", "cdo",
+  "chief security officer", "cso",
+  "chief growth officer",
+  "chief strategy officer",
+  "chief legal officer",
+  "chief compliance officer",
+  "chief customer officer",
+
+  // Founder / Owner
+  "founder",
+  "co-founder", "cofounder",
+  "owner", "co-owner",
+
+  // Executive leadership
+  "president",
+  "executive director",
+  "managing director", "md",
+  "general manager",
+  "chairman", "chairwoman", "chairperson",
+
+  // Senior partner titles (professional services + VC)
   "managing partner",
   "general partner",
   "founding partner",
   "senior partner",
   "equity partner",
   "investment partner",
-  
-  // Managing Director variants
-  "managing director",
-  "md",
-  
-  // Partner (will check for exclusions separately)
+
+  // "partner" alone — handled with exclusion check in classifyDecisionMakerTier
   "partner",
 ];
 
 /**
- * TIER 2: Senior Deal Team (Deal Leaders)
- * - Lead due diligence processes
- * - Lead deal execution
- * - Bridge between associates and partners
+ * TIER 2: Senior Influencers / Champions
+ * Leads purchasing processes, creates shortlists, drives internal decisions.
  */
 const TIER2_PATTERNS = [
-  // Principal titles
+  // VP titles
+  "vice president", "vp", "vice-president",
+
+  // Director — catch-all: "Director of X", "Marketing Director", etc.
+  "director",
+
+  // Head of — catch-all: "Head of Marketing", "Head of Engineering", etc.
+  "head of",
+
+  // Senior / leadership variants
+  "senior director", "sr. director", "sr director",
+  "senior manager", "sr. manager", "sr manager",
+
+  // Principal (senior individual contributor or partner-level in services)
   "principal",
-  "venture principal",
-  "investment principal",
-  
-  // VP titles (investment-focused)
-  "vice president",
-  "vp",
-  "vice-president",
-  "vp of investments",
-  "vice president of investments",
-  
-  // Senior Associate
-  "senior associate",
-  "sr associate",
-  "sr. associate",
-  
-  // Investment Manager (mid-level deal team)
-  "senior investment manager",
-  "investment manager",
-  
-  // Investor Relations (often involved in deal flow and LP communications)
-  "investor relations",
-  "ir partner",
+
+  // Chief of Staff (executive-level influence)
+  "chief of staff",
+
+  // Controller (financial decision maker — distinct from "fund controller" which is excluded)
+  "controller",
+
+  // Senior associates (investment + general)
+  "senior associate", "sr associate", "sr. associate",
+
+  // Investment-specific Tier 2 (retained for VC compatibility)
+  "investment manager", "senior investment manager",
+  "investor relations", "ir partner",
   "head of investor relations",
 ];
 
 /**
- * TIER 3: Junior Deal Team (Deal Sourcers)
- * - Source deals and attend industry events
- * - Conduct initial evaluations
- * - Support due diligence
- * - INCLUDES ASSOCIATES AND ANALYSTS (per user request)
+ * TIER 3: Junior Influencers / Gatekeepers
+ * May influence or block the deal but don't have final authority.
  */
 const TIER3_PATTERNS = [
-  // Associate titles (investment-focused only)
+  // Manager — catch-all: "Marketing Manager", "Product Manager", etc.
+  "manager",
+
+  // Team lead variants
+  "team lead", "team leader",
+
+  // Lead — as standalone or in titles: "Engineering Lead", "Marketing Lead"
+  "lead",
+
+  // Associate (general + VC-specific)
   "associate",
-  "investment associate",
-  "venture associate",
-  
-  // Analyst titles (investment-focused only)
+  "investment associate", "venture associate",
+
+  // Analyst (general + VC-specific)
   "analyst",
-  "investment analyst",
-  "venture analyst",
+  "investment analyst", "venture analyst", "business analyst",
+
+  // Specialist
+  "specialist",
+
+  // Supervisor
+  "supervisor",
 ];
 
 /**
- * EXCLUDE: Non-Deal Sourcing Roles
- * - Limited Partners (passive investors)
- * - Operating Partners (post-investment support)
- * - Venture Partners (often part-time advisors)
- * - Support staff (legal, finance, admin, marketing)
+ * EXCLUDE: Non-Decision-Makers
+ * Administrative, support, non-employee, or post-investment roles.
+ * Note: broad functional terms (marketing, hr, finance) are intentionally NOT
+ * excluded here — rank patterns above handle "Director of HR" (Tier 2) vs
+ * "HR Coordinator" (Tier 3 via manager → Exclude via coordinator).
  */
 const EXCLUDE_PATTERNS = [
-  // Limited Partners
-  "limited partner",
-  "lp",
-  " lp ",
-  "investor",
+  // Administrative / Support
+  "intern", "internship",
+  "coordinator",
+  "administrative assistant", "admin assistant",
+  "executive assistant",
+  "receptionist", "secretary",
+  "community manager",
+  "accelerator manager",
+  "program associate", "program coordinator",
+
+  // Data / Technical operational (not typical buyers)
+  "data engineer",
+  "investment data analyst",
+
+  // Pure legal / compliance specialists
+  "legal counsel", "general counsel",
+  "attorney", "paralegal",
+  "compliance analyst", "compliance associate",
+
+  // Pure accounting operational
+  "bookkeeper",
+  "fund accountant", "fund controller", "fund administrator",
+  "treasurer",
+
+  // VC-specific non-deal roles
+  "limited partner", " lp ",
   "angel investor",
-  
-  // Operating/Venture Partners (post-investment, not deal sourcing)
   "operating partner",
   "venture partner",
   "strategic partner",
   "executive partner",
-  "entrepreneur in residence",
-  "eir",
-  
-  // Portfolio/Post-Investment (NOT deal sourcing)
+  "entrepreneur in residence", "eir",
+
+  // Portfolio / post-investment (VC)
   "portfolio manager",
   "portfolio director",
   "portfolio operations",
   "portfolio manger", // common typo
-  
-  // Operations/Support (NOT deal sourcing)
   "investment operations",
-  "investment data analyst",
-  "data analyst",
-  "data strategist",
-  "data engineer",
-  "operations analyst",
-  "program manager",
-  "program associate",
-  "accelerator manager",
-  "community manager",
-  "general manager",
-  
-  // Capital Formation/Fundraising (NOT deal sourcing)
-  "capital formation",
-  "fund accountant",
-  "fund controller",
-  "financial analyst",
-  
-  // C-Suite / Support (non-investment)
-  "chief financial officer",
-  "cfo",
-  "chief operating officer",
-  "coo",
-  "chief technology officer",
-  "cto",
-  "chief marketing officer",
-  "cmo",
-  "chief people officer",
-  "chief commercial officer",
-  "head of",
-  "director of",
-  
-  // Functional roles
-  "legal",
-  "counsel",
-  "attorney",
-  "compliance",
-  "finance",
-  "accounting",
-  "accountant",
-  "controller",
-  "treasurer",
-  "operations",
-  "admin",
-  "assistant",
-  "coordinator",
-  "marketing",
-  "communications",
-  "public relations",
-  "pr",
-  "human resources",
-  "hr",
-  "recruiter",
-  "talent",
-  // Removed "investor relations" - moved to Tier 2
-  // "investor relations",
-  // "ir",
-  "learning",
-  "education",
-  "designer",
-  "experience",
-  
-  // Non-investment roles
-  "advisor",
+
+  // Non-employee relationships
+  "advisor", "adviser",
   "consultant",
-  "board member",
-  "board observer",
-  "fellow",
-  "scholar",
+  "board member", "board observer",
+  "fellow", "scholar",
+
+  // Channel / ecosystem partner (external party, not employee decision maker)
+  "channel partner",
+  "technology partner",
+  "reseller partner",
 ];
 
 /**
- * Check if title matches any pattern in a list (case-insensitive, whole-word matching)
+ * Compound titles that must be excluded even though they contain words that
+ * appear in tier patterns (e.g. "fund controller" contains "controller" which
+ * is Tier 2). Checked before tier patterns to prevent false positives.
+ */
+const PRE_TIER_EXCLUSIONS = [
+  // Excluded partner types (contain "partner" which is Tier 1)
+  "operating partner",
+  "venture partner",
+  "limited partner",
+  "strategic partner",
+  "executive partner",
+  "channel partner",
+  "technology partner",
+  "reseller partner",
+
+  // Excluded finance ops roles (contain "controller/manager" which are Tier 2/3)
+  "fund controller",
+  "fund manager",
+  "fund administrator",
+  "portfolio manager",
+  "portfolio director",
+];
+
+/**
+ * Check if title matches any pattern (case-insensitive, whole-word matching).
  */
 function matchesPattern(title: string, patterns: string[]): boolean {
   const titleLower = title.toLowerCase().trim();
-  
+
   return patterns.some(pattern => {
     const patternLower = pattern.toLowerCase();
-    
+
     // Exact match
     if (titleLower === patternLower) return true;
-    
-    // Word boundary match (pattern appears as a complete word)
-    const regex = new RegExp(`\\b${patternLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+
+    // Word boundary match
+    const escaped = patternLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`\\b${escaped}\\b`);
     return regex.test(titleLower);
   });
 }
 
 /**
- * Check if title contains investment-related keywords
- */
-function hasInvestmentKeywords(title: string): boolean {
-  const titleLower = title.toLowerCase();
-  const keywords = [
-    "invest",
-    "venture",
-    "vc",
-    "capital",
-    "fund",
-    "portfolio",
-    "deal",
-    "partner",
-    "principal",
-    "associate",
-    "analyst",
-  ];
-  
-  return keywords.some(keyword => titleLower.includes(keyword));
-}
-
-/**
- * Classify a job title into a decision maker tier
+ * Synchronously classify a job title into a decision maker tier using regex patterns.
+ *
+ * When `needsLLMClassification` is true on the result, callers that support async
+ * can call `classifyDecisionMakerTierWithLLM()` for a more accurate result.
  */
 export function classifyDecisionMakerTier(title: string): TierClassification {
   if (!title || title.trim().length === 0) {
-    // Changed from "Exclude" to "Tier 3" - empty titles are common on VC websites
-    // where people are listed by name without explicit titles
-    // Users can filter in Excel if they want to exclude these
     return {
       tier: "Tier 3",
       priority: 3,
-      description: "Unknown role (empty title) - Defaulting to junior deal team",
+      description: "Unknown role (empty title) — defaulting to junior",
     };
   }
 
   const titleLower = title.toLowerCase().trim();
 
-  // Priority order: Check exclusions first for specific partner types, then tiers
-  
-  // Check for department-based classification FIRST (common on VC websites)
-  // Many VC sites list people by department rather than explicit titles
-  const investingDepartments = [
-    "investing",
-    "investment team",
-    "investments",
-    "deal team",
-    // Sequoia-specific patterns
-    "seed/early",
-    "seed",
-    "early stage",
-    "growth",
-    "growth stage",
-  ];
-  
-  if (investingDepartments.some(dept => titleLower === dept || titleLower.includes(dept))) {
-    // If only department is listed, assume Tier 1 (they're on the deal team)
-    console.log(`[Tier Classifier] Department-based classification: "${title}" → Tier 1`);
-    return {
-      tier: "Tier 1",
-      priority: 1,
-      description: "Investment team member (department-based classification)",
-    };
-  }
-  
-  // Check for excluded partner types BEFORE generic "partner" pattern
-  const excludedPartnerTypes = ["operating partner", "venture partner", "limited partner", "strategic partner", "executive partner"];
-  if (matchesPattern(title, excludedPartnerTypes)) {
+  // Exclude compound titles before any tier patterns (e.g. "fund controller" before "controller" in Tier 2)
+  if (matchesPattern(title, PRE_TIER_EXCLUSIONS)) {
     return {
       tier: "Exclude",
       priority: 999,
-      description: "Non-deal sourcing partner role",
-    };
-  }
-  
-  // TIER 1: Senior Partners
-  if (matchesPattern(titleLower, TIER1_PATTERNS)) {
-    // Special check: "Partner" alone could be Operating/Venture Partner
-    if (titleLower === "partner") {
-      // If it's just "partner", check for exclusion keywords
-      if (matchesPattern(titleLower, EXCLUDE_PATTERNS)) {
-        return {
-          tier: "Exclude",
-          priority: 999,
-          description: "Non-deal sourcing partner role",
-        };
-      }
-      // Assume investment partner if no exclusion
-      return {
-        tier: "Tier 1",
-        priority: 1,
-        description: "Senior Partner - Makes final investment decisions",
-      };
-    }
-    
-    return {
-      tier: "Tier 1",
-      priority: 1,
-      description: "Senior Partner - Makes final investment decisions",
+      description: "Non-decision-making partner / external relationship role",
     };
   }
 
-  // TIER 2: Senior Deal Team
+  // TIER 1: Budget authority / decision makers
+  if (matchesPattern(titleLower, TIER1_PATTERNS)) {
+    // Special case: "partner" alone — verify it's not an excluded partner type
+    if (titleLower === "partner") {
+      // Already passed the excluded partner types check above, so this is a legitimate partner
+      return {
+        tier: "Tier 1",
+        priority: 1,
+        description: "Partner — budget authority / decision maker",
+      };
+    }
+
+    return {
+      tier: "Tier 1",
+      priority: 1,
+      description: "Budget authority / decision maker",
+    };
+  }
+
+  // TIER 2: Senior influencers / champions
   if (matchesPattern(titleLower, TIER2_PATTERNS)) {
     return {
       tier: "Tier 2",
       priority: 2,
-      description: "Senior Deal Team - Leads due diligence and deal execution",
+      description: "Senior influencer / champion",
     };
   }
 
-  // TIER 3: Junior Deal Team
+  // TIER 3: Junior influencers / gatekeepers
   if (matchesPattern(titleLower, TIER3_PATTERNS)) {
     return {
       tier: "Tier 3",
       priority: 3,
-      description: "Junior Deal Team - Sources deals and conducts initial evaluations",
+      description: "Junior influencer / gatekeeper",
     };
   }
 
-  // EXCLUDE: Non-deal sourcing roles
+  // EXCLUDE: Non-decision-making roles
   if (matchesPattern(titleLower, EXCLUDE_PATTERNS)) {
     return {
       tier: "Exclude",
       priority: 999,
-      description: "Non-deal sourcing role",
+      description: "Non-decision-making / administrative / support role",
     };
   }
 
-  // UNKNOWN: Default based on investment keywords
-  if (hasInvestmentKeywords(titleLower)) {
-    console.log(`[Tier Classifier] Unknown investment-related title defaulting to Tier 3: "${title}"`);
-    return {
-      tier: "Tier 3",
-      priority: 3,
-      description: "Unknown investment role - Defaulting to junior deal team",
-    };
-  }
-
-  // No investment keywords - likely support role
-  console.log(`[Tier Classifier] Excluding non-investment title: "${title}"`);
+  // Unknown — flag for LLM classification; default to Tier 3 so nothing is lost
+  console.log(`[Tier Classifier] Unknown title, LLM classification recommended: "${title}"`);
   return {
-    tier: "Exclude",
-    priority: 999,
-    description: "Non-investment role",
+    tier: "Tier 3",
+    priority: 3,
+    description: "Unknown role — LLM classification recommended",
+    needsLLMClassification: true,
   };
 }
 
 /**
- * Filter team members to only include decision makers (Tier 1-3)
+ * Async version that falls back to LLM for titles the regex couldn't confidently classify.
+ * Use this in contexts where accuracy matters more than speed (e.g. post-extraction enrichment pass).
+ *
+ * @param title - The job title to classify
+ * @param companyName - Optional company name for better LLM context
+ */
+export async function classifyDecisionMakerTierWithLLM(
+  title: string,
+  companyName?: string,
+): Promise<TierClassification> {
+  const syncResult = classifyDecisionMakerTier(title);
+
+  // Only call LLM when regex was uncertain
+  if (!syncResult.needsLLMClassification) {
+    return syncResult;
+  }
+
+  try {
+    const contextLine = companyName
+      ? `Title: "${title}" at ${companyName}`
+      : `Title: "${title}"`;
+
+    const result = await queuedLLMCall({
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a B2B sales intelligence assistant. Classify job titles for outreach targeting. Respond with JSON only.",
+        },
+        {
+          role: "user",
+          content:
+            `${contextLine}\n\nClassify as exactly one of:\n` +
+            `- Tier 1: Budget authority / final decision maker (C-suite, founder, owner, managing director, partner)\n` +
+            `- Tier 2: Senior influencer / champion (VP, Director, Head of department, senior manager)\n` +
+            `- Tier 3: Junior influencer / gatekeeper (manager, lead, analyst, associate, specialist)\n` +
+            `- Exclude: No purchasing influence (admin, intern, receptionist, coordinator, advisor, non-employee)\n\n` +
+            `JSON only: {"tier": "Tier 1" | "Tier 2" | "Tier 3" | "Exclude"}`,
+        },
+      ],
+      responseFormat: { type: "json_object" },
+      maxTokens: 50,
+    });
+
+    const content = result.choices?.[0]?.message?.content;
+    if (typeof content === "string") {
+      const parsed = JSON.parse(content);
+      const tier = parsed.tier as DecisionMakerTier;
+      if (["Tier 1", "Tier 2", "Tier 3", "Exclude"].includes(tier)) {
+        const priorityMap: Record<DecisionMakerTier, number> = {
+          "Tier 1": 1,
+          "Tier 2": 2,
+          "Tier 3": 3,
+          "Exclude": 999,
+        };
+        return {
+          tier,
+          priority: priorityMap[tier],
+          description: `LLM-classified: ${tier}`,
+        };
+      }
+    }
+  } catch (err) {
+    console.warn(`[Tier Classifier] LLM fallback failed for "${title}":`, err);
+  }
+
+  // LLM failed — return the sync default (Tier 3)
+  return syncResult;
+}
+
+/**
+ * Filter team members to only include decision makers (Tier 1-3 by default).
  */
 export function filterDecisionMakers<T extends { title: string }>(
   teamMembers: T[],
@@ -382,7 +413,7 @@ export function filterDecisionMakers<T extends { title: string }>(
 }
 
 /**
- * Sort team members by decision-making priority
+ * Sort team members by decision-making priority (Tier 1 first).
  */
 export function sortByDecisionMakingPriority<T extends { title: string }>(
   teamMembers: T[],
