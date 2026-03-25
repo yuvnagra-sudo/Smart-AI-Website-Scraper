@@ -66,7 +66,33 @@ export const CONFIDENCE_THRESHOLD = 0.7;
 
 export type AgentScrapeResult =
   | { type: "directory"; entries: DirectoryEntry[] }
-  | { type: "profile"; data: Record<string, string>; fieldResults: FieldResultMap; stats: ScrapeStats };
+  | {
+      type: "profile";
+      data: Record<string, string>;
+      fieldResults: FieldResultMap;
+      stats: ScrapeStats;
+      /** Per-URL data returned by PageCallbacks.onPageFetched. Only populated when callbacks are used. */
+      extras?: Record<string, unknown>;
+    };
+
+/**
+ * Optional callbacks passed to scrapeUrl() as the 7th parameter.
+ * Existing callers that pass only 6 positional args are unaffected.
+ */
+export interface PageCallbacks {
+  /**
+   * Called after every page that scrapeUrl() successfully fetches.
+   * Runs BEFORE the generic extractProfileFields() LLM pass.
+   *
+   * Return null to let the generic pass handle everything.
+   * Return a result object to store specialised data in extras[url].
+   * Set skipGenericExtraction: true to skip extractProfileFields() for this page.
+   */
+  onPageFetched?: (
+    url: string,
+    content: string,
+  ) => Promise<{ data: unknown; skipGenericExtraction?: boolean } | null>;
+}
 
 // ---------------------------------------------------------------------------
 // Agent action types
@@ -803,6 +829,7 @@ export async function scrapeUrl(
   systemPrompt: string,
   maxHops = 8,
   isCancelled?: () => boolean,
+  callbacks?: PageCallbacks,
 ): Promise<AgentScrapeResult> {
   console.log(`[agentScraper] 🚀 Starting agent loop: ${url}`);
 
@@ -817,6 +844,7 @@ export async function scrapeUrl(
   const visitedUrls = new Set<string>();
   let availableLinks: string[] = [];
   let hopsUsed = 0;
+  const extras: Record<string, unknown> = {};
 
   // ── STEP 0: Fetch the primary URL first (always) ──────────────────────────
   console.log(`[agentScraper] Fetching primary URL: ${url}`);
@@ -828,7 +856,17 @@ export async function scrapeUrl(
     visitedUrls.add(url);
     availableLinks = primary.links;
 
-    if (sections.length > 0) {
+    // Run specialized page callback before generic extraction
+    let skipGenericForPrimary = false;
+    if (callbacks?.onPageFetched) {
+      const cbResult = await callbacks.onPageFetched(url, primary.content);
+      if (cbResult) {
+        extras[url] = cbResult.data;
+        skipGenericForPrimary = cbResult.skipGenericExtraction ?? false;
+      }
+    }
+
+    if (!skipGenericForPrimary && sections.length > 0) {
       const extracted = await extractProfileFields(
         primary.content, sections, systemPrompt, url,
         isDirectoryUrl(url) ? "directory" : "company",
@@ -920,15 +958,28 @@ export async function scrapeUrl(
       visitedUrls.add(plan.target);
       availableLinks = [...new Set([...availableLinks, ...fetched.links])].filter(l => !visitedUrls.has(l));
 
-      // OBSERVE
-      if (isCancelled?.()) throw new Error("JOB_CANCELLED");
-      const fetchPageType = isDirectoryUrl(plan.target) ? "directory" : "company";
-      const extracted = await extractProfileFields(fetched.content, sections, systemPrompt, plan.target, fetchPageType);
+      // Run specialized page callback before generic extraction
+      let skipGenericForFetch = false;
+      if (callbacks?.onPageFetched) {
+        if (isCancelled?.()) throw new Error("JOB_CANCELLED");
+        const cbResult = await callbacks.onPageFetched(plan.target, fetched.content);
+        if (cbResult) {
+          extras[plan.target] = cbResult.data;
+          skipGenericForFetch = cbResult.skipGenericExtraction ?? false;
+        }
+      }
 
-      // REFLECT — merge, keeping higher-confidence values
-      fieldResults = mergeFieldResults(fieldResults, extracted);
-      const filled = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD).length;
-      console.log(`[agentScraper] After fetch_url (${fetchPageType}): ${filled}/${sections.length} fields confident`);
+      // OBSERVE
+      if (!skipGenericForFetch) {
+        if (isCancelled?.()) throw new Error("JOB_CANCELLED");
+        const fetchPageType = isDirectoryUrl(plan.target) ? "directory" : "company";
+        const extracted = await extractProfileFields(fetched.content, sections, systemPrompt, plan.target, fetchPageType);
+
+        // REFLECT — merge, keeping higher-confidence values
+        fieldResults = mergeFieldResults(fieldResults, extracted);
+        const filled = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD).length;
+        console.log(`[agentScraper] After fetch_url: ${filled}/${sections.length} fields confident`);
+      }
 
     } else if (plan.action === "web_search") {
       if (isCancelled?.()) throw new Error("JOB_CANCELLED");
@@ -990,7 +1041,13 @@ export async function scrapeUrl(
     `${stats.fieldsFilled}/${sections.length} fields non-empty`
   );
 
-  return { type: "profile", data, fieldResults, stats };
+  return {
+    type: "profile",
+    data,
+    fieldResults,
+    stats,
+    ...(Object.keys(extras).length > 0 ? { extras } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------

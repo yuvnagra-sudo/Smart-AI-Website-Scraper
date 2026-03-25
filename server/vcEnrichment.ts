@@ -3,13 +3,10 @@
  * Handles the extraction and enrichment of VC firm data
  */
 import { invokeLLM } from "./_core/openaiLLM";
-import { queuedLLMCall } from "./_core/llmQueue";
 import { aggregateFreeApiData } from "./dataSources/freeApis";
-import { apolloSearchPeople } from "./dataSources/apolloApi";
-import { findymailFindEmail } from "./dataSources/findymailApi";
-import { anymailFinderFindEmail } from "./dataSources/anymailFinderApi";
-import { dropcontactFindEmail } from "./dataSources/dropcontactApi";
-import { classifyDecisionMakerTier } from "./decisionMakerTiers";
+import { enrichPeopleInPlace } from "./peopleEnrichment";
+import { scrapeUrl, type PageCallbacks } from "./agentScraper";
+import { VC_FLAT_SECTIONS, VC_FLAT_SYSTEM_PROMPT, TEAM_PAGE_PATTERN, PORTFOLIO_PAGE_PATTERN } from "./vcSections";
 import { formatNichesForPrompt } from "./nicheTaxonomy";
 import { formatInvestorTypesForPrompt, formatInvestmentStagesForPrompt } from "./investorTaxonomy";
 import { extractAndMatchLinkedInURLs } from "./improvedLinkedInExtractor";
@@ -219,140 +216,6 @@ async function retryWithBackoff<T>(
   throw lastError || new Error('Max retry attempts reached');
 }
 
-// ---------------------------------------------------------------------------
-// People-discovery helpers (module-level, used by enrichVCFirm)
-// ---------------------------------------------------------------------------
-
-/**
- * Use the LLM to pick the most relevant 2-3 contacts for email enrichment
- * given the extraction objective. Falls back to top Tier 1 contacts if no
- * objective is provided or the LLM call fails.
- */
-async function selectContactsForEmailEnrichment(
-  teamMembers: Array<{ name: string; title: string; decisionMakerTier?: string; email?: string }>,
-  objective: string | undefined,
-  companyName: string,
-): Promise<Array<{ name: string; title: string; decisionMakerTier?: string; email?: string }>> {
-  // Only consider contacts without an email already
-  const candidates = teamMembers.filter(
-    (m) =>
-      !m.email &&
-      (m.decisionMakerTier === "Tier 1" || m.decisionMakerTier === "Tier 2"),
-  );
-
-  if (candidates.length === 0) return [];
-  if (candidates.length <= 2) return candidates;
-
-  if (!objective) {
-    // No objective — return top 2 Tier 1 contacts
-    const tier1 = candidates.filter((m) => m.decisionMakerTier === "Tier 1").slice(0, 2);
-    return tier1.length > 0 ? tier1 : candidates.slice(0, 2);
-  }
-
-  try {
-    const contactList = candidates
-      .map((c) => `- ${c.name}, ${c.title} (${c.decisionMakerTier ?? "Unknown tier"})`)
-      .join("\n");
-
-    const result = await queuedLLMCall({
-      messages: [
-        {
-          role: "system",
-          content: "You are a B2B sales intelligence assistant. Select the most relevant contacts to reach out to given a specific objective. Respond with JSON only.",
-        },
-        {
-          role: "user",
-          content:
-            `Company: ${companyName}\n\nExtraction objective: "${objective}"\n\n` +
-            `Contacts:\n${contactList}\n\n` +
-            `Select up to 3 contacts most likely to be the right person for this objective. ` +
-            `Prefer Tier 1 (decision makers) when relevant. ` +
-            `JSON only: {"selected": ["Full Name 1", "Full Name 2"]}`,
-        },
-      ],
-      responseFormat: { type: "json_object" },
-      maxTokens: 100,
-    });
-
-    const content = result.choices?.[0]?.message?.content;
-    if (typeof content === "string") {
-      const parsed = JSON.parse(content) as { selected?: string[] };
-      const selectedNames = new Set((parsed.selected ?? []).map((n: string) => n.toLowerCase()));
-      const selected = candidates.filter((c) => selectedNames.has(c.name.toLowerCase()));
-      if (selected.length > 0) {
-        console.log(`[selectContacts] Agent selected: ${selected.map((c) => c.name).join(", ")}`);
-        return selected;
-      }
-    }
-  } catch (err) {
-    console.warn("[selectContacts] LLM selection failed, falling back to tier priority:", err);
-  }
-
-  // Fallback: top 2 by tier priority
-  return candidates.slice(0, 2);
-}
-
-/**
- * Run the email waterfall for a list of contacts.
- * Mutates each contact's `email` and `emailVerified` fields in place.
- * Waterfall: Findymail → AnyMail Finder → Dropcontact
- * Stops at first accepted result for each contact.
- */
-async function enrichEmailsForContacts(
-  contacts: Array<{ name: string; email?: string; emailVerified?: boolean | "catch-all" }>,
-  domain: string,
-): Promise<void> {
-  for (const contact of contacts) {
-    if (contact.email) continue; // Already has email
-
-    const nameParts = contact.name.trim().split(/\s+/);
-    const firstName = nameParts[0] ?? "";
-    const lastName = (nameParts.slice(1).join(" ") || nameParts[0]) ?? "";
-
-    console.log(`[emailWaterfall] Enriching email for: ${contact.name} @ ${domain}`);
-
-    // Step 1: Findymail (built-in SMTP verify, cheapest)
-    try {
-      const findyResult = await findymailFindEmail(contact.name, domain);
-      if (findyResult && (findyResult.status === "valid" || findyResult.status === "catch-all")) {
-        contact.email = findyResult.email;
-        contact.emailVerified = findyResult.status === "valid" ? true : "catch-all";
-        console.log(`[emailWaterfall] Findymail found: ${contact.email} (${findyResult.status})`);
-        continue;
-      }
-    } catch (err) {
-      console.warn(`[emailWaterfall] Findymail error for ${contact.name}:`, err);
-    }
-
-    // Step 2: AnyMail Finder (certain confidence only)
-    try {
-      const anyResult = await anymailFinderFindEmail(firstName, lastName, domain);
-      if (anyResult) {
-        contact.email = anyResult.email;
-        contact.emailVerified = true;
-        console.log(`[emailWaterfall] AnyMail Finder found: ${contact.email}`);
-        continue;
-      }
-    } catch (err) {
-      console.warn(`[emailWaterfall] AnyMail Finder error for ${contact.name}:`, err);
-    }
-
-    // Step 3: Dropcontact (good EU coverage)
-    try {
-      const dropResult = await dropcontactFindEmail(firstName, lastName, domain);
-      if (dropResult) {
-        contact.email = dropResult.email;
-        contact.emailVerified = dropResult.emailVerified;
-        console.log(`[emailWaterfall] Dropcontact found: ${contact.email}`);
-        continue;
-      }
-    } catch (err) {
-      console.warn(`[emailWaterfall] Dropcontact error for ${contact.name}:`, err);
-    }
-
-    console.log(`[emailWaterfall] No email found for ${contact.name}`);
-  }
-}
 
 export class VCEnrichmentService {
   private profile: ScrapeProfile;
@@ -1397,7 +1260,6 @@ If you cannot determine the investment stages, return: {"stages": []}`;
       useRecursiveScraping?: boolean;
       maxRecursiveDepth?: number;
       maxRecursivePages?: number;
-      extractionObjective?: string; // Used for agent-driven contact selection
     } = {}
   ): Promise<EnrichmentResult> {
     const {
@@ -1408,7 +1270,6 @@ If you cannot determine the investment stages, return: {"stages": []}`;
       useRecursiveScraping = true, // NEW: Enable by default
       maxRecursiveDepth = 3,
       maxRecursivePages = 20,
-      extractionObjective,
     } = options;
     try {
       // Normalize URL to fix common issues (missing protocol, trailing slash, etc.)
@@ -1733,92 +1594,8 @@ If you cannot determine the investment stages, return: {"stages": []}`;
       console.log(`[enrichVCFirm] 🔍 Deep profile scraping was enabled`);
     }
 
-    // Step 5b: Classify decision-maker tiers for all scraped team members
-    for (const member of result.teamMembers) {
-      if (member.title) {
-        const tier = classifyDecisionMakerTier(member.title);
-        if (tier.tier !== "Exclude") {
-          member.decisionMakerTier = tier.tier;
-        }
-      }
-    }
-
-    // Step 5c: Apollo people-discovery — always runs when APOLLO_API_KEY is set.
-    // Website scraping already happened so we have rich context (specializations,
-    // LinkedIn URLs from the site) but Apollo fills gaps and catches people who
-    // aren't listed on the company website. Deduplication prevents double-counting.
-    try {
-      const domain = new URL(websiteUrl).hostname;
-      const apolloPeople = await apolloSearchPeople(domain);
-
-      if (apolloPeople.length > 0) {
-        console.log(`[enrichVCFirm] Apollo returned ${apolloPeople.length} people`);
-        let apolloAdded = 0;
-
-        for (const person of apolloPeople) {
-          const tier = classifyDecisionMakerTier(person.title);
-          if (tier.tier === "Exclude") continue;
-
-          // Deduplicate against existing members
-          const existing = findPersonByName(result.teamMembers, person.name);
-          if (existing) {
-            // Backfill LinkedIn URL if website scraping didn't find one
-            if (!existing.linkedinUrl && person.linkedinUrl) {
-              existing.linkedinUrl = person.linkedinUrl;
-            }
-            continue;
-          }
-
-          result.teamMembers.push({
-            name: person.name,
-            title: person.title,
-            jobFunction: "",
-            specialization: "",
-            linkedinUrl: person.linkedinUrl,
-            email: "",
-            decisionMakerTier: tier.tier,
-            portfolioCompanies: "",
-            investmentFocus: "",
-            stagePreference: "",
-            checkSizeRange: "",
-            geographicFocus: "",
-            investmentThesis: "",
-            notableInvestments: "",
-            yearsExperience: "",
-            background: "",
-            dataSourceUrl: "apollo.io",
-            confidenceScore: "Medium",
-          });
-          apolloAdded++;
-        }
-
-        if (apolloAdded > 0) {
-          onProgress?.(`Apollo added ${apolloAdded} new contacts`);
-          console.log(`[enrichVCFirm] Apollo added ${apolloAdded} new contacts`);
-        }
-      }
-    } catch (apolloErr) {
-      console.warn("[enrichVCFirm] Apollo error:", apolloErr);
-    }
-
-    // Step 5d: Agent contact selection — pick 2-3 most relevant people for email enrichment
-    const contactsForEnrichment = await selectContactsForEmailEnrichment(
-      result.teamMembers,
-      extractionObjective,
-      companyName,
-    );
-
-    // Step 5e: Email waterfall — only for agent-selected contacts
-    if (contactsForEnrichment.length > 0) {
-      onProgress?.(`Running email enrichment for ${contactsForEnrichment.length} selected contacts...`);
-      const domain = (() => {
-        try { return new URL(websiteUrl).hostname; } catch { return ""; }
-      })();
-
-      if (domain) {
-        await enrichEmailsForContacts(contactsForEnrichment, domain);
-      }
-    }
+    // Step 5b: Tier classification + Apollo people-discovery
+    await enrichPeopleInPlace(result.teamMembers, websiteUrl, { companyName, onProgress });
 
     // Step 6: Extract portfolio companies (using multi-page content)
     onProgress?.(`Extracting portfolio companies for ${companyName}`);
