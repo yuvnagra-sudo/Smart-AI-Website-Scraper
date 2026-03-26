@@ -306,8 +306,10 @@ export default function Dashboard() {
   const configureBriefMutation = trpc.enrichment.configureBrief.useMutation({
     onSuccess: (data, variables) => {
       setChatMessages(prev => [...prev, { role: "assistant", content: data.message }]);
-      const userMsgCount = variables.messages.filter(m => m.role === "user").length;
-      if (data.readyToGenerate || userMsgCount >= 3) {
+      const userMessages = variables.messages.filter(m => m.role === "user");
+      const userMsgCount = userMessages.length;
+      const firstMsgIsDetailed = userMessages[0]?.content.length >= 40;
+      if (data.readyToGenerate || userMsgCount >= 3 || (userMsgCount === 1 && firstMsgIsDetailed)) {
         setChatReadyToGenerate(true);
         const brief = {
           outreachGoal:     data.brief.outreachGoal,

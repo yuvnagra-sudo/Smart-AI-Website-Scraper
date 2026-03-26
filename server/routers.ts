@@ -503,53 +503,69 @@ USER REQUEST:
         const client = new Anthropic({ apiKey });
 
         const systemPrompt = `You are a B2B data targeting expert helping configure a web scraping job.
-Your goal: have a short, natural conversation (2–3 messages) to understand exactly what the user needs, then generate an optimal configuration.
+Your goal: have a short, natural conversation (2–3 turns) to understand exactly what the user needs.
 
 CONVERSATION FLOW:
-1. First message from user: Acknowledge what they said, then ask the ONE most important clarifying question that would meaningfully improve the output. Pick from:
-   - "What specific data do you want pulled from each website?" (if they haven't said)
-   - "Who's the decision-maker you want to reach?" (if they need contacts but haven't said titles)
+1. First user message: Acknowledge what they said, then ask the ONE most important clarifying question. Choose from:
+   - "What specific data do you want pulled from each website?" (if not stated)
+   - "Who is the decision-maker you want to reach?" (if contacts are needed but titles unclear)
    - "What will you do with the data — outreach, research, or something else?" (if purpose is unclear)
-   - "Any types of companies to skip?" (if exclusions would meaningfully improve fit)
-   Only ask one question. Keep your message to 2–3 sentences.
+   - "Any types of companies to skip?" (if exclusions would improve fit)
+   Ask only one question. Keep your message to 2–3 sentences. Set readyToGenerate to false.
 
-2. Second message from user: You now have enough to configure well. Set readyToGenerate: true.
-   Confirm what you understood in 1–2 sentences, ending with "Generating your plan now."
+2. Second user message: You now have enough. Set readyToGenerate to true.
+   Confirm what you understood in 1–2 sentences ending with "Generating your plan now."
 
-3. If the user's very first message is already extremely detailed (company type + data columns + purpose all clear): set readyToGenerate: true immediately. Don't ask questions they already answered.
+3. If the very first message already covers company type + purpose + desired data clearly: set readyToGenerate true immediately, don't ask questions they already answered.
 
-4. After 3 user messages: ALWAYS set readyToGenerate: true regardless.
+4. After 3 user messages: always set readyToGenerate true.
 
-IMPORTANT: Never ask multiple questions at once. Be conversational, not clinical.
+Always call the submit_brief tool — it is your only way to respond.`;
 
-When readyToGenerate is true, fill the brief fields as specifically as possible based on the full conversation.
+        // Anthropic requires messages to start with a user turn — drop any leading assistant messages
+        const firstUserIdx = input.messages.findIndex(m => m.role === "user");
+        const apiMessages = input.messages
+          .slice(firstUserIdx)
+          .map(m => ({ role: m.role, content: m.content }));
 
-Return ONLY valid JSON (no markdown, no code fences):
-{
-  "message": "your conversational response",
-  "readyToGenerate": false,
-  "brief": {
-    "outreachGoal": "what they'll do with the data",
-    "icpSummary": "specific company type, industry, and size",
-    "targetTitles": "comma-separated decision-maker titles (empty if contacts not needed)",
-    "fitSignals": "comma-separated signals that indicate a strong fit",
-    "exclusionSignals": "comma-separated signals to skip a company",
-    "description": "detailed list of every data column to extract from each website"
-  }
-}`;
+        const briefTool = {
+          name: "submit_brief",
+          description: "Submit your conversational response and the current targeting brief configuration.",
+          input_schema: {
+            type: "object" as const,
+            properties: {
+              message: { type: "string", description: "Your conversational reply to show the user (2–3 sentences max)" },
+              readyToGenerate: { type: "boolean", description: "True when you have enough info to generate the extraction plan" },
+              brief: {
+                type: "object",
+                properties: {
+                  outreachGoal:     { type: "string", description: "What the user will do with the data" },
+                  icpSummary:       { type: "string", description: "Specific company type, industry, and size" },
+                  targetTitles:     { type: "string", description: "Comma-separated decision-maker job titles (blank if contacts not needed)" },
+                  fitSignals:       { type: "string", description: "Comma-separated signals that indicate a strong fit" },
+                  exclusionSignals: { type: "string", description: "Comma-separated signals to exclude a company" },
+                  description:      { type: "string", description: "Detailed list of every data field to extract from each website" },
+                },
+                required: ["outreachGoal", "icpSummary", "targetTitles", "fitSignals", "exclusionSignals", "description"],
+              },
+            },
+            required: ["message", "readyToGenerate", "brief"],
+          },
+        };
 
-        let raw: string;
+        let toolInput: any;
         try {
           const response = await client.messages.create({
             model: "claude-sonnet-4-6",
             max_tokens: 1024,
             system: systemPrompt,
-            messages: input.messages.map(m => ({ role: m.role, content: m.content })),
+            tools: [briefTool],
+            tool_choice: { type: "tool", name: "submit_brief" },
+            messages: apiMessages,
           });
-          raw = response.content
-            .filter((b): b is { type: "text"; text: string } => b.type === "text")
-            .map(b => b.text)
-            .join("");
+          const toolUse = response.content.find((b): b is { type: "tool_use"; name: string; input: any } => b.type === "tool_use");
+          if (!toolUse) throw new Error("Claude did not call submit_brief tool");
+          toolInput = toolUse.input;
         } catch (err: any) {
           const status = err?.status ?? err?.statusCode ?? "?";
           const body = err?.message ?? String(err);
@@ -560,23 +576,20 @@ Return ONLY valid JSON (no markdown, no code fences):
           });
         }
 
-        // Strip markdown code fences Claude sometimes adds
-        const jsonStr = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
-        let parsed: any = {};
-        try { parsed = JSON.parse(jsonStr); } catch {
-          console.warn("[configureBrief] Failed to parse JSON, raw:", raw.slice(0, 300));
-        }
+        // Fall back to the last user message if Claude left description blank
+        const lastUserMessage = input.messages.filter(m => m.role === "user").at(-1)?.content ?? "";
+        const description = String(toolInput.brief?.description ?? "") || lastUserMessage;
 
         return {
-          message:         String(parsed.message ?? "Got it — generating your plan now."),
-          readyToGenerate: Boolean(parsed.readyToGenerate),
+          message:         String(toolInput.message         ?? "Got it — generating your plan now."),
+          readyToGenerate: Boolean(toolInput.readyToGenerate),
           brief: {
-            outreachGoal:     String(parsed.brief?.outreachGoal     ?? ""),
-            icpSummary:       String(parsed.brief?.icpSummary       ?? ""),
-            targetTitles:     String(parsed.brief?.targetTitles     ?? ""),
-            fitSignals:       String(parsed.brief?.fitSignals       ?? ""),
-            exclusionSignals: String(parsed.brief?.exclusionSignals ?? ""),
-            description:      String(parsed.brief?.description      ?? ""),
+            outreachGoal:     String(toolInput.brief?.outreachGoal     ?? ""),
+            icpSummary:       String(toolInput.brief?.icpSummary       ?? ""),
+            targetTitles:     String(toolInput.brief?.targetTitles     ?? ""),
+            fitSignals:       String(toolInput.brief?.fitSignals       ?? ""),
+            exclusionSignals: String(toolInput.brief?.exclusionSignals ?? ""),
+            description,
           },
         };
       }),
