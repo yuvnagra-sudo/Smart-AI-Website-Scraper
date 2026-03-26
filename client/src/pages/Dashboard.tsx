@@ -175,6 +175,7 @@ export default function Dashboard() {
   ]);
   const [chatInput, setChatInput]             = useState("");
   const [chatReadyToGenerate, setChatReadyToGenerate] = useState(false);
+  const [planGenElapsed, setPlanGenElapsed]   = useState(0);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = chatContainerRef.current;
@@ -319,13 +320,23 @@ export default function Dashboard() {
     },
   });
 
+  // Elapsed-time counter for "Generating your extraction plan..." indicator
+  useEffect(() => {
+    if (!generatePlanMutation.isPending) {
+      setPlanGenElapsed(0);
+      return;
+    }
+    setPlanGenElapsed(0);
+    const interval = setInterval(() => setPlanGenElapsed((s) => s + 1), 1000);
+    return () => clearInterval(interval);
+  }, [generatePlanMutation.isPending]);
+
   const configureBriefMutation = trpc.enrichment.configureBrief.useMutation({
     onSuccess: (data, variables) => {
       setChatMessages(prev => [...prev, { role: "assistant", content: data.message }]);
       const userMessages = variables.messages.filter(m => m.role === "user");
       const userMsgCount = userMessages.length;
-      const firstMsgIsDetailed = userMessages[0]?.content.length >= 40;
-      if (data.readyToGenerate || userMsgCount >= 3 || (userMsgCount === 1 && firstMsgIsDetailed)) {
+      if (data.readyToGenerate || userMsgCount >= 3) {
         setChatReadyToGenerate(true);
         const brief = {
           outreachGoal:     data.brief.outreachGoal,
@@ -1052,6 +1063,9 @@ export default function Dashboard() {
                             <div className="bg-white border border-slate-200 rounded-2xl rounded-bl-sm px-4 py-2.5 shadow-sm text-sm text-slate-500 flex items-center gap-2">
                               <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-500" />
                               Generating your extraction plan…
+                              <span className="text-slate-400 tabular-nums">
+                                {planGenElapsed > 0 ? `${planGenElapsed}s` : ""}
+                              </span>
                             </div>
                           </div>
                         )}

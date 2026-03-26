@@ -1473,13 +1473,13 @@ export async function processAgentJob(jobId: number) {
           let apolloOrg: ApolloOrganization | null = null;
           if (peopleSec) {
             try {
-              apolloOrg = await mergeApolloContacts(apolloContacts, firm.websiteUrl, undefined, apolloSenioritiesToUse);
+              apolloOrg = await mergeApolloContacts(apolloContacts, firm.websiteUrl, undefined, apolloSenioritiesToUse, firm.companyName);
               classifyTiersInPlace(apolloContacts);
               if (apolloContacts.length > 0) {
-                console.log(`[processAgentJob] Apollo: ${apolloContacts.length} contacts for ${firm.companyName} — skipping contacts scrape`);
+                console.log(`[processAgentJob] LinkedIn: ${apolloContacts.length} contacts for ${firm.companyName} — skipping contacts scrape`);
               }
             } catch (apolloErr) {
-              console.warn(`[processAgentJob] Apollo lookup failed for ${firm.websiteUrl}:`, apolloErr);
+              console.warn(`[processAgentJob] LinkedIn lookup failed for ${firm.websiteUrl}:`, apolloErr);
             }
           }
 
