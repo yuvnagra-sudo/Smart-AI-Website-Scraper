@@ -20,9 +20,9 @@ import {
   Bot, Download, Upload, Clock, CheckCircle, XCircle, Loader2, LogOut,
   FileSpreadsheet, Table2, DollarSign, TrendingUp, Building2, Users,
   HeartPulse, ShoppingCart, Home, MapPin, Info, Sparkles, X, Plus, List, Search,
-  PauseCircle, PlayCircle, ChevronDown, ChevronUp, AlertCircle, Target, Edit2,
+  PauseCircle, PlayCircle, ChevronDown, ChevronUp, AlertCircle, Target, Edit2, ArrowUp,
 } from "lucide-react";
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { toast } from "sonner";
 import { Link } from "wouter";
 import ResultsSheet from "@/components/ResultsSheet";
@@ -167,6 +167,19 @@ export default function Dashboard() {
   });
   const [showTargetingEdit, setShowTargetingEdit] = useState(true);
 
+  // Chat configurator state
+  const CHAT_OPENER = "Hi! Tell me about your research project — what companies are you looking at, and what data do you want to pull from their websites?";
+  const [chatMode, setChatMode]               = useState<"chat" | "form">("chat");
+  const [chatMessages, setChatMessages]       = useState<{ role: "user" | "assistant"; content: string }[]>([
+    { role: "assistant", content: CHAT_OPENER },
+  ]);
+  const [chatInput, setChatInput]             = useState("");
+  const [chatReadyToGenerate, setChatReadyToGenerate] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatMessages]);
+
   // Column mapping state
   const [showColumnMapping, setShowColumnMapping] = useState(false);
   const [fileHeaders, setFileHeaders] = useState<{
@@ -200,10 +213,13 @@ export default function Dashboard() {
   const [crawlUrl, setCrawlUrl] = useState("");
   const [crawlMaxPages, setCrawlMaxPages] = useState(5);
 
-  const { data: jobs, isLoading: jobsLoading, refetch } = trpc.enrichment.listJobs.useQuery(undefined, {
-    enabled: !!user,
-    refetchInterval: 3000,
-  });
+  const { data: jobs, isLoading: jobsLoading, isError: jobsError, refetch } =
+    trpc.enrichment.listJobs.useQuery(undefined, {
+      enabled: !!user,
+      refetchInterval: (data) => (data ? 3000 : false),
+      retry: 1,
+      retryDelay: 3000,
+    });
 
   const isAdmin = user?.role === "admin";
   const [jobsTab, setJobsTab] = useState<"mine" | "all">("mine");
@@ -286,6 +302,42 @@ export default function Dashboard() {
     },
   });
 
+  const configureChatMutation = trpc.enrichment.configureChat.useMutation({
+    onSuccess: (data) => {
+      setChatMessages(prev => [...prev, { role: "assistant", content: data.message }]);
+      if (data.readyToGenerate) {
+        setChatReadyToGenerate(true);
+        // Silently populate the form fields so Generate uses accurate values
+        setTargetingBrief({
+          outreachGoal:     data.brief.outreachGoal,
+          icpSummary:       data.brief.icpSummary,
+          targetTitles:     data.brief.targetTitles,
+          fitSignals:       data.brief.fitSignals,
+          exclusionSignals: data.brief.exclusionSignals,
+        });
+        setDescription(data.brief.description);
+      }
+    },
+    onError: (error) => {
+      toast.error(`Chat error: ${error.message}`);
+    },
+  });
+
+  const sendChatMessage = () => {
+    const text = chatInput.trim();
+    if (!text || configureChatMutation.isPending) return;
+    const updated = [...chatMessages, { role: "user" as const, content: text }];
+    setChatMessages(updated);
+    setChatInput("");
+    configureChatMutation.mutate({ messages: updated });
+  };
+
+  const resetChat = () => {
+    setChatMessages([{ role: "assistant", content: CHAT_OPENER }]);
+    setChatInput("");
+    setChatReadyToGenerate(false);
+  };
+
   const confirmMutation = trpc.enrichment.confirmAndStart.useMutation({
     onSuccess: (data) => {
       toast.success(`Extraction started! Processing ${data.firmCount} entries.`);
@@ -298,6 +350,7 @@ export default function Dashboard() {
       setWizardSkillContext(null);
       setTargetingBrief({ outreachGoal: "", icpSummary: "", targetTitles: "", fitSignals: "", exclusionSignals: "" });
       setShowTargetingEdit(true);
+      resetChat();
       refetch();
       if (fileInputRef.current) fileInputRef.current.value = "";
     },
@@ -899,6 +952,114 @@ export default function Dashboard() {
 
                 {/* ── AI Custom tab ── */}
                 <TabsContent value="ai" className="space-y-5">
+                  {/* Chat / Form toggle */}
+                  <div className="flex items-center gap-1 p-0.5 rounded-lg bg-muted/40 w-fit">
+                    <button
+                      onClick={() => setChatMode("chat")}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                        chatMode === "chat" ? "bg-white shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <Bot className="h-3.5 w-3.5" /> Chat
+                    </button>
+                    <button
+                      onClick={() => setChatMode("form")}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                        chatMode === "form" ? "bg-white shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <Edit2 className="h-3.5 w-3.5" /> Form
+                    </button>
+                  </div>
+
+                  {chatMode === "chat" ? (
+                    /* ── Chat configurator ── */
+                    <div className="space-y-3">
+                      {/* Message window */}
+                      <div className="border rounded-xl bg-muted/5 p-4 space-y-3 min-h-[180px] max-h-[340px] overflow-y-auto">
+                        {chatMessages.map((msg, i) => (
+                          <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                            <div className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
+                              msg.role === "user"
+                                ? "bg-primary text-primary-foreground rounded-br-sm"
+                                : "bg-white border shadow-sm rounded-bl-sm"
+                            }`}>
+                              {msg.content}
+                            </div>
+                          </div>
+                        ))}
+                        {configureChatMutation.isPending && (
+                          <div className="flex justify-start">
+                            <div className="bg-white border shadow-sm rounded-2xl rounded-bl-sm px-4 py-3">
+                              <div className="flex gap-1 items-center">
+                                {[0, 150, 300].map((delay) => (
+                                  <div key={delay} className="w-1.5 h-1.5 bg-muted-foreground/40 rounded-full animate-bounce" style={{ animationDelay: `${delay}ms` }} />
+                                ))}
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                        <div ref={chatEndRef} />
+                      </div>
+
+                      {/* Input bar */}
+                      <div className="flex gap-2">
+                        <Input
+                          value={chatInput}
+                          onChange={(e) => setChatInput(e.target.value)}
+                          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChatMessage(); } }}
+                          placeholder="Type a message..."
+                          disabled={configureChatMutation.isPending}
+                          className="flex-1"
+                        />
+                        <Button
+                          onClick={sendChatMessage}
+                          disabled={!chatInput.trim() || configureChatMutation.isPending}
+                          size="icon"
+                        >
+                          {configureChatMutation.isPending
+                            ? <Loader2 className="h-4 w-4 animate-spin" />
+                            : <ArrowUp className="h-4 w-4" />}
+                        </Button>
+                      </div>
+
+                      {/* Actions row */}
+                      <div className="flex items-center justify-between min-h-[36px]">
+                        {chatMessages.length > 1 && !chatReadyToGenerate && (
+                          <button onClick={resetChat} className="text-xs text-muted-foreground hover:text-foreground transition-colors">
+                            Start over
+                          </button>
+                        )}
+                        {chatReadyToGenerate && (
+                          <div className="flex items-center gap-3 w-full">
+                            <button onClick={resetChat} className="text-xs text-muted-foreground hover:text-foreground transition-colors shrink-0">
+                              Start over
+                            </button>
+                            <Button
+                              className="ml-auto"
+                              onClick={() => generatePlanMutation.mutate({
+                                description,
+                                targetingBrief: {
+                                  outreachGoal:     targetingBrief.outreachGoal.trim(),
+                                  icpSummary:       targetingBrief.icpSummary.trim(),
+                                  targetTitles:     targetingBrief.targetTitles.trim(),
+                                  fitSignals:       targetingBrief.fitSignals.trim(),
+                                  exclusionSignals: targetingBrief.exclusionSignals.trim(),
+                                },
+                              })}
+                              disabled={generatePlanMutation.isPending}
+                            >
+                              {generatePlanMutation.isPending
+                                ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Generating plan...</>
+                                : <><Sparkles className="h-4 w-4 mr-2" />{wizardSections.length > 0 ? "Regenerate Sections" : "Generate Extraction Plan"}</>}
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    /* ── Form mode — existing Targeting Brief + description ── */
+                    <>
 
                   {/* ── Panel A: Targeting Brief ── */}
                   <div className="border rounded-lg overflow-hidden">
@@ -1082,6 +1243,8 @@ export default function Dashboard() {
                       )}
                     </div>
                   </div>
+                  </>
+                  )}
 
                   {/* Generated sections */}
                   {wizardSections.length > 0 && (
@@ -1403,6 +1566,15 @@ export default function Dashboard() {
             {jobsLoading ? (
               <div className="flex items-center justify-center py-8">
                 <Loader2 className="h-8 w-8 animate-spin text-primary" />
+              </div>
+            ) : jobsError ? (
+              <div className="flex flex-col items-center justify-center py-10 text-center gap-3">
+                <XCircle className="h-8 w-8 text-red-400" />
+                <div>
+                  <p className="font-medium text-sm">Couldn't load jobs</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">The server may be temporarily unavailable.</p>
+                </div>
+                <Button variant="outline" size="sm" onClick={() => refetch()}>Retry</Button>
               </div>
             ) : hasJobs ? (
               <div className="space-y-3">

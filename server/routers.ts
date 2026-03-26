@@ -482,6 +482,103 @@ USER REQUEST:
         }
       }),
 
+    // Conversational job configurator — chat-style alternative to the targeting brief form
+    configureChat: protectedProcedure
+      .input(z.object({
+        messages: z.array(z.object({
+          role: z.enum(["user", "assistant"]),
+          content: z.string(),
+        })).min(1),
+      }))
+      .mutation(async ({ input }) => {
+        const { invokeLLM } = await import("./_core/openaiLLM");
+
+        const systemMsg = `You are a friendly AI assistant helping a user configure a web data extraction job. Through natural conversation, collect what you need to build an accurate plan.
+
+You need to gather (in order of importance):
+1. COLUMNS — What specific data fields do they want extracted from each company website? (most important)
+2. GOAL — What will they do with this data? (outreach, prospecting, market research, building a list)
+3. ICP — What type of companies are they targeting? (industry, size, stage, geography)
+4. CONTACTS — What job titles to find? (only if they need people/contact data)
+5. FIT — What makes a company a strong match vs. one to skip?
+
+Rules:
+- Be conversational and friendly. Ask 1-2 questions per message — never list all 5 at once.
+- Start by asking what companies they're looking at and what they want to know about them.
+- Ask follow-up questions naturally based on their answers.
+- Once you have COLUMNS + GOAL + ICP (minimum 3 exchanges), set readyToGenerate: true.
+- Before setting readyToGenerate: true, write a brief 2-sentence summary of what you captured.
+- Always fill in brief.description with a clear sentence describing what columns to extract (e.g. "Extract investment thesis, team members with titles, portfolio companies, and funding stage").
+- Keep responses concise: 2-3 sentences max.
+- Never ask about data you already have.
+
+Always return valid JSON (no markdown):
+{
+  "message": "your conversational response",
+  "readyToGenerate": false,
+  "brief": {
+    "outreachGoal": "current best understanding, empty string if unknown",
+    "icpSummary": "current best understanding, empty string if unknown",
+    "targetTitles": "comma-separated titles if known, empty string if unknown",
+    "fitSignals": "comma-separated fit signals if known, empty string if unknown",
+    "exclusionSignals": "comma-separated exclusion signals if known, empty string if unknown",
+    "description": "free-text description of what data columns to extract, empty string if unknown"
+  }
+}`;
+
+        const response = await invokeLLM({
+          messages: [
+            { role: "system", content: systemMsg },
+            ...input.messages,
+          ],
+          response_format: {
+            type: "json_schema",
+            json_schema: {
+              name: "chat_response",
+              strict: true,
+              schema: {
+                type: "object",
+                properties: {
+                  message: { type: "string" },
+                  readyToGenerate: { type: "boolean" },
+                  brief: {
+                    type: "object",
+                    properties: {
+                      outreachGoal:     { type: "string" },
+                      icpSummary:       { type: "string" },
+                      targetTitles:     { type: "string" },
+                      fitSignals:       { type: "string" },
+                      exclusionSignals: { type: "string" },
+                      description:      { type: "string" },
+                    },
+                    required: ["outreachGoal", "icpSummary", "targetTitles", "fitSignals", "exclusionSignals", "description"],
+                    additionalProperties: false,
+                  },
+                },
+                required: ["message", "readyToGenerate", "brief"],
+                additionalProperties: false,
+              },
+            },
+          },
+        });
+
+        const raw = response!.choices[0]?.message?.content ?? "{}";
+        const parsed = JSON.parse(typeof raw === "string" ? raw : "{}");
+
+        return {
+          message:          String(parsed.message ?? "Sorry, I couldn't process that. Please try again."),
+          readyToGenerate:  Boolean(parsed.readyToGenerate),
+          brief: {
+            outreachGoal:     String(parsed.brief?.outreachGoal     ?? ""),
+            icpSummary:       String(parsed.brief?.icpSummary       ?? ""),
+            targetTitles:     String(parsed.brief?.targetTitles     ?? ""),
+            fitSignals:       String(parsed.brief?.fitSignals       ?? ""),
+            exclusionSignals: String(parsed.brief?.exclusionSignals ?? ""),
+            description:      String(parsed.brief?.description      ?? ""),
+          },
+        };
+      }),
+
     // Get job status
     getJob: protectedProcedure
       .input(z.object({ jobId: z.number() }))
