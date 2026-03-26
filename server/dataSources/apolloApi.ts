@@ -1,8 +1,9 @@
 /**
  * Apollo.io People Search — FREE people discovery by domain
  *
- * Uses the "mixed_people/search" endpoint which returns name, title, and
- * LinkedIn URL without consuming any email-reveal credits.
+ * Uses the "mixed_people/api_search" endpoint (replaced deprecated mixed_people/search
+ * on Dec 15 2025) which returns first_name + last_name_obfuscated without consuming
+ * email-reveal credits.
  *
  * Gate: APOLLO_API_KEY env var — returns [] when absent.
  *
@@ -19,12 +20,15 @@ export interface ApolloPerson {
   seniority: string;
 }
 
-const APOLLO_API_KEY = process.env.APOLLO_API_KEY ?? "";
+// Read at call time so env vars set after module load are picked up (fix #4)
+function getApiKey(): string {
+  return process.env.APOLLO_API_KEY ?? "";
+}
 
 /**
  * Search for people at a company by domain.
- * Returns name/title/LinkedIn URL. No credits consumed — Apollo charges
- * credits only when you request email reveal, which we never do here.
+ * Returns name/title. No credits consumed — Apollo charges credits only when
+ * you request email reveal, which we never do here.
  *
  * @param domain - Company domain, e.g. "acme.com"
  * @param seniorities - Apollo seniority labels to filter by
@@ -35,7 +39,8 @@ export async function apolloSearchPeople(
   seniorities: string[] = ["c_suite", "vp", "director", "manager", "partner", "owner"],
   maxResults = 25,
 ): Promise<ApolloPerson[]> {
-  if (!APOLLO_API_KEY) {
+  const apiKey = getApiKey();
+  if (!apiKey) {
     console.log("[apolloApi] APOLLO_API_KEY not set — skipping Apollo lookup");
     return [];
   }
@@ -52,12 +57,12 @@ export async function apolloSearchPeople(
   console.log(`[apolloApi] Searching people at domain: ${cleanDomain}`);
 
   try {
-    const response = await fetch("https://api.apollo.io/api/v1/mixed_people/search", {
+    const response = await fetch("https://api.apollo.io/api/v1/mixed_people/api_search", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Cache-Control": "no-cache",
-        "X-Api-Key": APOLLO_API_KEY,
+        "X-Api-Key": apiKey,
       },
       body: JSON.stringify({
         organization_domains: [cleanDomain],
@@ -78,10 +83,8 @@ export async function apolloSearchPeople(
     const data = (await response.json()) as {
       people?: Array<{
         first_name?: string;
-        last_name?: string;
-        name?: string;
+        last_name_obfuscated?: string;
         title?: string;
-        linkedin_url?: string;
         seniority?: string;
       }>;
     };
@@ -90,13 +93,13 @@ export async function apolloSearchPeople(
     console.log(`[apolloApi] Found ${people.length} people at ${cleanDomain}`);
 
     return people
-      .filter((p) => p.name && p.title) // Only contacts with name + title
+      .filter((p) => p.first_name && p.title)
       .map((p) => ({
         firstName: p.first_name ?? "",
-        lastName: p.last_name ?? "",
-        name: p.name ?? "",
+        lastName: p.last_name_obfuscated ?? "",
+        name: `${p.first_name ?? ""} ${p.last_name_obfuscated ?? ""}`.trim(),
         title: p.title ?? "",
-        linkedinUrl: p.linkedin_url ?? "",
+        linkedinUrl: "",
         seniority: p.seniority ?? "",
       }));
   } catch (err) {

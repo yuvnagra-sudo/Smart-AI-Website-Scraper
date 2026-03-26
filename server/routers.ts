@@ -24,6 +24,8 @@ import { classifyDecisionMakerTier } from './decisionMakerTiers';
 import { calculateRecencyScore } from './portfolioIntelligence';
 import { canResumeJob, prepareJobForResume, getResumeProgress } from "./resumeJob";
 import { extractDirectory } from "./directoryExtractor";
+import { mergeApolloContacts, classifyTiersInPlace } from "./peopleEnrichment";
+import type { EnrichableContact } from "./peopleEnrichment";
 import { nanoid } from "nanoid";
 import { saveFirmImmediately, getProcessedFirms } from "./incrementalSave";
 
@@ -493,36 +495,35 @@ USER REQUEST:
       .mutation(async ({ input }) => {
         const { invokeLLM } = await import("./_core/openaiLLM");
 
-        const systemMsg = `You are a friendly AI assistant helping a user configure a web data extraction job. Through natural conversation, collect what you need to build an accurate plan.
+        const systemMsg = `You are an AI assistant helping configure a web data extraction job. Your job is to understand what the user wants and get them to extraction AS FAST AS POSSIBLE — ideally in 1-2 messages.
 
-You need to gather (in order of importance):
-1. COLUMNS — What specific data fields do they want extracted from each company website? (most important)
-2. GOAL — What will they do with this data? (outreach, prospecting, market research, building a list)
-3. ICP — What type of companies are they targeting? (industry, size, stage, geography)
-4. CONTACTS — What job titles to find? (only if they need people/contact data)
-5. FIT — What makes a company a strong match vs. one to skip?
+SPEED RULES (follow strictly):
+- If the user's first message tells you WHAT companies + WHAT data they want: set readyToGenerate: true IMMEDIATELY on your first response. No follow-up questions needed.
+- If the first message is vague on only ONE thing: ask that one question, then set readyToGenerate: true on your NEXT response no matter what.
+- NEVER ask more than one follow-up question total. After 2 user messages, ALWAYS set readyToGenerate: true.
+- Infer and fill in anything you're unsure about — do NOT ask the user to clarify minor details.
+- Do not ask about fit signals, exclusion signals, or goal unless the user brings them up. You can infer reasonable defaults.
 
-Rules:
-- Be conversational and friendly. Ask 1-2 questions per message — never list all 5 at once.
-- Start by asking what companies they're looking at and what they want to know about them.
-- Ask follow-up questions naturally based on their answers.
-- Once you have COLUMNS + GOAL + ICP (minimum 3 exchanges), set readyToGenerate: true.
-- Before setting readyToGenerate: true, write a brief 2-sentence summary of what you captured.
-- Always fill in brief.description with a clear sentence describing what columns to extract (e.g. "Extract investment thesis, team members with titles, portfolio companies, and funding stage").
-- Keep responses concise: 2-3 sentences max.
-- Never ask about data you already have.
+What to extract from the conversation:
+- description: What data columns they want from each company website (most important — infer this aggressively)
+- icpSummary: What type of companies they're targeting (infer from context if not stated)
+- targetTitles: Job titles to find (only if they mention needing contacts/people)
+- outreachGoal: What they'll do with the data (infer from context)
+- fitSignals / exclusionSignals: Only fill if they explicitly mention these
+
+When readyToGenerate is true, your message should be a SHORT confirmation: "Got it — [1 sentence summary of what you'll extract]. Generating your plan now."
 
 Always return valid JSON (no markdown):
 {
-  "message": "your conversational response",
+  "message": "your response",
   "readyToGenerate": false,
   "brief": {
-    "outreachGoal": "current best understanding, empty string if unknown",
-    "icpSummary": "current best understanding, empty string if unknown",
-    "targetTitles": "comma-separated titles if known, empty string if unknown",
-    "fitSignals": "comma-separated fit signals if known, empty string if unknown",
-    "exclusionSignals": "comma-separated exclusion signals if known, empty string if unknown",
-    "description": "free-text description of what data columns to extract, empty string if unknown"
+    "outreachGoal": "inferred or empty string",
+    "icpSummary": "inferred or empty string",
+    "targetTitles": "comma-separated or empty string",
+    "fitSignals": "comma-separated or empty string",
+    "exclusionSignals": "comma-separated or empty string",
+    "description": "what data columns to extract — always fill this from context"
   }
 }`;
 
@@ -1293,6 +1294,33 @@ export async function processAgentJob(jobId: number) {
             console.warn(`[processAgentJob] Unexpected directory result for ${firm.websiteUrl} — skipping expansion to prevent counter overflow`);
             insertJobLog({ jobId, url: firm.websiteUrl, companyName: firm.companyName, status: "failed", fieldsTotal: 0, fieldsFilled: 0, durationMs: Date.now() - startMs }).catch(() => {});
           } else {
+            // Apollo enrichment — runs when skillContext.apolloSeniorities is set.
+            // Finds a people-like section in the output and merges Apollo contacts into it.
+            if (skillContext?.apolloSeniorities?.length) {
+              try {
+                const peopleSec = sections.find(s =>
+                  /team|people|contact|staff|member|decision.?maker/i.test(s.key + " " + s.label)
+                );
+                if (peopleSec) {
+                  let contacts: EnrichableContact[] = [];
+                  const existing = result.data[peopleSec.key];
+                  if (existing) {
+                    try {
+                      const parsed = JSON.parse(existing);
+                      if (Array.isArray(parsed)) contacts = parsed.filter((p: any) => p.name && p.title);
+                    } catch { /* plain-text value — leave contacts empty */ }
+                  }
+                  await mergeApolloContacts(contacts, firm.websiteUrl, undefined, skillContext.apolloSeniorities);
+                  classifyTiersInPlace(contacts);
+                  if (contacts.length > 0) {
+                    result.data[peopleSec.key] = JSON.stringify(contacts);
+                  }
+                }
+              } catch (apolloErr) {
+                console.warn(`[processAgentJob] Apollo enrichment failed for ${firm.websiteUrl}:`, apolloErr);
+              }
+            }
+
             profileResults.push({
               ...result.data,
               ...firm.originalRow,
