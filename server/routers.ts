@@ -343,7 +343,6 @@ USER REQUEST:
 `
                 : "";
               return await invokeLLM({
-                temperature: 0,
                 messages: [
                   { role: "system", content: systemMsg },
                   { role: "user", content: targetingBlock + input.description.trim() },
