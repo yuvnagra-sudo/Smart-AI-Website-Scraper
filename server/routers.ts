@@ -28,6 +28,7 @@ import { canResumeJob, prepareJobForResume, getResumeProgress } from "./resumeJo
 import { extractDirectory } from "./directoryExtractor";
 import { mergeApolloContacts, classifyTiersInPlace } from "./peopleEnrichment";
 import type { EnrichableContact, ApolloOrganization } from "./peopleEnrichment";
+import { webSearch } from "./_core/webSearch";
 import { nanoid } from "nanoid";
 import { saveFirmImmediately, getProcessedFirms } from "./incrementalSave";
 
@@ -1218,6 +1219,73 @@ function classifyAgentError(err: unknown): string {
  * Apollo may return 5-20 people; this step picks the most relevant one(s) and
  * formats them as a human-readable string for the output column.
  */
+/**
+ * Attempts to recover the full last name for an Apollo contact via a SERP lookup.
+ * Only fires when the last name looks like an obfuscated initial (e.g. "F.").
+ * Falls back silently to the original formatted string if no full name is found.
+ *
+ * @param formatted  The string returned by selectBestApolloContacts, e.g. "Andrew P. — Owner"
+ * @param companyName  Used in the search query to anchor the person to this company
+ * @returns  Enriched string e.g. "Andrew Polanski — Owner", or original if lookup fails
+ */
+async function resolveFullNamesInResult(
+  formatted: string,
+  companyName: string,
+): Promise<string> {
+  if (!formatted) return formatted;
+
+  // Regex: match "FirstName I. — Title" patterns (initial = single capital letter + ".")
+  const initialPattern = /^([A-Z][a-z]+)\s([A-Z])\.\s*—\s*(.+)$/;
+  const match = formatted.match(initialPattern);
+  if (!match) return formatted; // no obfuscated initial → nothing to resolve
+
+  const [, firstName, initial, title] = match;
+  const query = `"${firstName}" "${companyName}" ${title.toLowerCase()}`;
+
+  try {
+    const results = await webSearch(query, 5);
+    if (results.length === 0) return formatted;
+
+    // Build a short context from the top result snippets
+    const snippets = results
+      .slice(0, 3)
+      .map((r) => r.snippet ?? r.title ?? "")
+      .filter(Boolean)
+      .join("\n");
+
+    const llmResponse = await queuedLLMCall({
+      messages: [
+        {
+          role: "user",
+          content: `You are looking for the full last name of a person named "${firstName}" who works at "${companyName}" as ${title}.
+
+Their last name starts with the letter "${initial}".
+
+Search result snippets:
+${snippets}
+
+If you can clearly identify their full last name from the snippets above, return ONLY the last name (e.g. "Polanski").
+If you cannot determine the last name with confidence, return exactly: unknown`,
+        },
+      ],
+    });
+
+    const lastName = llmResponse.choices[0]?.message?.content?.trim() ?? "";
+    if (!lastName || lastName.toLowerCase() === "unknown" || lastName.length < 2) {
+      return formatted;
+    }
+
+    // Sanity check: first letter must match the initial
+    if (lastName.charAt(0).toUpperCase() !== initial.toUpperCase()) return formatted;
+
+    const enriched = `${firstName} ${lastName} — ${title}`;
+    console.log(`[processAgentJob] Resolved full name: ${firstName} ${initial}. → ${firstName} ${lastName}`);
+    return enriched;
+  } catch {
+    return formatted; // never block on resolution failure
+  }
+}
+
 async function selectBestApolloContacts(
   contacts: EnrichableContact[],
   peopleSec: AgentSection,
@@ -1469,7 +1537,11 @@ export async function processAgentJob(jobId: number) {
             // section description (e.g. "key decision maker" → picks CEO over intern).
             if (peopleSec && apolloContacts.length > 0) {
               const selected = await selectBestApolloContacts(apolloContacts, peopleSec, skillContext, firm.companyName);
-              if (selected) profileData[peopleSec.key] = selected;
+              if (selected) {
+                // Attempt SERP full-name resolution for any obfuscated initials
+                const enriched = await resolveFullNamesInResult(selected, firm.companyName);
+                profileData[peopleSec.key] = enriched;
+              }
             }
 
             profileResults.push({ ...profileData, ...firm.originalRow, __inputIndex: String(firmIndexMap.get(firm.websiteUrl) ?? 999999) });

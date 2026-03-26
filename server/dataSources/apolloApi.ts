@@ -44,6 +44,17 @@ function getApiKey(): string {
 }
 
 /**
+ * Normalizes Apollo's obfuscated last name field.
+ * Apollo returns two formats: "F." (initial) or "F*****k" (asterisks).
+ * Both are normalized to a clean "F." initial.
+ */
+function normalizeLastName(raw: string): string {
+  const stripped = raw.replace(/\*/g, "").trim();
+  if (!stripped) return "";
+  return stripped.charAt(0).toUpperCase() + ".";
+}
+
+/**
  * Search for people at a company by domain.
  * Returns name/title plus any organization data embedded in the response.
  * No credits consumed — Apollo charges credits only when you request email
@@ -64,10 +75,11 @@ export async function apolloSearchPeople(
     return { people: [], organization: null };
   }
 
-  // Strip protocol/path — Apollo needs bare domain
+  // Strip protocol/path/www — Apollo needs a bare canonical domain
   const cleanDomain = domain
     .replace(/^https?:\/\//, "")
     .replace(/\/.*$/, "")
+    .replace(/^www\./, "")
     .toLowerCase()
     .trim();
 
@@ -121,6 +133,12 @@ export async function apolloSearchPeople(
     const people = data.people ?? [];
     console.log(`[apolloApi] Found ${people.length} people at ${cleanDomain}`);
 
+    // Build set of org IDs that belong to this domain's response.
+    // People whose organization_id is NOT in this set are cross-company contamination.
+    const validOrgIds = data.organizations && Object.keys(data.organizations).length > 0
+      ? new Set(Object.keys(data.organizations))
+      : null;
+
     // Extract the first organization record embedded in the response (free, no extra credits)
     let organization: ApolloOrganization | null = null;
     const orgs = data.organizations ? Object.values(data.organizations) : [];
@@ -138,17 +156,31 @@ export async function apolloSearchPeople(
       console.log(`[apolloApi] Org data for ${cleanDomain}: ${organization.employeeRange ?? organization.employeeCount ?? "no size"}, ${organization.industry ?? "no industry"}`);
     }
 
+    const companyPeople = people.filter((p) =>
+      !validOrgIds ||            // no org data → can't filter, keep all
+      !p.organization_id ||      // person has no org_id → keep (unknown affiliation)
+      validOrgIds.has(p.organization_id), // org_id matches this domain → keep
+    );
+    console.log(`[apolloApi] Kept ${companyPeople.length}/${people.length} company-specific contacts for ${cleanDomain}`);
+
     return {
-      people: people
+      people: companyPeople
         .filter((p) => p.first_name && p.title)
-        .map((p) => ({
-          firstName: p.first_name ?? "",
-          lastName: p.last_name_obfuscated ?? "",
-          name: `${p.first_name ?? ""} ${p.last_name_obfuscated ?? ""}`.trim(),
-          title: p.title ?? "",
-          linkedinUrl: "",
-          seniority: p.seniority ?? "",
-        })),
+        .map((p) => {
+          const lastInitial = p.last_name_obfuscated
+            ? normalizeLastName(p.last_name_obfuscated)
+            : "";
+          return {
+            firstName: p.first_name ?? "",
+            lastName: lastInitial,
+            name: lastInitial
+              ? `${p.first_name ?? ""} ${lastInitial}`.trim()
+              : (p.first_name ?? ""),
+            title: p.title ?? "",
+            linkedinUrl: "",
+            seniority: p.seniority ?? "",
+          };
+        }),
       organization,
     };
   } catch (err) {

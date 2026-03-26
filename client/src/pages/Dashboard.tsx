@@ -222,6 +222,22 @@ export default function Dashboard() {
       retryDelay: 3000,
     });
 
+  // Fire a toast when a job transitions to "completed"
+  const prevJobStatusesRef = useRef<Record<string, string>>({});
+  useEffect(() => {
+    if (!jobs) return;
+    for (const job of jobs) {
+      const prev = prevJobStatusesRef.current[String(job.id)];
+      if (prev && prev !== "completed" && job.status === "completed") {
+        toast.success(
+          `Job complete! ${job.firmCount ?? ""} firms enriched — ready to download.`,
+          { duration: 8000 },
+        );
+      }
+      prevJobStatusesRef.current[String(job.id)] = job.status;
+    }
+  }, [jobs]);
+
   const isAdmin = user?.role === "admin";
   const [jobsTab, setJobsTab] = useState<"mine" | "all">("mine");
   const { data: allJobs } = trpc.enrichment.listAllJobsAdmin.useQuery(undefined, {
