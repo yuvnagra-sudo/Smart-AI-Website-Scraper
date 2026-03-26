@@ -204,6 +204,7 @@ export const appRouter = router({
           sectionsJson: z.string().optional(),
           systemPrompt: z.string().optional(),
           objective: z.string().optional(),
+          skillContextJson: z.string().optional(),
           // Column mapping (for non-standard column names)
           columnMapping: z.object({
             companyNameColumn: z.string().optional(),
@@ -232,6 +233,7 @@ export const appRouter = router({
           sectionsJson: input.sectionsJson,
           systemPrompt: input.systemPrompt,
           objective: input.objective,
+          skillContextJson: input.skillContextJson,
           columnMappingJson: input.columnMapping ? JSON.stringify(input.columnMapping) : undefined,
         });
 
@@ -286,12 +288,29 @@ The systemPrompt is injected verbatim into every LLM extraction call. It must:
 - For scoring fields: include the exact rubric with examples
 - End with: "Return only what is explicitly stated on the page. Empty string is always better than a wrong answer."
 
+━━━ RULES FOR skillContext ━━━
+Infer the following from the user's description. These are used to calibrate the agent's navigation and extraction for every company in the job:
+- icpSummary: One sentence describing the ideal target company (industry, size, stage, geography)
+- fitSignals: 2-4 observable signals ON THE WEBSITE that indicate a good match (e.g. "SaaS pricing page visible", "active engineering team > 5 people", "Series A-B funding mentioned")
+- exclusionSignals: 2-4 observable signals that mean the company should be deprioritized or skipped (e.g. "agency or consultancy", "less than 10 employees", "crypto/web3 focus")
+- targetTitles: 3-6 job titles most likely to be the right decision maker FOR THIS SPECIFIC USE CASE in priority order. Be specific to the domain — don't default to "CEO" if a more relevant role exists.
+- apolloSeniorities: Apollo.io seniority labels that map to targetTitles. ONLY use these exact values: "c_suite", "vp", "director", "manager", "individual_contributor", "partner", "owner"
+- outreachGoal: One sentence explaining WHY these companies are being researched and what action will follow
+
 ━━━ RETURN FORMAT ━━━
 Return ONLY valid JSON (no markdown, no code fences):
 {
   "objective": "one precise sentence: what company data to find and why",
   "sections": [{"key":"snake_case_key","label":"Column Header","desc":"2-4 sentence extraction instruction with what/where/exclude/fallback"}],
-  "systemPrompt": "Complete multi-paragraph extraction prompt as described above. Must be at least 300 words."
+  "systemPrompt": "Complete multi-paragraph extraction prompt as described above. Must be at least 300 words.",
+  "skillContext": {
+    "icpSummary": "...",
+    "fitSignals": ["..."],
+    "exclusionSignals": ["..."],
+    "targetTitles": ["..."],
+    "apolloSeniorities": ["..."],
+    "outreachGoal": "..."
+  }
 }`;
 
         // Retry up to 4 times with exponential backoff on 429
@@ -326,8 +345,21 @@ Return ONLY valid JSON (no markdown, no code fences):
                           },
                         },
                         systemPrompt: { type: "string" },
+                        skillContext: {
+                          type: "object",
+                          properties: {
+                            icpSummary: { type: "string" },
+                            fitSignals: { type: "array", items: { type: "string" } },
+                            exclusionSignals: { type: "array", items: { type: "string" } },
+                            targetTitles: { type: "array", items: { type: "string" } },
+                            apolloSeniorities: { type: "array", items: { type: "string" } },
+                            outreachGoal: { type: "string" },
+                          },
+                          required: ["icpSummary", "fitSignals", "exclusionSignals", "targetTitles", "apolloSeniorities", "outreachGoal"],
+                          additionalProperties: false,
+                        },
                       },
-                      required: ["objective", "sections", "systemPrompt"],
+                      required: ["objective", "sections", "systemPrompt", "skillContext"],
                       additionalProperties: false,
                     },
                   },
@@ -377,10 +409,13 @@ Return ONLY valid JSON (no markdown, no code fences):
             });
           }
 
+          const skillContext = parsed.skillContext ?? null;
+
           return {
             objective: String(parsed.objective ?? input.description),
             sections,
             systemPrompt: String(parsed.systemPrompt ?? ""),
+            skillContext,
           };
         } catch (err: any) {
           if (err instanceof TRPCError) throw err;
@@ -1022,6 +1057,7 @@ export async function processAgentJob(jobId: number) {
     const sections: AgentSection[] = JSON.parse(job.sectionsJson ?? "[]");
     const systemPrompt = job.systemPrompt ?? "";
     const objective = job.objective ?? "";
+    const skillContext = job.skillContextJson ? JSON.parse(job.skillContextJson) : null;
 
     const columnMapping = job.columnMappingJson ? JSON.parse(job.columnMappingJson) : undefined;
     const firms = await parseInputExcel(job.inputFileUrl, columnMapping);
@@ -1097,6 +1133,8 @@ export async function processAgentJob(jobId: number) {
             resolvedPrompt,
             5, // maxHops: 5 hops is enough for Clutch→company→about/team. 8 was causing cost overrun.
             () => isJobCancelled(jobId),
+            undefined, // callbacks
+            skillContext,
           );
 
           if (result.type === "directory") {

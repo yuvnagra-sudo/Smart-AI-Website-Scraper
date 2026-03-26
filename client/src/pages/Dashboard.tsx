@@ -27,6 +27,7 @@ import { toast } from "sonner";
 import { Link } from "wouter";
 import ResultsSheet from "@/components/ResultsSheet";
 import { ALL_TEMPLATES, getTemplate, TEMPLATE_SECTIONS, TEMPLATE_SYSTEM_PROMPTS, type AgentSection as TemplateAgentSection } from "@/lib/templates";
+import type { SkillContext } from "../../../shared/skillContext";
 
 // ---------------------------------------------------------------------------
 // Icon map for templates
@@ -159,6 +160,8 @@ export default function Dashboard() {
   const [wizardSections, setWizardSections]   = useState<AgentSection[]>([]);
   const [wizardSystemPrompt, setWizardSystemPrompt] = useState("");
   const [wizardObjective, setWizardObjective] = useState("");
+  const [wizardSkillContext, setWizardSkillContext] = useState<SkillContext | null>(null);
+  const [showSkillRefine, setShowSkillRefine] = useState(false);
 
   // Column mapping state
   const [showColumnMapping, setShowColumnMapping] = useState(false);
@@ -270,6 +273,8 @@ export default function Dashboard() {
       setWizardSections(data.sections);
       setWizardSystemPrompt(data.systemPrompt);
       setWizardObjective(data.objective);
+      setWizardSkillContext(data.skillContext ?? null);
+      setShowSkillRefine(false);
       toast.success(`Generated ${data.sections.length} extraction sections`);
     },
     onError: (error) => {
@@ -286,6 +291,8 @@ export default function Dashboard() {
       setDescription("");
       setWizardObjective("");
       setWizardSystemPrompt("");
+      setWizardSkillContext(null);
+      setShowSkillRefine(false);
       refetch();
       if (fileInputRef.current) fileInputRef.current.value = "";
     },
@@ -351,7 +358,12 @@ export default function Dashboard() {
     const isTemplateAgentMode = wizardMode === "template" && selectedTemplate !== "vc";
 
     const extraFields = isAgentMode
-      ? { sectionsJson: JSON.stringify(wizardSections), systemPrompt: wizardSystemPrompt, objective: wizardObjective }
+      ? {
+          sectionsJson: JSON.stringify(wizardSections),
+          systemPrompt: wizardSystemPrompt,
+          objective: wizardObjective,
+          skillContextJson: wizardSkillContext ? JSON.stringify(wizardSkillContext) : undefined,
+        }
       : isTemplateAgentMode
       ? {
           sectionsJson: JSON.stringify(templateSections),
@@ -992,6 +1004,70 @@ export default function Dashboard() {
                         ))}
                         <AddSectionRow onAdd={(s) => setWizardSections([...wizardSections, s])} />
                       </div>
+
+                      {/* Refine Targeting panel — auto-populated from skill context */}
+                      {wizardSkillContext && (
+                        <div className="border rounded-lg overflow-hidden">
+                          <button
+                            className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium hover:bg-muted/30 transition-colors"
+                            onClick={() => setShowSkillRefine(!showSkillRefine)}
+                          >
+                            <span className="flex items-center gap-2">
+                              <Sparkles className="h-4 w-4 text-primary" />
+                              Refine targeting
+                              <span className="text-xs font-normal text-muted-foreground">(optional — edit AI-inferred criteria)</span>
+                            </span>
+                            {showSkillRefine ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                          </button>
+
+                          {showSkillRefine && (
+                            <div className="px-4 pb-4 space-y-4 border-t bg-muted/10">
+                              <div className="space-y-1.5 pt-3">
+                                <Label className="text-xs font-semibold">Ideal company profile</Label>
+                                <Textarea
+                                  className="text-xs min-h-[56px] resize-none"
+                                  value={wizardSkillContext.icpSummary}
+                                  onChange={(e) => setWizardSkillContext({ ...wizardSkillContext, icpSummary: e.target.value })}
+                                  placeholder="e.g. B2B SaaS, 50-500 employees, Series A/B, US or EU"
+                                />
+                              </div>
+                              <div className="space-y-1.5">
+                                <Label className="text-xs font-semibold">Decision maker titles <span className="font-normal text-muted-foreground">(comma-separated, priority order)</span></Label>
+                                <Input
+                                  className="text-xs"
+                                  value={wizardSkillContext.targetTitles.join(", ")}
+                                  onChange={(e) => setWizardSkillContext({
+                                    ...wizardSkillContext,
+                                    targetTitles: e.target.value.split(",").map(t => t.trim()).filter(Boolean),
+                                  })}
+                                  placeholder="e.g. VP Engineering, CTO, Head of Engineering"
+                                />
+                              </div>
+                              <div className="space-y-1.5">
+                                <Label className="text-xs font-semibold">Skip companies that show...</Label>
+                                <Textarea
+                                  className="text-xs min-h-[56px] resize-none"
+                                  value={wizardSkillContext.exclusionSignals.join(", ")}
+                                  onChange={(e) => setWizardSkillContext({
+                                    ...wizardSkillContext,
+                                    exclusionSignals: e.target.value.split(",").map(t => t.trim()).filter(Boolean),
+                                  })}
+                                  placeholder="e.g. agency, crypto/web3, less than 10 employees"
+                                />
+                              </div>
+                              <div className="space-y-1.5">
+                                <Label className="text-xs font-semibold">Research goal</Label>
+                                <Input
+                                  className="text-xs"
+                                  value={wizardSkillContext.outreachGoal}
+                                  onChange={(e) => setWizardSkillContext({ ...wizardSkillContext, outreachGoal: e.target.value })}
+                                  placeholder="e.g. Find engineering leads to pitch CI/CD tooling"
+                                />
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
 
                       <div className="flex justify-end pt-1">
                         <Button onClick={() => setWizardStep("review")}>

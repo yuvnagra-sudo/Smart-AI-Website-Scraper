@@ -24,6 +24,7 @@ import { fetchViaJina, fetchWebsiteContentHybrid } from "./jinaFetcher";
 import { extractDirectory, type DirectoryEntry as DirEntry } from "./directoryExtractor";
 import { queuedLLMCall } from "./_core/llmQueue";
 import { webSearch, searchQueryForField } from "./_core/webSearch";
+import type { SkillContext } from "../shared/skillContext";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -117,6 +118,7 @@ async function planNextAction(
   availableLinks: string[],
   hopsUsed: number,
   maxHops: number,
+  skillContext?: SkillContext | null,
 ): Promise<AgentAction> {
   // Build a summary of current state
   const fieldSummary = sections.map(s => {
@@ -163,12 +165,19 @@ async function planNextAction(
     ? `${hopsRemaining} hops remaining. Be selective — only fetch a page if it is very likely to have the missing data.`
     : ``;
 
+  const skillBlock = skillContext ? `
+ICP: ${skillContext.icpSummary}
+Goal: ${skillContext.outreachGoal}
+Target decision makers: ${skillContext.targetTitles.join(", ")}
+Fit signals (look for these): ${skillContext.fitSignals.join(", ")}
+Skip if company shows: ${skillContext.exclusionSignals.join(", ")}
+` : "";
+
   const prompt = `You are an autonomous data enrichment agent. Your mission: fill in all missing fields for this company using the fewest possible page fetches.
 
 Company: ${companyName}
 Website: ${websiteUrl}
-Objective: ${objective}
-
+Objective: ${objective}${skillBlock ? "\n" + skillBlock : ""}
 Current extraction state (confidence 0.0=not found, 1.0=certain):
 ${fieldSummary}
 
@@ -258,6 +267,7 @@ export async function extractProfileFields(
   systemPrompt: string,
   sourceUrl?: string,
   pageType?: "directory" | "company" | "search",
+  skillContext?: SkillContext | null,
 ): Promise<FieldResultMap> {
   // Build per-section schema properties — each field now returns value + confidence
   const props: Record<string, { type: string; properties?: object; required?: string[]; additionalProperties?: boolean; description?: string }> = {};
@@ -367,10 +377,26 @@ IMPORTANT: A "Creative Director" or "Art Director" should NEVER be chosen over a
 or Senior Developer when those roles are available. Technical and executive roles outrank
 creative roles for B2B technology partnership decisions.`;
 
+  // Build job-specific skill context guidance (overrides generic DM tier when provided)
+  const skillContextGuidance = skillContext ? `
+
+━━━ JOB-SPECIFIC TARGETING (overrides generic tier rules above) ━━━
+This job is targeting: ${skillContext.icpSummary}
+Goal: ${skillContext.outreachGoal}
+
+Decision maker priority for THIS job (in order):
+${skillContext.targetTitles.map((t, i) => `  ${i + 1}. ${t}`).join("\n")}
+
+Fit signals — these indicate a GOOD match (increase confidence for relevant fields):
+  ${skillContext.fitSignals.join(", ")}
+
+Exclusion signals — if these are prominent, deprioritize this company:
+  ${skillContext.exclusionSignals.join(", ")}` : "";
+
   // Build per-field type hints to help the LLM recognize specific field formats
   const fieldTypeHints = buildFieldTypeHints(sections);
 
-  const userMsg = `${systemPrompt}${pageTypeGuidance}${dmPriorityGuidance}
+  const userMsg = `${systemPrompt}${pageTypeGuidance}${dmPriorityGuidance}${skillContextGuidance}
 
 ━━━ FIELD FORMAT HINTS ━━━
 Use these hints to recognize and correctly extract each field type:
@@ -830,6 +856,7 @@ export async function scrapeUrl(
   maxHops = 8,
   isCancelled?: () => boolean,
   callbacks?: PageCallbacks,
+  skillContext?: SkillContext | null,
 ): Promise<AgentScrapeResult> {
   console.log(`[agentScraper] 🚀 Starting agent loop: ${url}`);
 
@@ -870,6 +897,7 @@ export async function scrapeUrl(
       const extracted = await extractProfileFields(
         primary.content, sections, systemPrompt, url,
         isDirectoryUrl(url) ? "directory" : "company",
+        skillContext,
       );
       fieldResults = mergeFieldResults(fieldResults, extracted);
       const filled = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD).length;
@@ -936,6 +964,7 @@ export async function scrapeUrl(
       availableLinks,
       hopsUsed,
       maxHops,
+      skillContext,
     );
 
     console.log(`[agentScraper] PLAN [hop ${hopsUsed}/${maxHops}]: ${plan.action} — ${plan.reason}`);
@@ -973,7 +1002,7 @@ export async function scrapeUrl(
       if (!skipGenericForFetch) {
         if (isCancelled?.()) throw new Error("JOB_CANCELLED");
         const fetchPageType = isDirectoryUrl(plan.target) ? "directory" : "company";
-        const extracted = await extractProfileFields(fetched.content, sections, systemPrompt, plan.target, fetchPageType);
+        const extracted = await extractProfileFields(fetched.content, sections, systemPrompt, plan.target, fetchPageType, skillContext);
 
         // REFLECT — merge, keeping higher-confidence values
         fieldResults = mergeFieldResults(fieldResults, extracted);
@@ -1004,14 +1033,14 @@ export async function scrapeUrl(
         // Use the snippet directly as content if the page can't be fetched
         const snippetContent = searchResults.map(r => `${r.title}\n${r.snippet}`).join("\n\n");
         visitedUrls.add(topResult.url);
-        const extracted = await extractProfileFields(snippetContent, sections, systemPrompt, topResult.url, "search");
+        const extracted = await extractProfileFields(snippetContent, sections, systemPrompt, topResult.url, "search", skillContext);
         fieldResults = mergeFieldResults(fieldResults, extracted);
       } else {
         visitedUrls.add(topResult.url);
         availableLinks = [...new Set([...availableLinks, ...fetched.links])].filter(l => !visitedUrls.has(l));
         if (isCancelled?.()) throw new Error("JOB_CANCELLED");
         const searchPageType = isDirectoryUrl(topResult.url) ? "directory" : "company";
-        const extracted = await extractProfileFields(fetched.content, sections, systemPrompt, topResult.url, searchPageType);
+        const extracted = await extractProfileFields(fetched.content, sections, systemPrompt, topResult.url, searchPageType, skillContext);
         fieldResults = mergeFieldResults(fieldResults, extracted);
       }
 

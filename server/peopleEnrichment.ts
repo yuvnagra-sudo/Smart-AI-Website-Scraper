@@ -59,11 +59,12 @@ export async function mergeApolloContacts(
   members: EnrichableContact[],
   domain: string,
   onProgress?: (msg: string) => void,
+  apolloSeniorities?: string[],
 ): Promise<void> {
   const cleanDomain = domain.replace(/^https?:\/\//, "").replace(/\/.*$/, "").toLowerCase();
   if (!cleanDomain) return;
 
-  const apolloPeople = await apolloSearchPeople(cleanDomain);
+  const apolloPeople = await apolloSearchPeople(cleanDomain, apolloSeniorities);
   if (apolloPeople.length === 0) return;
 
   console.log(`[peopleEnrichment] Apollo returned ${apolloPeople.length} people for ${cleanDomain}`);
@@ -113,9 +114,10 @@ export async function enrichPeopleInPlace(
   options: {
     companyName?: string;
     onProgress?: (msg: string) => void;
+    apolloSeniorities?: string[];
   } = {},
 ): Promise<void> {
-  const { onProgress } = options;
+  const { onProgress, apolloSeniorities } = options;
 
   // Step 1: Tier classification
   classifyTiersInPlace(members);
@@ -124,5 +126,5 @@ export async function enrichPeopleInPlace(
   let domain = "";
   try { domain = new URL(websiteUrl).hostname; } catch { domain = websiteUrl; }
 
-  await mergeApolloContacts(members, domain, onProgress);
+  await mergeApolloContacts(members, domain, onProgress, apolloSeniorities);
 }
