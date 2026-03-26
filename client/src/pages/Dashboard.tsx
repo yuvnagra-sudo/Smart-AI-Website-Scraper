@@ -199,9 +199,10 @@ export default function Dashboard() {
   ]);
   const [chatInput, setChatInput]             = useState("");
   const [chatReadyToGenerate, setChatReadyToGenerate] = useState(false);
-  const chatEndRef = useRef<HTMLDivElement>(null);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const el = chatContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [chatMessages]);
 
   // Column mapping state
@@ -981,97 +982,101 @@ export default function Dashboard() {
                 {/* ── AI Custom tab ── */}
                 <TabsContent value="ai" className="space-y-5">
                   {/* Chat / Chips / Manual toggle */}
-                  <div className="flex items-center gap-1 p-0.5 rounded-lg bg-muted/40 w-fit">
-                    <button
-                      onClick={() => setChatMode("chat")}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                        chatMode === "chat" ? "bg-white shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
-                      }`}
-                    >
-                      <Bot className="h-3.5 w-3.5" /> Chat
-                    </button>
-                    <button
-                      onClick={() => setChatMode("chips")}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                        chatMode === "chips" ? "bg-white shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
-                      }`}
-                    >
-                      <Target className="h-3.5 w-3.5" /> Chips
-                    </button>
-                    <button
-                      onClick={() => setChatMode("manual")}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                        chatMode === "manual" ? "bg-white shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
-                      }`}
-                    >
-                      <Edit2 className="h-3.5 w-3.5" /> Manual
-                    </button>
+                  <div className="flex items-center gap-0.5 p-1 rounded-xl bg-slate-100 w-fit">
+                    {([
+                      { mode: "chat",   icon: <Bot className="h-3.5 w-3.5" />,    label: "Chat"   },
+                      { mode: "chips",  icon: <Target className="h-3.5 w-3.5" />, label: "Chips"  },
+                      { mode: "manual", icon: <Edit2 className="h-3.5 w-3.5" />,  label: "Manual" },
+                    ] as const).map(({ mode, icon, label }) => (
+                      <button
+                        key={mode}
+                        onClick={() => setChatMode(mode)}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                          chatMode === mode
+                            ? "bg-white shadow-sm text-slate-800"
+                            : "text-slate-500 hover:text-slate-700"
+                        }`}
+                      >
+                        {icon} {label}
+                      </button>
+                    ))}
                   </div>
 
                   {chatMode === "chat" ? (
                     /* ── Chat configurator ── */
-                    <div className="space-y-3">
+                    <div className="rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden">
                       {/* Message window */}
-                      <div className="border rounded-xl bg-muted/5 p-4 space-y-3 min-h-[180px] max-h-[340px] overflow-y-auto">
+                      <div
+                        ref={chatContainerRef}
+                        className="p-4 space-y-4 min-h-[200px] max-h-[360px] overflow-y-auto bg-slate-50/60"
+                      >
                         {chatMessages.map((msg, i) => (
-                          <div key={i} className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
-                            <div className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
+                          <div key={i} className={`flex items-end gap-2 ${msg.role === "user" ? "justify-end" : "justify-start"}`}>
+                            {msg.role === "assistant" && (
+                              <div className="flex-shrink-0 w-7 h-7 rounded-full bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center shadow-sm">
+                                <Sparkles className="h-3.5 w-3.5 text-white" />
+                              </div>
+                            )}
+                            <div className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed shadow-sm ${
                               msg.role === "user"
-                                ? "bg-primary text-primary-foreground rounded-br-sm"
-                                : "bg-white border shadow-sm rounded-bl-sm"
+                                ? "bg-gradient-to-br from-indigo-500 to-violet-600 text-white rounded-br-sm"
+                                : "bg-white border border-slate-200 text-slate-800 rounded-bl-sm"
                             }`}>
                               {msg.content}
                             </div>
                           </div>
                         ))}
                         {configureBriefMutation.isPending && (
-                          <div className="flex justify-start">
-                            <div className="bg-white border shadow-sm rounded-2xl rounded-bl-sm px-4 py-3">
-                              <div className="flex gap-1 items-center">
-                                {[0, 150, 300].map((delay) => (
-                                  <div key={delay} className="w-1.5 h-1.5 bg-muted-foreground/40 rounded-full animate-bounce" style={{ animationDelay: `${delay}ms` }} />
+                          <div className="flex items-end gap-2 justify-start">
+                            <div className="flex-shrink-0 w-7 h-7 rounded-full bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center shadow-sm">
+                              <Sparkles className="h-3.5 w-3.5 text-white" />
+                            </div>
+                            <div className="bg-white border border-slate-200 rounded-2xl rounded-bl-sm px-4 py-3 shadow-sm">
+                              <div className="flex gap-1.5 items-center">
+                                {[0, 160, 320].map((delay) => (
+                                  <div key={delay} className="w-2 h-2 bg-slate-300 rounded-full animate-bounce" style={{ animationDelay: `${delay}ms` }} />
                                 ))}
                               </div>
                             </div>
                           </div>
                         )}
-                        <div ref={chatEndRef} />
                       </div>
 
                       {/* Input bar */}
-                      <div className="flex gap-2">
+                      <div className="border-t border-slate-200 bg-white px-3 py-2.5 flex items-center gap-2">
                         <Input
                           value={chatInput}
                           onChange={(e) => setChatInput(e.target.value)}
                           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChatMessage(); } }}
-                          placeholder="Describe who you're targeting..."
+                          placeholder="Who are you targeting and what will you do with the data?"
                           disabled={configureBriefMutation.isPending}
-                          className="flex-1"
+                          className="flex-1 border-0 shadow-none focus-visible:ring-0 bg-transparent text-sm placeholder:text-slate-400"
                         />
                         <Button
                           onClick={sendChatMessage}
                           disabled={!chatInput.trim() || configureBriefMutation.isPending}
                           size="icon"
+                          className="shrink-0 h-8 w-8 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 border-0 shadow-sm"
                         >
                           {configureBriefMutation.isPending
-                            ? <Loader2 className="h-4 w-4 animate-spin" />
-                            : <ArrowUp className="h-4 w-4" />}
+                            ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                            : <ArrowUp className="h-3.5 w-3.5" />}
                         </Button>
                       </div>
 
-                      {/* Actions row */}
-                      <div className="flex items-center justify-between min-h-[36px]">
-                        {chatMessages.length > 1 && (
-                          <button onClick={resetChat} className="text-xs text-muted-foreground hover:text-foreground transition-colors">
+                      {/* Footer row */}
+                      {(chatMessages.length > 1 || chatReadyToGenerate) && (
+                        <div className="px-3 py-1.5 bg-slate-50 border-t border-slate-100 flex items-center justify-between">
+                          <button onClick={resetChat} className="text-xs text-slate-400 hover:text-slate-600 transition-colors">
                             Start over
                           </button>
-                        )}
-                        {chatReadyToGenerate && (
-                          <p className="text-xs text-muted-foreground ml-auto">
-                            Chips ready — <button onClick={() => setChatMode("chips")} className="text-primary underline">view &amp; edit</button>
-                          </p>
-                        )}
-                      </div>
+                          {chatReadyToGenerate && (
+                            <button onClick={() => setChatMode("chips")} className="text-xs font-medium text-indigo-600 hover:text-indigo-700 transition-colors flex items-center gap-1">
+                              <Target className="h-3 w-3" /> View chips &amp; generate plan
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </div>
                   ) : chatMode === "chips" ? (
                     /* ── Chips configurator ── */

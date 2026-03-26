@@ -495,8 +495,12 @@ USER REQUEST:
         })).min(1),
       }))
       .mutation(async ({ input }) => {
+        const apiKey = process.env.ANTHROPIC_API_KEY;
+        if (!apiKey) {
+          throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "ANTHROPIC_API_KEY is not configured" });
+        }
         const Anthropic = (await import("@anthropic-ai/sdk")).default;
-        const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+        const client = new Anthropic({ apiKey });
 
         const systemPrompt = `You are a B2B data targeting expert helping configure a web scraping job.
 The user describes who they're selling to or researching. You:
@@ -518,12 +522,13 @@ Always include a <brief> block in your response using this exact JSON format:
 
 On follow-up messages, update the <brief> to reflect refined selections.`;
 
-        const response = await client.messages.create({
+        const response = await (client.beta as any).messages.create({
           model: "claude-sonnet-4-6",
           max_tokens: 1024,
           system: systemPrompt,
-          tools: [{ type: "web_search_20250305" as const, name: "web_search" }],
+          tools: [{ type: "web_search_20250305", name: "web_search" }],
           messages: input.messages.map(m => ({ role: m.role, content: m.content })),
+          betas: ["web-search-2025-03-05"],
         });
 
         // Extract all text blocks from the response (web_search may interleave tool_use blocks)
