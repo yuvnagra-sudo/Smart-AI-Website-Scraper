@@ -134,13 +134,17 @@ export async function runMigrations(): Promise<void> {
     )` },
   ];
 
+  // Use the raw mysql2 pool for DDL. drizzle's db.execute() wraps queries
+  // in prepared statements, which silently fail for ALTER TABLE in MySQL.
+  const pool = (db as any).$client;
+
   for (const migration of migrations) {
     try {
-      await db.execute(sql.raw(migration.sql));
+      await pool.query(migration.sql);
       console.log(`[Migration] Applied: ${migration.name}`);
     } catch (e: any) {
-      if (e.message?.includes("Duplicate column name")) {
-        // Column already exists — skip silently
+      if (e.message?.includes("Duplicate column name") || e.message?.includes("already exists")) {
+        // Column/table already exists — skip silently
       } else {
         console.error(`[Migration] Failed (${migration.name}):`, e.message);
       }
