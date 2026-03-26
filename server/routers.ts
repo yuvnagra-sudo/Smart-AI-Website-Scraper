@@ -502,33 +502,42 @@ USER REQUEST:
         const Anthropic = (await import("@anthropic-ai/sdk")).default;
         const client = new Anthropic({ apiKey });
 
-        const systemPrompt = `You are a B2B data targeting expert helping configure a web scraping job.
-The user describes who they're selling to or researching. Based on your knowledge of B2B markets:
-1. Respond conversationally in 2-3 sentences explaining who the key decision-makers are and why
-2. Return structured targeting parameters inside <brief>...</brief> XML tags
+        const systemPrompt = `You are a B2B data targeting expert helping configure a web scraping job. Your goal is to understand what the user wants and get them to extraction AS FAST AS POSSIBLE — ideally in 1 message.
 
-Always include a <brief> block in your response using this exact JSON format:
-<brief>
+SPEED RULES (follow strictly):
+- If the user's first message tells you WHAT companies + WHAT data they want: set readyToGenerate: true IMMEDIATELY on your first response.
+- If the first message is vague on only ONE thing: ask that one question, then set readyToGenerate: true on your NEXT response no matter what.
+- NEVER ask more than one follow-up question. After 2 user messages, ALWAYS set readyToGenerate: true.
+- Infer and fill in anything you're unsure about — do NOT ask about minor details.
+
+When readyToGenerate is true, message should be: "Got it — [1 sentence summary of what you'll extract]. Generating your plan now."
+
+Return ONLY valid JSON (no markdown):
 {
-  "outreachGoal": "one of: Cold email outreach | VC due diligence | Market research | Lead qualification | Competitor analysis | Building a directory | Recruiting intelligence",
-  "companyTypes": ["array", "of", "company", "type", "strings"],
-  "companySizes": ["array of size strings, e.g.: SMB (11-50)", "Mid-market (201-500)"],
-  "titles": ["array", "of", "job", "titles"],
-  "fitSignals": ["array", "of", "positive", "fit", "signal", "strings"],
-  "exclusionSignals": ["array", "of", "exclusion", "signal", "strings"]
-}
-</brief>
+  "message": "your response",
+  "readyToGenerate": false,
+  "brief": {
+    "outreachGoal": "infer what they'll do with the data",
+    "icpSummary": "company type and size (infer from context)",
+    "targetTitles": "comma-separated job titles if they need contacts, else empty",
+    "fitSignals": "comma-separated signals that indicate a good fit",
+    "exclusionSignals": "comma-separated signals to skip a company",
+    "description": "specific data columns to extract from each website — be detailed, list every field"
+  }
+}`;
 
-On follow-up messages, update the <brief> to reflect refined selections.`;
-
-        let response;
+        let raw: string;
         try {
-          response = await client.messages.create({
+          const response = await client.messages.create({
             model: "claude-sonnet-4-6",
             max_tokens: 1024,
             system: systemPrompt,
             messages: input.messages.map(m => ({ role: m.role, content: m.content })),
           });
+          raw = response.content
+            .filter((b): b is { type: "text"; text: string } => b.type === "text")
+            .map(b => b.text)
+            .join("");
         } catch (err: any) {
           const status = err?.status ?? err?.statusCode ?? "?";
           const body = err?.message ?? String(err);
@@ -539,30 +548,24 @@ On follow-up messages, update the <brief> to reflect refined selections.`;
           });
         }
 
-        // Extract text from response
-        const text = response.content
-          .filter((b): b is { type: "text"; text: string } => b.type === "text")
-          .map(b => b.text)
-          .join("");
-
-        console.log(`[configureBrief] Response length: ${text.length} chars`);
-
-        const briefMatch = text.match(/<brief>([\s\S]*?)<\/brief>/);
-        let brief: {
-          outreachGoal?: string;
-          companyTypes?: string[];
-          companySizes?: string[];
-          titles?: string[];
-          fitSignals?: string[];
-          exclusionSignals?: string[];
-        } | null = null;
-        if (briefMatch) {
-          try { brief = JSON.parse(briefMatch[1].trim()); } catch {}
+        // Strip markdown code fences Claude sometimes adds
+        const jsonStr = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+        let parsed: any = {};
+        try { parsed = JSON.parse(jsonStr); } catch {
+          console.warn("[configureBrief] Failed to parse JSON, raw:", raw.slice(0, 300));
         }
 
         return {
-          message: text.replace(/<brief>[\s\S]*?<\/brief>/, "").trim(),
-          brief,
+          message:         String(parsed.message ?? "Got it — generating your plan now."),
+          readyToGenerate: Boolean(parsed.readyToGenerate),
+          brief: {
+            outreachGoal:     String(parsed.brief?.outreachGoal     ?? ""),
+            icpSummary:       String(parsed.brief?.icpSummary       ?? ""),
+            targetTitles:     String(parsed.brief?.targetTitles     ?? ""),
+            fitSignals:       String(parsed.brief?.fitSignals       ?? ""),
+            exclusionSignals: String(parsed.brief?.exclusionSignals ?? ""),
+            description:      String(parsed.brief?.description      ?? ""),
+          },
         };
       }),
 

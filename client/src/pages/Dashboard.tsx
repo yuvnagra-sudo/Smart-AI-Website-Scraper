@@ -27,7 +27,6 @@ import { toast } from "sonner";
 import { Link } from "wouter";
 import ResultsSheet from "@/components/ResultsSheet";
 import { ALL_TEMPLATES, getTemplate, TEMPLATE_SECTIONS, TEMPLATE_SYSTEM_PROMPTS, type AgentSection as TemplateAgentSection } from "@/lib/templates";
-import { BRIEF_OPTIONS } from "@/lib/briefOptions";
 import type { SkillContext } from "../../../shared/skillContext";
 
 // ---------------------------------------------------------------------------
@@ -169,31 +168,8 @@ export default function Dashboard() {
   const [showTargetingEdit, setShowTargetingEdit] = useState(true);
 
   // Chat configurator state
-  const CHAT_OPENER = "Describe who you're targeting and what you'll do with the data — I'll configure your targeting brief.";
-  const [chatMode, setChatMode]               = useState<"chat" | "chips" | "manual">("chat");
-
-  // Chip-based brief state (populated by Claude, editable by user)
-  const [briefChips, setBriefChips] = useState<{
-    goal: string;
-    companyTypes: string[];
-    companySizes: string[];
-    titles: string[];
-    fitSignals: string[];
-    exclusionSignals: string[];
-  }>({ goal: "", companyTypes: [], companySizes: [], titles: [], fitSignals: [], exclusionSignals: [] });
-
-  // Sync chips → targetingBrief whenever chips change
-  useEffect(() => {
-    setTargetingBrief(prev => ({
-      ...prev,
-      outreachGoal:     briefChips.goal,
-      icpSummary:       [...briefChips.companyTypes, ...briefChips.companySizes].filter(Boolean).join(", "),
-      targetTitles:     briefChips.titles.join(", "),
-      fitSignals:       briefChips.fitSignals.join(", "),
-      exclusionSignals: briefChips.exclusionSignals.join(", "),
-    }));
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [briefChips]);
+  const CHAT_OPENER = "Tell me what you're building — who you're targeting and what data you want from their websites.";
+  const [chatMode, setChatMode]               = useState<"chat" | "manual">("chat");
   const [chatMessages, setChatMessages]       = useState<{ role: "user" | "assistant"; content: string }[]>([
     { role: "assistant", content: CHAT_OPENER },
   ]);
@@ -328,21 +304,19 @@ export default function Dashboard() {
   });
 
   const configureBriefMutation = trpc.enrichment.configureBrief.useMutation({
-    onSuccess: (data) => {
-      if (data.message) {
-        setChatMessages(prev => [...prev, { role: "assistant", content: data.message }]);
-      }
-      if (data.brief) {
-        setBriefChips({
-          goal:             data.brief.outreachGoal ?? "",
-          companyTypes:     data.brief.companyTypes ?? [],
-          companySizes:     data.brief.companySizes ?? [],
-          titles:           data.brief.titles ?? [],
-          fitSignals:       data.brief.fitSignals ?? [],
-          exclusionSignals: data.brief.exclusionSignals ?? [],
-        });
+    onSuccess: (data, variables) => {
+      setChatMessages(prev => [...prev, { role: "assistant", content: data.message }]);
+      const userMsgCount = variables.messages.filter(m => m.role === "user").length;
+      if (data.readyToGenerate || userMsgCount >= 2) {
         setChatReadyToGenerate(true);
-        setChatMode("chips");
+        setTargetingBrief({
+          outreachGoal:     data.brief.outreachGoal,
+          icpSummary:       data.brief.icpSummary,
+          targetTitles:     data.brief.targetTitles,
+          fitSignals:       data.brief.fitSignals,
+          exclusionSignals: data.brief.exclusionSignals,
+        });
+        setDescription(data.brief.description);
       }
     },
     onError: (error) => {
@@ -363,8 +337,6 @@ export default function Dashboard() {
     setChatMessages([{ role: "assistant", content: CHAT_OPENER }]);
     setChatInput("");
     setChatReadyToGenerate(false);
-    setBriefChips({ goal: "", companyTypes: [], companySizes: [], titles: [], fitSignals: [], exclusionSignals: [] });
-    setChatMode("chat");
   };
 
   const confirmMutation = trpc.enrichment.confirmAndStart.useMutation({
@@ -981,12 +953,11 @@ export default function Dashboard() {
 
                 {/* ── AI Custom tab ── */}
                 <TabsContent value="ai" className="space-y-5">
-                  {/* Chat / Chips / Manual toggle */}
+                  {/* Chat / Manual toggle */}
                   <div className="flex items-center gap-0.5 p-1 rounded-xl bg-slate-100 w-fit">
                     {([
-                      { mode: "chat",   icon: <Bot className="h-3.5 w-3.5" />,    label: "Chat"   },
-                      { mode: "chips",  icon: <Target className="h-3.5 w-3.5" />, label: "Chips"  },
-                      { mode: "manual", icon: <Edit2 className="h-3.5 w-3.5" />,  label: "Manual" },
+                      { mode: "chat",   icon: <Bot className="h-3.5 w-3.5" />,   label: "Chat"   },
+                      { mode: "manual", icon: <Edit2 className="h-3.5 w-3.5" />, label: "Manual" },
                     ] as const).map(({ mode, icon, label }) => (
                       <button
                         key={mode}
@@ -1066,191 +1037,33 @@ export default function Dashboard() {
 
                       {/* Footer row */}
                       {(chatMessages.length > 1 || chatReadyToGenerate) && (
-                        <div className="px-3 py-1.5 bg-slate-50 border-t border-slate-100 flex items-center justify-between">
+                        <div className="px-3 py-2 bg-slate-50 border-t border-slate-100 flex items-center justify-between">
                           <button onClick={resetChat} className="text-xs text-slate-400 hover:text-slate-600 transition-colors">
                             Start over
                           </button>
                           {chatReadyToGenerate && (
-                            <button onClick={() => setChatMode("chips")} className="text-xs font-medium text-indigo-600 hover:text-indigo-700 transition-colors flex items-center gap-1">
-                              <Target className="h-3 w-3" /> View chips &amp; generate plan
-                            </button>
+                            <Button
+                              size="sm"
+                              onClick={() => generatePlanMutation.mutate({
+                                description,
+                                targetingBrief: {
+                                  outreachGoal:     targetingBrief.outreachGoal.trim(),
+                                  icpSummary:       targetingBrief.icpSummary.trim(),
+                                  targetTitles:     targetingBrief.targetTitles.trim(),
+                                  fitSignals:       targetingBrief.fitSignals.trim(),
+                                  exclusionSignals: targetingBrief.exclusionSignals.trim(),
+                                },
+                              })}
+                              disabled={generatePlanMutation.isPending}
+                              className="bg-gradient-to-br from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 border-0 text-white h-7 text-xs px-3"
+                            >
+                              {generatePlanMutation.isPending
+                                ? <><Loader2 className="h-3 w-3 mr-1.5 animate-spin" />Generating...</>
+                                : <><Sparkles className="h-3 w-3 mr-1.5" />{wizardSections.length > 0 ? "Regenerate plan" : "Generate plan"}</>}
+                            </Button>
                           )}
                         </div>
                       )}
-                    </div>
-                  ) : chatMode === "chips" ? (
-                    /* ── Chips configurator ── */
-                    <div className="space-y-4">
-                      {/* Goal */}
-                      <div className="space-y-1.5">
-                        <Label className="text-xs font-semibold">Goal</Label>
-                        <div className="flex flex-wrap gap-1.5">
-                          {BRIEF_OPTIONS.goals.map(g => (
-                            <button
-                              key={g}
-                              onClick={() => setBriefChips(prev => ({ ...prev, goal: prev.goal === g ? "" : g }))}
-                              className={`px-2.5 py-1 rounded-full text-xs border transition-all ${
-                                briefChips.goal === g
-                                  ? "bg-primary text-primary-foreground border-primary"
-                                  : "border-border text-muted-foreground hover:border-primary/50 hover:text-foreground"
-                              }`}
-                            >{g}</button>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* Company types */}
-                      <div className="space-y-1.5">
-                        <Label className="text-xs font-semibold">Company type</Label>
-                        <div className="flex flex-wrap gap-1.5">
-                          {BRIEF_OPTIONS.companyTypes.map(t => (
-                            <button
-                              key={t}
-                              onClick={() => setBriefChips(prev => ({
-                                ...prev,
-                                companyTypes: prev.companyTypes.includes(t)
-                                  ? prev.companyTypes.filter(x => x !== t)
-                                  : [...prev.companyTypes, t],
-                              }))}
-                              className={`px-2.5 py-1 rounded-full text-xs border transition-all ${
-                                briefChips.companyTypes.includes(t)
-                                  ? "bg-primary text-primary-foreground border-primary"
-                                  : "border-border text-muted-foreground hover:border-primary/50 hover:text-foreground"
-                              }`}
-                            >{t}</button>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* Company sizes */}
-                      <div className="space-y-1.5">
-                        <Label className="text-xs font-semibold">Company size</Label>
-                        <div className="flex flex-wrap gap-1.5">
-                          {BRIEF_OPTIONS.companySizes.map(s => (
-                            <button
-                              key={s}
-                              onClick={() => setBriefChips(prev => ({
-                                ...prev,
-                                companySizes: prev.companySizes.includes(s)
-                                  ? prev.companySizes.filter(x => x !== s)
-                                  : [...prev.companySizes, s],
-                              }))}
-                              className={`px-2.5 py-1 rounded-full text-xs border transition-all ${
-                                briefChips.companySizes.includes(s)
-                                  ? "bg-primary text-primary-foreground border-primary"
-                                  : "border-border text-muted-foreground hover:border-primary/50 hover:text-foreground"
-                              }`}
-                            >{s}</button>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* Titles */}
-                      <div className="space-y-1.5">
-                        <Label className="text-xs font-semibold">Decision-maker titles</Label>
-                        <div className="flex flex-wrap gap-1.5">
-                          {BRIEF_OPTIONS.titles.map(t => (
-                            <button
-                              key={t}
-                              onClick={() => setBriefChips(prev => ({
-                                ...prev,
-                                titles: prev.titles.includes(t)
-                                  ? prev.titles.filter(x => x !== t)
-                                  : [...prev.titles, t],
-                              }))}
-                              className={`px-2.5 py-1 rounded-full text-xs border transition-all ${
-                                briefChips.titles.includes(t)
-                                  ? "bg-primary text-primary-foreground border-primary"
-                                  : "border-border text-muted-foreground hover:border-primary/50 hover:text-foreground"
-                              }`}
-                            >{t}</button>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* Fit signals */}
-                      <div className="space-y-1.5">
-                        <Label className="text-xs font-semibold text-green-700">Strong-fit signals</Label>
-                        <div className="flex flex-wrap gap-1.5">
-                          {BRIEF_OPTIONS.fitSignals.map(s => (
-                            <button
-                              key={s}
-                              onClick={() => setBriefChips(prev => ({
-                                ...prev,
-                                fitSignals: prev.fitSignals.includes(s)
-                                  ? prev.fitSignals.filter(x => x !== s)
-                                  : [...prev.fitSignals, s],
-                              }))}
-                              className={`px-2.5 py-1 rounded-full text-xs border transition-all ${
-                                briefChips.fitSignals.includes(s)
-                                  ? "bg-green-600 text-white border-green-600"
-                                  : "border-border text-muted-foreground hover:border-green-400 hover:text-foreground"
-                              }`}
-                            >{s}</button>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* Exclusion signals */}
-                      <div className="space-y-1.5">
-                        <Label className="text-xs font-semibold text-red-600">Skip if</Label>
-                        <div className="flex flex-wrap gap-1.5">
-                          {BRIEF_OPTIONS.exclusionSignals.map(s => (
-                            <button
-                              key={s}
-                              onClick={() => setBriefChips(prev => ({
-                                ...prev,
-                                exclusionSignals: prev.exclusionSignals.includes(s)
-                                  ? prev.exclusionSignals.filter(x => x !== s)
-                                  : [...prev.exclusionSignals, s],
-                              }))}
-                              className={`px-2.5 py-1 rounded-full text-xs border transition-all ${
-                                briefChips.exclusionSignals.includes(s)
-                                  ? "bg-red-500 text-white border-red-500"
-                                  : "border-border text-muted-foreground hover:border-red-300 hover:text-foreground"
-                              }`}
-                            >{s}</button>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* Description */}
-                      <div className="space-y-1.5">
-                        <Label htmlFor="chips-description" className="text-xs font-semibold">What data columns do you want?</Label>
-                        <Textarea
-                          id="chips-description"
-                          value={description}
-                          onChange={(e) => setDescription(e.target.value)}
-                          placeholder="e.g. Find the company's tech stack, team size, funding stage, and decision-maker titles"
-                          rows={2}
-                          className="resize-none text-xs"
-                        />
-                      </div>
-
-                      {/* Generate plan button */}
-                      <div className="flex items-center gap-3 pt-1">
-                        <button onClick={resetChat} className="text-xs text-muted-foreground hover:text-foreground transition-colors">
-                          Reset
-                        </button>
-                        <Button
-                          className="ml-auto"
-                          onClick={() => generatePlanMutation.mutate({
-                            description,
-                            targetingBrief: {
-                              outreachGoal:     targetingBrief.outreachGoal.trim(),
-                              icpSummary:       targetingBrief.icpSummary.trim(),
-                              targetTitles:     targetingBrief.targetTitles.trim(),
-                              fitSignals:       targetingBrief.fitSignals.trim(),
-                              exclusionSignals: targetingBrief.exclusionSignals.trim(),
-                            },
-                          })}
-                          disabled={description.trim().length < 5 || generatePlanMutation.isPending}
-                        >
-                          {generatePlanMutation.isPending
-                            ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Generating plan...</>
-                            : <><Sparkles className="h-4 w-4 mr-2" />{wizardSections.length > 0 ? "Regenerate Sections" : "Generate Extraction Plan"}</>}
-                        </Button>
-                      </div>
                     </div>
                   ) : (
                     /* ── Manual mode — existing Targeting Brief + description ── */
