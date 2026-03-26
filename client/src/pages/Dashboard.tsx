@@ -309,14 +309,26 @@ export default function Dashboard() {
       const userMsgCount = variables.messages.filter(m => m.role === "user").length;
       if (data.readyToGenerate || userMsgCount >= 3) {
         setChatReadyToGenerate(true);
-        setTargetingBrief({
+        const brief = {
           outreachGoal:     data.brief.outreachGoal,
           icpSummary:       data.brief.icpSummary,
           targetTitles:     data.brief.targetTitles,
           fitSignals:       data.brief.fitSignals,
           exclusionSignals: data.brief.exclusionSignals,
-        });
+        };
+        setTargetingBrief(brief);
         setDescription(data.brief.description);
+        // Auto-trigger plan generation — no manual button click needed
+        generatePlanMutation.mutate({
+          description: data.brief.description,
+          targetingBrief: {
+            outreachGoal:     brief.outreachGoal.trim(),
+            icpSummary:       brief.icpSummary.trim(),
+            targetTitles:     brief.targetTitles.trim(),
+            fitSignals:       brief.fitSignals.trim(),
+            exclusionSignals: brief.exclusionSignals.trim(),
+          },
+        });
       }
     },
     onError: (error) => {
@@ -1011,6 +1023,17 @@ export default function Dashboard() {
                             </div>
                           </div>
                         )}
+                        {generatePlanMutation.isPending && (
+                          <div className="flex items-end gap-2 justify-start">
+                            <div className="flex-shrink-0 w-7 h-7 rounded-full bg-gradient-to-br from-violet-500 to-indigo-600 flex items-center justify-center shadow-sm">
+                              <Sparkles className="h-3.5 w-3.5 text-white" />
+                            </div>
+                            <div className="bg-white border border-slate-200 rounded-2xl rounded-bl-sm px-4 py-2.5 shadow-sm text-sm text-slate-500 flex items-center gap-2">
+                              <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-500" />
+                              Generating your extraction plan…
+                            </div>
+                          </div>
+                        )}
                       </div>
 
                       {/* Input bar */}
@@ -1041,9 +1064,8 @@ export default function Dashboard() {
                           <button onClick={resetChat} className="text-xs text-slate-400 hover:text-slate-600 transition-colors">
                             Start over
                           </button>
-                          {chatReadyToGenerate && (
-                            <Button
-                              size="sm"
+                          {chatReadyToGenerate && wizardSections.length > 0 && !generatePlanMutation.isPending && (
+                            <button
                               onClick={() => generatePlanMutation.mutate({
                                 description,
                                 targetingBrief: {
@@ -1054,13 +1076,10 @@ export default function Dashboard() {
                                   exclusionSignals: targetingBrief.exclusionSignals.trim(),
                                 },
                               })}
-                              disabled={generatePlanMutation.isPending}
-                              className="bg-gradient-to-br from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 border-0 text-white h-7 text-xs px-3"
+                              className="text-xs text-slate-400 hover:text-slate-600 transition-colors"
                             >
-                              {generatePlanMutation.isPending
-                                ? <><Loader2 className="h-3 w-3 mr-1.5 animate-spin" />Generating...</>
-                                : <><Sparkles className="h-3 w-3 mr-1.5" />{wizardSections.length > 0 ? "Regenerate plan" : "Generate plan"}</>}
-                            </Button>
+                              Regenerate plan
+                            </button>
                           )}
                         </div>
                       )}

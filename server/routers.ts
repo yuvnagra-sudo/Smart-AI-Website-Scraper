@@ -485,8 +485,8 @@ USER REQUEST:
         }
       }),
 
-    // Conversational job configurator — Claude Sonnet + web search researches the
-    // market in real time and returns structured chip selections for the brief UI.
+    // Conversational job configurator — Claude Sonnet guides the user through
+    // 2-3 questions and auto-triggers plan generation when ready.
     configureBrief: protectedProcedure
       .input(z.object({
         messages: z.array(z.object({
