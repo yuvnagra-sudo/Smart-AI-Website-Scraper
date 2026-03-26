@@ -248,7 +248,16 @@ export const appRouter = router({
 
     // Generate AI extraction plan from user description
     generateExtractionPlan: protectedProcedure
-      .input(z.object({ description: z.string().min(10) }))
+      .input(z.object({
+        description: z.string().min(5),
+        targetingBrief: z.object({
+          outreachGoal:     z.string(),
+          icpSummary:       z.string(),
+          targetTitles:     z.string(),
+          fitSignals:       z.string(),
+          exclusionSignals: z.string(),
+        }).optional(),
+      }))
       .mutation(async ({ input }) => {
         // IMPORTANT: Do NOT use queuedLLMCall here.
         // When a large job is running, the LLM queue is saturated and this
@@ -317,10 +326,24 @@ Return ONLY valid JSON (no markdown, no code fences):
         const callWithRetry = async () => {
           for (let attempt = 0; attempt < 4; attempt++) {
             try {
+              const tb = input.targetingBrief;
+              const targetingBlock = tb && (tb.outreachGoal || tb.icpSummary || tb.targetTitles || tb.fitSignals || tb.exclusionSignals)
+                ? `TARGETING CONTEXT (provided by user — treat as ground truth, do not override):
+  Goal: ${tb.outreachGoal}
+  Target companies: ${tb.icpSummary}
+  Decision makers to find: ${tb.targetTitles}
+  Fit signals: ${tb.fitSignals}
+  Skip if: ${tb.exclusionSignals}
+
+Generate sections calibrated to this targeting context. Include dedicated columns for the decision maker titles listed. Do NOT generate a fit_assessment column — it will be injected server-side. Do NOT generate generic sections when specific targeting criteria are provided.
+
+USER REQUEST:
+`
+                : "";
               return await invokeLLM({
                 messages: [
                   { role: "system", content: systemMsg },
-                  { role: "user", content: input.description.trim() },
+                  { role: "user", content: targetingBlock + input.description.trim() },
                 ],
                 response_format: {
                   type: "json_schema",
@@ -390,7 +413,7 @@ Return ONLY valid JSON (no markdown, no code fences):
           const parsed = JSON.parse(typeof raw === "string" ? raw : "{}");
 
           // Validate + clean sections
-          const sections: AgentSection[] = (parsed.sections ?? [])
+          let sections: AgentSection[] = (parsed.sections ?? [])
             .slice(0, 15)
             .map((s: any) => ({
               key: String(s.key ?? "")
@@ -409,7 +432,36 @@ Return ONLY valid JSON (no markdown, no code fences):
             });
           }
 
-          const skillContext = parsed.skillContext ?? null;
+          // Auto-inject fit_assessment when targeting signals were provided
+          const tb = input.targetingBrief;
+          if (tb && (tb.fitSignals.trim() || tb.exclusionSignals.trim())) {
+            const fitDesc = [
+              `Score as exactly one of: "Strong Fit", "Possible Fit", or "Skip".`,
+              tb.fitSignals.trim()
+                ? `Strong Fit: company clearly shows these signals on their website: ${tb.fitSignals}.`
+                : `Strong Fit: company shows strong alignment with the ICP.`,
+              tb.exclusionSignals.trim()
+                ? `Skip: company shows any of these signals: ${tb.exclusionSignals}.`
+                : `Skip: company shows clear misalignment with the ICP.`,
+              `Possible Fit: matches ICP but is missing some strong-fit signals.`,
+              `Base this on visible website signals only. Never guess. Return exactly one of the three values.`,
+            ].join(" ");
+            sections = [
+              { key: "fit_assessment", label: "Fit Assessment", desc: fitDesc },
+              ...sections.filter((s: AgentSection) => s.key !== "fit_assessment"),
+            ];
+          }
+
+          // Build skillContext: user-provided values take precedence over LLM inference
+          const parsedSC = parsed.skillContext ?? {};
+          const skillContext = {
+            icpSummary:       tb?.icpSummary       || parsedSC.icpSummary       || "",
+            fitSignals:       tb?.fitSignals        ? tb.fitSignals.split(",").map((s: string) => s.trim()).filter(Boolean)        : (parsedSC.fitSignals        ?? []),
+            exclusionSignals: tb?.exclusionSignals  ? tb.exclusionSignals.split(",").map((s: string) => s.trim()).filter(Boolean)  : (parsedSC.exclusionSignals  ?? []),
+            targetTitles:     tb?.targetTitles      ? tb.targetTitles.split(",").map((s: string) => s.trim()).filter(Boolean)      : (parsedSC.targetTitles      ?? []),
+            apolloSeniorities: parsedSC.apolloSeniorities ?? [],
+            outreachGoal:     tb?.outreachGoal      || parsedSC.outreachGoal     || "",
+          };
 
           return {
             objective: String(parsed.objective ?? input.description),

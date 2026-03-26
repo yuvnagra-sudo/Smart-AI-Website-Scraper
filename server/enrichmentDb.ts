@@ -1,4 +1,4 @@
-import { eq, sql } from "drizzle-orm";
+import { eq, sql, desc } from "drizzle-orm";
 import { enrichmentJobs, jobLogs, type InsertEnrichmentJob, type EnrichmentJob, type InsertJobLog, type JobLog } from "../drizzle/schema";
 import { getDb } from "./db";
 
@@ -22,7 +22,7 @@ export async function getUserEnrichmentJobs(userId: number): Promise<EnrichmentJ
   const db = await getDb();
   if (!db) throw new Error("Database not available");
 
-  return await db.select().from(enrichmentJobs).where(eq(enrichmentJobs.userId, userId)).orderBy(enrichmentJobs.createdAt);
+  return await db.select().from(enrichmentJobs).where(eq(enrichmentJobs.userId, userId)).orderBy(desc(enrichmentJobs.createdAt));
 }
 
 export async function incrementJobProcessedCount(jobId: number): Promise<void> {
@@ -36,7 +36,7 @@ export async function incrementJobProcessedCount(jobId: number): Promise<void> {
 export async function getAllEnrichmentJobs(): Promise<EnrichmentJob[]> {
   const db = await getDb();
   if (!db) throw new Error("Database not available");
-  return await db.select().from(enrichmentJobs).orderBy(enrichmentJobs.createdAt);
+  return await db.select().from(enrichmentJobs).orderBy(desc(enrichmentJobs.createdAt));
 }
 
 export async function updateEnrichmentJob(id: number, updates: Partial<EnrichmentJob>): Promise<void> {

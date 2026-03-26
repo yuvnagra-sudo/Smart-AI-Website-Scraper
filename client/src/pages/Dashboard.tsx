@@ -20,7 +20,7 @@ import {
   Bot, Download, Upload, Clock, CheckCircle, XCircle, Loader2, LogOut,
   FileSpreadsheet, Table2, DollarSign, TrendingUp, Building2, Users,
   HeartPulse, ShoppingCart, Home, MapPin, Info, Sparkles, X, Plus, List, Search,
-  PauseCircle, PlayCircle, ChevronDown, ChevronUp, AlertCircle,
+  PauseCircle, PlayCircle, ChevronDown, ChevronUp, AlertCircle, Target, Edit2,
 } from "lucide-react";
 import { useState, useRef } from "react";
 import { toast } from "sonner";
@@ -161,7 +161,11 @@ export default function Dashboard() {
   const [wizardSystemPrompt, setWizardSystemPrompt] = useState("");
   const [wizardObjective, setWizardObjective] = useState("");
   const [wizardSkillContext, setWizardSkillContext] = useState<SkillContext | null>(null);
-  const [showSkillRefine, setShowSkillRefine] = useState(false);
+  const [targetingBrief, setTargetingBrief] = useState({
+    outreachGoal: "", icpSummary: "", targetTitles: "",
+    fitSignals: "", exclusionSignals: "",
+  });
+  const [showTargetingEdit, setShowTargetingEdit] = useState(true);
 
   // Column mapping state
   const [showColumnMapping, setShowColumnMapping] = useState(false);
@@ -274,7 +278,7 @@ export default function Dashboard() {
       setWizardSystemPrompt(data.systemPrompt);
       setWizardObjective(data.objective);
       setWizardSkillContext(data.skillContext ?? null);
-      setShowSkillRefine(false);
+      setShowTargetingEdit(false);
       toast.success(`Generated ${data.sections.length} extraction sections`);
     },
     onError: (error) => {
@@ -292,7 +296,8 @@ export default function Dashboard() {
       setWizardObjective("");
       setWizardSystemPrompt("");
       setWizardSkillContext(null);
-      setShowSkillRefine(false);
+      setTargetingBrief({ outreachGoal: "", icpSummary: "", targetTitles: "", fitSignals: "", exclusionSignals: "" });
+      setShowTargetingEdit(true);
       refetch();
       if (fileInputRef.current) fileInputRef.current.value = "";
     },
@@ -894,75 +899,189 @@ export default function Dashboard() {
 
                 {/* ── AI Custom tab ── */}
                 <TabsContent value="ai" className="space-y-5">
-                  {/* Template preset pills */}
-                  <div>
-                    <p className="text-xs font-medium text-muted-foreground mb-2">Quick-fill from a template:</p>
-                    <div className="flex flex-wrap gap-2">
-                      {ALL_TEMPLATES.map((tpl) => (
+
+                  {/* ── Panel A: Targeting Brief ── */}
+                  <div className="border rounded-lg overflow-hidden">
+                    <div className="flex items-center justify-between px-4 py-3 bg-muted/20">
+                      <div className="flex items-center gap-2">
+                        <Target className="h-4 w-4 text-primary" />
+                        <span className="text-sm font-semibold">Targeting Brief</span>
+                        <span className="text-xs text-muted-foreground hidden sm:inline">— who you're looking for and what to skip</span>
+                      </div>
+                      {wizardSections.length > 0 && (
                         <button
-                          key={tpl.id}
-                          onClick={() => setDescription(TEMPLATE_OBJECTIVES[tpl.id] ?? "")}
-                          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-medium transition-colors
-                            ${description === TEMPLATE_OBJECTIVES[tpl.id]
-                              ? `${TEMPLATE_COLORS[tpl.id]?.bg} ${TEMPLATE_COLORS[tpl.id]?.border} ${TEMPLATE_COLORS[tpl.id]?.text}`
-                              : "border-border hover:bg-muted/50 text-muted-foreground"
-                            }`}
+                          onClick={() => setShowTargetingEdit(!showTargetingEdit)}
+                          className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
                         >
-                          {TEMPLATE_ICONS[tpl.id]}
-                          {tpl.name}
+                          {showTargetingEdit ? (
+                            <><ChevronUp className="h-3.5 w-3.5" />Collapse</>
+                          ) : (
+                            <><Edit2 className="h-3.5 w-3.5" />Edit</>
+                          )}
                         </button>
-                      ))}
+                      )}
                     </div>
-                  </div>
 
-                  {/* Suggestion chips */}
-                  <div>
-                    <p className="text-xs font-medium text-muted-foreground mb-2">Or pick a use case:</p>
-                    <div className="flex flex-wrap gap-2">
-                      {SUGGESTION_CHIPS.map((chip) => (
-                        <button
-                          key={chip.label}
-                          onClick={() => setDescription(chip.text)}
-                          className={`px-3 py-1 rounded-full border text-xs font-medium transition-colors
-                            ${description === chip.text
-                              ? "border-primary bg-primary/5 text-primary"
-                              : "border-border hover:bg-muted/50 text-muted-foreground"
-                            }`}
-                        >
-                          {chip.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Objective textarea */}
-                  <div className="space-y-2">
-                    <Label htmlFor="description">What do you want to extract?</Label>
-                    <Textarea
-                      id="description"
-                      value={description}
-                      onChange={(e) => setDescription(e.target.value)}
-                      placeholder="e.g. Find each VC firm's investment focus, portfolio companies, and key team members. Include check size range and geographic focus..."
-                      rows={4}
-                      className="resize-none"
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      Be specific — mention the fields you want as columns in the output.
-                    </p>
-                  </div>
-
-                  {/* Generate button */}
-                  <Button
-                    onClick={() => generatePlanMutation.mutate({ description })}
-                    disabled={description.trim().length < 10 || generatePlanMutation.isPending}
-                    className="w-full sm:w-auto"
-                  >
-                    {generatePlanMutation.isPending ? (
-                      <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Generating plan...</>
+                    {showTargetingEdit ? (
+                      <div className="px-4 py-4 space-y-4">
+                        <div className="space-y-1.5">
+                          <Label className="text-xs font-semibold">Research goal</Label>
+                          <Input
+                            className="text-xs"
+                            value={targetingBrief.outreachGoal}
+                            onChange={(e) => setTargetingBrief({ ...targetingBrief, outreachGoal: e.target.value })}
+                            placeholder="e.g. Find VP Engineering contacts at B2B SaaS companies to pitch our CI/CD tool"
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label className="text-xs font-semibold">Target company profile</Label>
+                          <Textarea
+                            className="text-xs resize-none"
+                            rows={2}
+                            value={targetingBrief.icpSummary}
+                            onChange={(e) => setTargetingBrief({ ...targetingBrief, icpSummary: e.target.value })}
+                            placeholder="e.g. B2B SaaS, 50-500 employees, Series A or B, US or EU, product-led growth"
+                          />
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          <div className="space-y-1.5">
+                            <Label className="text-xs font-semibold">Decision makers to find <span className="font-normal text-muted-foreground">(comma-separated, priority order)</span></Label>
+                            <Input
+                              className="text-xs"
+                              value={targetingBrief.targetTitles}
+                              onChange={(e) => setTargetingBrief({ ...targetingBrief, targetTitles: e.target.value })}
+                              placeholder="e.g. VP Engineering, CTO, Head of Engineering"
+                            />
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label className="text-xs font-semibold">Skip companies that show...</Label>
+                            <Input
+                              className="text-xs"
+                              value={targetingBrief.exclusionSignals}
+                              onChange={(e) => setTargetingBrief({ ...targetingBrief, exclusionSignals: e.target.value })}
+                              placeholder="e.g. agency, consulting, crypto, less than 10 employees"
+                            />
+                          </div>
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label className="text-xs font-semibold">
+                            Fit signals <span className="font-normal text-muted-foreground">(optional — what makes a company a strong match, comma-separated)</span>
+                          </Label>
+                          <Input
+                            className="text-xs"
+                            value={targetingBrief.fitSignals}
+                            onChange={(e) => setTargetingBrief({ ...targetingBrief, fitSignals: e.target.value })}
+                            placeholder="e.g. active engineering blog, SaaS pricing visible, mentions CI/CD or DevOps"
+                          />
+                        </div>
+                      </div>
                     ) : (
-                      <><Sparkles className="h-4 w-4 mr-2" />Generate Extraction Plan</>
+                      <div className="px-4 py-3 text-xs text-muted-foreground">
+                        {[
+                          targetingBrief.icpSummary && `Targeting: ${targetingBrief.icpSummary}`,
+                          targetingBrief.targetTitles && `DMs: ${targetingBrief.targetTitles}`,
+                          targetingBrief.exclusionSignals && `Skip: ${targetingBrief.exclusionSignals}`,
+                        ].filter(Boolean).join(" · ") || <span className="italic">No targeting brief set</span>}
+                      </div>
                     )}
-                  </Button>
+                  </div>
+
+                  {/* ── Divider ── */}
+                  <div className="relative">
+                    <div className="absolute inset-0 flex items-center"><span className="w-full border-t" /></div>
+                    <div className="relative flex justify-center text-xs uppercase">
+                      <span className="bg-background px-2 text-muted-foreground">then</span>
+                    </div>
+                  </div>
+
+                  {/* ── Panel B: Extraction columns ── */}
+                  <div className="space-y-4">
+                    {/* Template preset pills */}
+                    <div>
+                      <p className="text-xs font-medium text-muted-foreground mb-2">Quick-fill from a template:</p>
+                      <div className="flex flex-wrap gap-2">
+                        {ALL_TEMPLATES.map((tpl) => (
+                          <button
+                            key={tpl.id}
+                            onClick={() => setDescription(TEMPLATE_OBJECTIVES[tpl.id] ?? "")}
+                            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-medium transition-colors
+                              ${description === TEMPLATE_OBJECTIVES[tpl.id]
+                                ? `${TEMPLATE_COLORS[tpl.id]?.bg} ${TEMPLATE_COLORS[tpl.id]?.border} ${TEMPLATE_COLORS[tpl.id]?.text}`
+                                : "border-border hover:bg-muted/50 text-muted-foreground"
+                              }`}
+                          >
+                            {TEMPLATE_ICONS[tpl.id]}
+                            {tpl.name}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Suggestion chips */}
+                    <div>
+                      <p className="text-xs font-medium text-muted-foreground mb-2">Or pick a use case:</p>
+                      <div className="flex flex-wrap gap-2">
+                        {SUGGESTION_CHIPS.map((chip) => (
+                          <button
+                            key={chip.label}
+                            onClick={() => setDescription(chip.text)}
+                            className={`px-3 py-1 rounded-full border text-xs font-medium transition-colors
+                              ${description === chip.text
+                                ? "border-primary bg-primary/5 text-primary"
+                                : "border-border hover:bg-muted/50 text-muted-foreground"
+                              }`}
+                          >
+                            {chip.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Columns textarea */}
+                    <div className="space-y-2">
+                      <Label htmlFor="description">What data columns do you want?</Label>
+                      <Textarea
+                        id="description"
+                        value={description}
+                        onChange={(e) => setDescription(e.target.value)}
+                        placeholder="e.g. Find each company's tech stack, team size, funding stage, and key decision makers. Include check size and geographic focus..."
+                        rows={3}
+                        className="resize-none"
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Be specific — mention the fields you want as columns in the output.
+                      </p>
+                    </div>
+
+                    {/* Generate button */}
+                    <div className="space-y-1">
+                      <Button
+                        onClick={() => generatePlanMutation.mutate({
+                          description,
+                          targetingBrief: {
+                            outreachGoal:     targetingBrief.outreachGoal.trim(),
+                            icpSummary:       targetingBrief.icpSummary.trim(),
+                            targetTitles:     targetingBrief.targetTitles.trim(),
+                            fitSignals:       targetingBrief.fitSignals.trim(),
+                            exclusionSignals: targetingBrief.exclusionSignals.trim(),
+                          },
+                        })}
+                        disabled={description.trim().length < 5 || generatePlanMutation.isPending}
+                        className="w-full sm:w-auto"
+                      >
+                        {generatePlanMutation.isPending ? (
+                          <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Generating plan...</>
+                        ) : wizardSections.length > 0 ? (
+                          <><Sparkles className="h-4 w-4 mr-2" />Regenerate Sections</>
+                        ) : (
+                          <><Sparkles className="h-4 w-4 mr-2" />Generate Extraction Plan</>
+                        )}
+                      </Button>
+                      {wizardSections.length > 0 && (
+                        <p className="text-xs text-muted-foreground">Regenerates sections only — your targeting brief is preserved.</p>
+                      )}
+                    </div>
+                  </div>
 
                   {/* Generated sections */}
                   {wizardSections.length > 0 && (
@@ -974,100 +1093,37 @@ export default function Dashboard() {
                             ({wizardSections.length} output columns)
                           </span>
                         </p>
-                        <button
-                          className="text-xs text-muted-foreground hover:text-foreground"
-                          onClick={() => generatePlanMutation.mutate({ description })}
-                          disabled={generatePlanMutation.isPending}
-                        >
-                          Regenerate
-                        </button>
                       </div>
 
                       <div className="space-y-2">
-                        {wizardSections.map((section, i) => (
-                          <div
-                            key={i}
-                            className="flex items-start gap-2 p-3 rounded-lg border bg-muted/20"
-                          >
-                            <div className="flex-1 min-w-0">
-                              <p className="font-medium text-sm">{section.label}</p>
-                              <p className="text-xs text-muted-foreground mt-0.5 leading-snug">{section.desc}</p>
-                            </div>
-                            <button
-                              onClick={() => setWizardSections(wizardSections.filter((_, j) => j !== i))}
-                              className="text-muted-foreground hover:text-destructive mt-0.5 shrink-0"
-                              title="Remove section"
+                        {wizardSections.map((section, i) => {
+                          const isPinned = section.key === "fit_assessment";
+                          return (
+                            <div
+                              key={i}
+                              className={`flex items-start gap-2 p-3 rounded-lg border ${
+                                isPinned ? "bg-primary/5 border-primary/20" : "bg-muted/20"
+                              }`}
                             >
-                              <X className="h-4 w-4" />
-                            </button>
-                          </div>
-                        ))}
+                              {isPinned && <Target className="h-4 w-4 text-primary mt-0.5 shrink-0" />}
+                              <div className="flex-1 min-w-0">
+                                <p className="font-medium text-sm">{section.label}</p>
+                                <p className="text-xs text-muted-foreground mt-0.5 leading-snug">{section.desc}</p>
+                              </div>
+                              {!isPinned && (
+                                <button
+                                  onClick={() => setWizardSections(wizardSections.filter((_, j) => j !== i))}
+                                  className="text-muted-foreground hover:text-destructive mt-0.5 shrink-0"
+                                  title="Remove section"
+                                >
+                                  <X className="h-4 w-4" />
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
                         <AddSectionRow onAdd={(s) => setWizardSections([...wizardSections, s])} />
                       </div>
-
-                      {/* Refine Targeting panel — auto-populated from skill context */}
-                      {wizardSkillContext && (
-                        <div className="border rounded-lg overflow-hidden">
-                          <button
-                            className="w-full flex items-center justify-between px-4 py-3 text-sm font-medium hover:bg-muted/30 transition-colors"
-                            onClick={() => setShowSkillRefine(!showSkillRefine)}
-                          >
-                            <span className="flex items-center gap-2">
-                              <Sparkles className="h-4 w-4 text-primary" />
-                              Refine targeting
-                              <span className="text-xs font-normal text-muted-foreground">(optional — edit AI-inferred criteria)</span>
-                            </span>
-                            {showSkillRefine ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-                          </button>
-
-                          {showSkillRefine && (
-                            <div className="px-4 pb-4 space-y-4 border-t bg-muted/10">
-                              <div className="space-y-1.5 pt-3">
-                                <Label className="text-xs font-semibold">Ideal company profile</Label>
-                                <Textarea
-                                  className="text-xs min-h-[56px] resize-none"
-                                  value={wizardSkillContext.icpSummary}
-                                  onChange={(e) => setWizardSkillContext({ ...wizardSkillContext, icpSummary: e.target.value })}
-                                  placeholder="e.g. B2B SaaS, 50-500 employees, Series A/B, US or EU"
-                                />
-                              </div>
-                              <div className="space-y-1.5">
-                                <Label className="text-xs font-semibold">Decision maker titles <span className="font-normal text-muted-foreground">(comma-separated, priority order)</span></Label>
-                                <Input
-                                  className="text-xs"
-                                  value={wizardSkillContext.targetTitles.join(", ")}
-                                  onChange={(e) => setWizardSkillContext({
-                                    ...wizardSkillContext,
-                                    targetTitles: e.target.value.split(",").map(t => t.trim()).filter(Boolean),
-                                  })}
-                                  placeholder="e.g. VP Engineering, CTO, Head of Engineering"
-                                />
-                              </div>
-                              <div className="space-y-1.5">
-                                <Label className="text-xs font-semibold">Skip companies that show...</Label>
-                                <Textarea
-                                  className="text-xs min-h-[56px] resize-none"
-                                  value={wizardSkillContext.exclusionSignals.join(", ")}
-                                  onChange={(e) => setWizardSkillContext({
-                                    ...wizardSkillContext,
-                                    exclusionSignals: e.target.value.split(",").map(t => t.trim()).filter(Boolean),
-                                  })}
-                                  placeholder="e.g. agency, crypto/web3, less than 10 employees"
-                                />
-                              </div>
-                              <div className="space-y-1.5">
-                                <Label className="text-xs font-semibold">Research goal</Label>
-                                <Input
-                                  className="text-xs"
-                                  value={wizardSkillContext.outreachGoal}
-                                  onChange={(e) => setWizardSkillContext({ ...wizardSkillContext, outreachGoal: e.target.value })}
-                                  placeholder="e.g. Find engineering leads to pitch CI/CD tooling"
-                                />
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      )}
 
                       <div className="flex justify-end pt-1">
                         <Button onClick={() => setWizardStep("review")}>
@@ -1257,6 +1313,16 @@ export default function Dashboard() {
                     <p className="text-xs text-muted-foreground mt-2 italic">
                       Objective: {wizardObjective}
                     </p>
+                  )}
+                  {(targetingBrief.icpSummary || targetingBrief.targetTitles || targetingBrief.exclusionSignals) && (
+                    <div className="mt-3 p-3 rounded-lg bg-blue-50 border border-blue-100">
+                      <p className="text-xs font-semibold text-blue-900 mb-1">Targeting Brief</p>
+                      <div className="space-y-0.5 text-xs text-blue-700">
+                        {targetingBrief.icpSummary     && <p><span className="font-medium">ICP:</span> {targetingBrief.icpSummary}</p>}
+                        {targetingBrief.targetTitles   && <p><span className="font-medium">DMs:</span> {targetingBrief.targetTitles}</p>}
+                        {targetingBrief.exclusionSignals && <p><span className="font-medium">Skip:</span> {targetingBrief.exclusionSignals}</p>}
+                      </div>
+                    </div>
                   )}
                 </div>
               ) : (
