@@ -106,7 +106,16 @@ export async function runMigrations(): Promise<void> {
     { name: "sectionsJson",       sql: "ALTER TABLE enrichmentJobs ADD COLUMN sectionsJson TEXT" },
     { name: "systemPrompt",       sql: "ALTER TABLE enrichmentJobs ADD COLUMN systemPrompt TEXT" },
     { name: "objective",          sql: "ALTER TABLE enrichmentJobs ADD COLUMN objective TEXT" },
-    { name: "columnMappingJson", sql: "ALTER TABLE enrichmentJobs ADD COLUMN columnMappingJson TEXT" },
+    { name: "columnMappingJson",  sql: "ALTER TABLE enrichmentJobs ADD COLUMN columnMappingJson TEXT" },
+    // Skill context + worker tracking
+    { name: "skillContextJson",   sql: "ALTER TABLE enrichmentJobs ADD COLUMN skillContextJson TEXT" },
+    { name: "workerPid",          sql: "ALTER TABLE enrichmentJobs ADD COLUMN workerPid INT" },
+    { name: "heartbeatAt",        sql: "ALTER TABLE enrichmentJobs ADD COLUMN heartbeatAt TIMESTAMP NULL" },
+    { name: "startedAt",          sql: "ALTER TABLE enrichmentJobs ADD COLUMN startedAt TIMESTAMP NULL" },
+    { name: "currentFirmName",    sql: "ALTER TABLE enrichmentJobs ADD COLUMN currentFirmName TEXT" },
+    { name: "currentTeamMemberCount", sql: "ALTER TABLE enrichmentJobs ADD COLUMN currentTeamMemberCount INT DEFAULT 0" },
+    { name: "errorMessage",       sql: "ALTER TABLE enrichmentJobs ADD COLUMN errorMessage TEXT" },
+    { name: "completedAt",        sql: "ALTER TABLE enrichmentJobs ADD COLUMN completedAt TIMESTAMP NULL" },
     // Per-URL workflow tracking table
     { name: "jobLogs_table", sql: `CREATE TABLE IF NOT EXISTS jobLogs (
       id INT AUTO_INCREMENT PRIMARY KEY,
