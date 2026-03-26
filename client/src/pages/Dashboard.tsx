@@ -169,7 +169,7 @@ export default function Dashboard() {
   const [showTargetingEdit, setShowTargetingEdit] = useState(true);
 
   // Chat configurator state
-  const CHAT_OPENER = "Describe who you're targeting and what you'll do with the data — I'll research the market and configure your targeting brief.";
+  const CHAT_OPENER = "Describe who you're targeting and what you'll do with the data — I'll configure your targeting brief.";
   const [chatMode, setChatMode]               = useState<"chat" | "chips" | "manual">("chat");
 
   // Chip-based brief state (populated by Claude, editable by user)

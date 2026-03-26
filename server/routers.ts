@@ -503,17 +503,16 @@ USER REQUEST:
         const client = new Anthropic({ apiKey });
 
         const systemPrompt = `You are a B2B data targeting expert helping configure a web scraping job.
-The user describes who they're selling to or researching. You:
-1. Use web_search to research the market segment they describe (decision-maker titles, company sizes, ICP signals)
-2. Respond conversationally in 2-3 sentences explaining your reasoning
-3. Return structured targeting parameters inside <brief>...</brief> XML tags
+The user describes who they're selling to or researching. Based on your knowledge of B2B markets:
+1. Respond conversationally in 2-3 sentences explaining who the key decision-makers are and why
+2. Return structured targeting parameters inside <brief>...</brief> XML tags
 
 Always include a <brief> block in your response using this exact JSON format:
 <brief>
 {
   "outreachGoal": "one of: Cold email outreach | VC due diligence | Market research | Lead qualification | Competitor analysis | Building a directory | Recruiting intelligence",
   "companyTypes": ["array", "of", "company", "type", "strings"],
-  "companySizes": ["array of size strings, e.g.: SMB (1-50)", "Mid-market (51-500)"],
+  "companySizes": ["array of size strings, e.g.: SMB (11-50)", "Mid-market (201-500)"],
   "titles": ["array", "of", "job", "titles"],
   "fitSignals": ["array", "of", "positive", "fit", "signal", "strings"],
   "exclusionSignals": ["array", "of", "exclusion", "signal", "strings"]
@@ -522,16 +521,14 @@ Always include a <brief> block in your response using this exact JSON format:
 
 On follow-up messages, update the <brief> to reflect refined selections.`;
 
-        const response = await (client.beta as any).messages.create({
+        const response = await client.messages.create({
           model: "claude-sonnet-4-6",
           max_tokens: 1024,
           system: systemPrompt,
-          tools: [{ type: "web_search_20250305", name: "web_search" }],
           messages: input.messages.map(m => ({ role: m.role, content: m.content })),
-          betas: ["web-search-2025-03-05"],
         });
 
-        // Extract all text blocks from the response (web_search may interleave tool_use blocks)
+        // Extract text from response
         const text = response.content
           .filter((b): b is { type: "text"; text: string } => b.type === "text")
           .map(b => b.text)
