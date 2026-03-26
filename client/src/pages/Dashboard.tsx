@@ -307,7 +307,7 @@ export default function Dashboard() {
     onSuccess: (data, variables) => {
       setChatMessages(prev => [...prev, { role: "assistant", content: data.message }]);
       const userMsgCount = variables.messages.filter(m => m.role === "user").length;
-      if (data.readyToGenerate || userMsgCount >= 2) {
+      if (data.readyToGenerate || userMsgCount >= 3) {
         setChatReadyToGenerate(true);
         setTargetingBrief({
           outreachGoal:     data.brief.outreachGoal,
