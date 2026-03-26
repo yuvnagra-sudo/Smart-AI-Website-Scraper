@@ -27,6 +27,7 @@ import { toast } from "sonner";
 import { Link } from "wouter";
 import ResultsSheet from "@/components/ResultsSheet";
 import { ALL_TEMPLATES, getTemplate, TEMPLATE_SECTIONS, TEMPLATE_SYSTEM_PROMPTS, type AgentSection as TemplateAgentSection } from "@/lib/templates";
+import { BRIEF_OPTIONS } from "@/lib/briefOptions";
 import type { SkillContext } from "../../../shared/skillContext";
 
 // ---------------------------------------------------------------------------
@@ -168,8 +169,31 @@ export default function Dashboard() {
   const [showTargetingEdit, setShowTargetingEdit] = useState(true);
 
   // Chat configurator state
-  const CHAT_OPENER = "Hi! Tell me about your research project — what companies are you looking at, and what data do you want to pull from their websites?";
-  const [chatMode, setChatMode]               = useState<"chat" | "form">("chat");
+  const CHAT_OPENER = "Describe who you're targeting and what you'll do with the data — I'll research the market and configure your targeting brief.";
+  const [chatMode, setChatMode]               = useState<"chat" | "chips" | "manual">("chat");
+
+  // Chip-based brief state (populated by Claude, editable by user)
+  const [briefChips, setBriefChips] = useState<{
+    goal: string;
+    companyTypes: string[];
+    companySizes: string[];
+    titles: string[];
+    fitSignals: string[];
+    exclusionSignals: string[];
+  }>({ goal: "", companyTypes: [], companySizes: [], titles: [], fitSignals: [], exclusionSignals: [] });
+
+  // Sync chips → targetingBrief whenever chips change
+  useEffect(() => {
+    setTargetingBrief(prev => ({
+      ...prev,
+      outreachGoal:     briefChips.goal,
+      icpSummary:       [...briefChips.companyTypes, ...briefChips.companySizes].filter(Boolean).join(", "),
+      targetTitles:     briefChips.titles.join(", "),
+      fitSignals:       briefChips.fitSignals.join(", "),
+      exclusionSignals: briefChips.exclusionSignals.join(", "),
+    }));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [briefChips]);
   const [chatMessages, setChatMessages]       = useState<{ role: "user" | "assistant"; content: string }[]>([
     { role: "assistant", content: CHAT_OPENER },
   ]);
@@ -302,20 +326,22 @@ export default function Dashboard() {
     },
   });
 
-  const configureChatMutation = trpc.enrichment.configureChat.useMutation({
+  const configureBriefMutation = trpc.enrichment.configureBrief.useMutation({
     onSuccess: (data) => {
-      setChatMessages(prev => [...prev, { role: "assistant", content: data.message }]);
-      if (data.readyToGenerate) {
-        setChatReadyToGenerate(true);
-        // Silently populate the form fields so Generate uses accurate values
-        setTargetingBrief({
-          outreachGoal:     data.brief.outreachGoal,
-          icpSummary:       data.brief.icpSummary,
-          targetTitles:     data.brief.targetTitles,
-          fitSignals:       data.brief.fitSignals,
-          exclusionSignals: data.brief.exclusionSignals,
+      if (data.message) {
+        setChatMessages(prev => [...prev, { role: "assistant", content: data.message }]);
+      }
+      if (data.brief) {
+        setBriefChips({
+          goal:             data.brief.outreachGoal ?? "",
+          companyTypes:     data.brief.companyTypes ?? [],
+          companySizes:     data.brief.companySizes ?? [],
+          titles:           data.brief.titles ?? [],
+          fitSignals:       data.brief.fitSignals ?? [],
+          exclusionSignals: data.brief.exclusionSignals ?? [],
         });
-        setDescription(data.brief.description);
+        setChatReadyToGenerate(true);
+        setChatMode("chips");
       }
     },
     onError: (error) => {
@@ -325,17 +351,19 @@ export default function Dashboard() {
 
   const sendChatMessage = () => {
     const text = chatInput.trim();
-    if (!text || configureChatMutation.isPending) return;
+    if (!text || configureBriefMutation.isPending) return;
     const updated = [...chatMessages, { role: "user" as const, content: text }];
     setChatMessages(updated);
     setChatInput("");
-    configureChatMutation.mutate({ messages: updated });
+    configureBriefMutation.mutate({ messages: updated });
   };
 
   const resetChat = () => {
     setChatMessages([{ role: "assistant", content: CHAT_OPENER }]);
     setChatInput("");
     setChatReadyToGenerate(false);
+    setBriefChips({ goal: "", companyTypes: [], companySizes: [], titles: [], fitSignals: [], exclusionSignals: [] });
+    setChatMode("chat");
   };
 
   const confirmMutation = trpc.enrichment.confirmAndStart.useMutation({
@@ -952,7 +980,7 @@ export default function Dashboard() {
 
                 {/* ── AI Custom tab ── */}
                 <TabsContent value="ai" className="space-y-5">
-                  {/* Chat / Form toggle */}
+                  {/* Chat / Chips / Manual toggle */}
                   <div className="flex items-center gap-1 p-0.5 rounded-lg bg-muted/40 w-fit">
                     <button
                       onClick={() => setChatMode("chat")}
@@ -963,12 +991,20 @@ export default function Dashboard() {
                       <Bot className="h-3.5 w-3.5" /> Chat
                     </button>
                     <button
-                      onClick={() => setChatMode("form")}
+                      onClick={() => setChatMode("chips")}
                       className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                        chatMode === "form" ? "bg-white shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
+                        chatMode === "chips" ? "bg-white shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
                       }`}
                     >
-                      <Edit2 className="h-3.5 w-3.5" /> Form
+                      <Target className="h-3.5 w-3.5" /> Chips
+                    </button>
+                    <button
+                      onClick={() => setChatMode("manual")}
+                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                        chatMode === "manual" ? "bg-white shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <Edit2 className="h-3.5 w-3.5" /> Manual
                     </button>
                   </div>
 
@@ -988,7 +1024,7 @@ export default function Dashboard() {
                             </div>
                           </div>
                         ))}
-                        {configureChatMutation.isPending && (
+                        {configureBriefMutation.isPending && (
                           <div className="flex justify-start">
                             <div className="bg-white border shadow-sm rounded-2xl rounded-bl-sm px-4 py-3">
                               <div className="flex gap-1 items-center">
@@ -1008,16 +1044,16 @@ export default function Dashboard() {
                           value={chatInput}
                           onChange={(e) => setChatInput(e.target.value)}
                           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChatMessage(); } }}
-                          placeholder="Type a message..."
-                          disabled={configureChatMutation.isPending}
+                          placeholder="Describe who you're targeting..."
+                          disabled={configureBriefMutation.isPending}
                           className="flex-1"
                         />
                         <Button
                           onClick={sendChatMessage}
-                          disabled={!chatInput.trim() || configureChatMutation.isPending}
+                          disabled={!chatInput.trim() || configureBriefMutation.isPending}
                           size="icon"
                         >
-                          {configureChatMutation.isPending
+                          {configureBriefMutation.isPending
                             ? <Loader2 className="h-4 w-4 animate-spin" />
                             : <ArrowUp className="h-4 w-4" />}
                         </Button>
@@ -1025,40 +1061,194 @@ export default function Dashboard() {
 
                       {/* Actions row */}
                       <div className="flex items-center justify-between min-h-[36px]">
-                        {chatMessages.length > 1 && !chatReadyToGenerate && (
+                        {chatMessages.length > 1 && (
                           <button onClick={resetChat} className="text-xs text-muted-foreground hover:text-foreground transition-colors">
                             Start over
                           </button>
                         )}
                         {chatReadyToGenerate && (
-                          <div className="flex items-center gap-3 w-full">
-                            <button onClick={resetChat} className="text-xs text-muted-foreground hover:text-foreground transition-colors shrink-0">
-                              Start over
-                            </button>
-                            <Button
-                              className="ml-auto"
-                              onClick={() => generatePlanMutation.mutate({
-                                description,
-                                targetingBrief: {
-                                  outreachGoal:     targetingBrief.outreachGoal.trim(),
-                                  icpSummary:       targetingBrief.icpSummary.trim(),
-                                  targetTitles:     targetingBrief.targetTitles.trim(),
-                                  fitSignals:       targetingBrief.fitSignals.trim(),
-                                  exclusionSignals: targetingBrief.exclusionSignals.trim(),
-                                },
-                              })}
-                              disabled={generatePlanMutation.isPending}
-                            >
-                              {generatePlanMutation.isPending
-                                ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Generating plan...</>
-                                : <><Sparkles className="h-4 w-4 mr-2" />{wizardSections.length > 0 ? "Regenerate Sections" : "Generate Extraction Plan"}</>}
-                            </Button>
-                          </div>
+                          <p className="text-xs text-muted-foreground ml-auto">
+                            Chips ready — <button onClick={() => setChatMode("chips")} className="text-primary underline">view &amp; edit</button>
+                          </p>
                         )}
                       </div>
                     </div>
+                  ) : chatMode === "chips" ? (
+                    /* ── Chips configurator ── */
+                    <div className="space-y-4">
+                      {/* Goal */}
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-semibold">Goal</Label>
+                        <div className="flex flex-wrap gap-1.5">
+                          {BRIEF_OPTIONS.goals.map(g => (
+                            <button
+                              key={g}
+                              onClick={() => setBriefChips(prev => ({ ...prev, goal: prev.goal === g ? "" : g }))}
+                              className={`px-2.5 py-1 rounded-full text-xs border transition-all ${
+                                briefChips.goal === g
+                                  ? "bg-primary text-primary-foreground border-primary"
+                                  : "border-border text-muted-foreground hover:border-primary/50 hover:text-foreground"
+                              }`}
+                            >{g}</button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Company types */}
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-semibold">Company type</Label>
+                        <div className="flex flex-wrap gap-1.5">
+                          {BRIEF_OPTIONS.companyTypes.map(t => (
+                            <button
+                              key={t}
+                              onClick={() => setBriefChips(prev => ({
+                                ...prev,
+                                companyTypes: prev.companyTypes.includes(t)
+                                  ? prev.companyTypes.filter(x => x !== t)
+                                  : [...prev.companyTypes, t],
+                              }))}
+                              className={`px-2.5 py-1 rounded-full text-xs border transition-all ${
+                                briefChips.companyTypes.includes(t)
+                                  ? "bg-primary text-primary-foreground border-primary"
+                                  : "border-border text-muted-foreground hover:border-primary/50 hover:text-foreground"
+                              }`}
+                            >{t}</button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Company sizes */}
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-semibold">Company size</Label>
+                        <div className="flex flex-wrap gap-1.5">
+                          {BRIEF_OPTIONS.companySizes.map(s => (
+                            <button
+                              key={s}
+                              onClick={() => setBriefChips(prev => ({
+                                ...prev,
+                                companySizes: prev.companySizes.includes(s)
+                                  ? prev.companySizes.filter(x => x !== s)
+                                  : [...prev.companySizes, s],
+                              }))}
+                              className={`px-2.5 py-1 rounded-full text-xs border transition-all ${
+                                briefChips.companySizes.includes(s)
+                                  ? "bg-primary text-primary-foreground border-primary"
+                                  : "border-border text-muted-foreground hover:border-primary/50 hover:text-foreground"
+                              }`}
+                            >{s}</button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Titles */}
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-semibold">Decision-maker titles</Label>
+                        <div className="flex flex-wrap gap-1.5">
+                          {BRIEF_OPTIONS.titles.map(t => (
+                            <button
+                              key={t}
+                              onClick={() => setBriefChips(prev => ({
+                                ...prev,
+                                titles: prev.titles.includes(t)
+                                  ? prev.titles.filter(x => x !== t)
+                                  : [...prev.titles, t],
+                              }))}
+                              className={`px-2.5 py-1 rounded-full text-xs border transition-all ${
+                                briefChips.titles.includes(t)
+                                  ? "bg-primary text-primary-foreground border-primary"
+                                  : "border-border text-muted-foreground hover:border-primary/50 hover:text-foreground"
+                              }`}
+                            >{t}</button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Fit signals */}
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-semibold text-green-700">Strong-fit signals</Label>
+                        <div className="flex flex-wrap gap-1.5">
+                          {BRIEF_OPTIONS.fitSignals.map(s => (
+                            <button
+                              key={s}
+                              onClick={() => setBriefChips(prev => ({
+                                ...prev,
+                                fitSignals: prev.fitSignals.includes(s)
+                                  ? prev.fitSignals.filter(x => x !== s)
+                                  : [...prev.fitSignals, s],
+                              }))}
+                              className={`px-2.5 py-1 rounded-full text-xs border transition-all ${
+                                briefChips.fitSignals.includes(s)
+                                  ? "bg-green-600 text-white border-green-600"
+                                  : "border-border text-muted-foreground hover:border-green-400 hover:text-foreground"
+                              }`}
+                            >{s}</button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Exclusion signals */}
+                      <div className="space-y-1.5">
+                        <Label className="text-xs font-semibold text-red-600">Skip if</Label>
+                        <div className="flex flex-wrap gap-1.5">
+                          {BRIEF_OPTIONS.exclusionSignals.map(s => (
+                            <button
+                              key={s}
+                              onClick={() => setBriefChips(prev => ({
+                                ...prev,
+                                exclusionSignals: prev.exclusionSignals.includes(s)
+                                  ? prev.exclusionSignals.filter(x => x !== s)
+                                  : [...prev.exclusionSignals, s],
+                              }))}
+                              className={`px-2.5 py-1 rounded-full text-xs border transition-all ${
+                                briefChips.exclusionSignals.includes(s)
+                                  ? "bg-red-500 text-white border-red-500"
+                                  : "border-border text-muted-foreground hover:border-red-300 hover:text-foreground"
+                              }`}
+                            >{s}</button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Description */}
+                      <div className="space-y-1.5">
+                        <Label htmlFor="chips-description" className="text-xs font-semibold">What data columns do you want?</Label>
+                        <Textarea
+                          id="chips-description"
+                          value={description}
+                          onChange={(e) => setDescription(e.target.value)}
+                          placeholder="e.g. Find the company's tech stack, team size, funding stage, and decision-maker titles"
+                          rows={2}
+                          className="resize-none text-xs"
+                        />
+                      </div>
+
+                      {/* Generate plan button */}
+                      <div className="flex items-center gap-3 pt-1">
+                        <button onClick={resetChat} className="text-xs text-muted-foreground hover:text-foreground transition-colors">
+                          Reset
+                        </button>
+                        <Button
+                          className="ml-auto"
+                          onClick={() => generatePlanMutation.mutate({
+                            description,
+                            targetingBrief: {
+                              outreachGoal:     targetingBrief.outreachGoal.trim(),
+                              icpSummary:       targetingBrief.icpSummary.trim(),
+                              targetTitles:     targetingBrief.targetTitles.trim(),
+                              fitSignals:       targetingBrief.fitSignals.trim(),
+                              exclusionSignals: targetingBrief.exclusionSignals.trim(),
+                            },
+                          })}
+                          disabled={description.trim().length < 5 || generatePlanMutation.isPending}
+                        >
+                          {generatePlanMutation.isPending
+                            ? <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Generating plan...</>
+                            : <><Sparkles className="h-4 w-4 mr-2" />{wizardSections.length > 0 ? "Regenerate Sections" : "Generate Extraction Plan"}</>}
+                        </Button>
+                      </div>
+                    </div>
                   ) : (
-                    /* ── Form mode — existing Targeting Brief + description ── */
+                    /* ── Manual mode — existing Targeting Brief + description ── */
                     <>
 
                   {/* ── Panel A: Targeting Brief ── */}

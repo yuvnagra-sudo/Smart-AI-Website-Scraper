@@ -343,6 +343,7 @@ USER REQUEST:
 `
                 : "";
               return await invokeLLM({
+                temperature: 0,
                 messages: [
                   { role: "system", content: systemMsg },
                   { role: "user", content: targetingBlock + input.description.trim() },
@@ -438,15 +439,15 @@ USER REQUEST:
           const tb = input.targetingBrief;
           if (tb && (tb.fitSignals.trim() || tb.exclusionSignals.trim())) {
             const fitDesc = [
-              `Score as exactly one of: "Strong Fit", "Possible Fit", or "Skip".`,
-              tb.fitSignals.trim()
-                ? `Strong Fit: company clearly shows these signals on their website: ${tb.fitSignals}.`
-                : `Strong Fit: company shows strong alignment with the ICP.`,
+              `Score as exactly one of: "Strong Fit", "Possible Fit", or "Skip". Apply criteria in this priority order — stop at the first match.`,
               tb.exclusionSignals.trim()
-                ? `Skip: company shows any of these signals: ${tb.exclusionSignals}.`
-                : `Skip: company shows clear misalignment with the ICP.`,
-              `Possible Fit: matches ICP but is missing some strong-fit signals.`,
-              `Base this on visible website signals only. Never guess. Return exactly one of the three values.`,
+                ? `1. Skip — if the company shows ANY of these signals: ${tb.exclusionSignals}.`
+                : `1. Skip — if the company shows clear misalignment with the ICP.`,
+              tb.fitSignals.trim()
+                ? `2. Strong Fit — if the company clearly shows most of these signals: ${tb.fitSignals}.`
+                : `2. Strong Fit — if the company shows strong alignment with the ICP.`,
+              `3. Possible Fit — otherwise (matches ICP but missing strong-fit signals, or insufficient evidence on the page).`,
+              `Base this solely on visible website content. Return exactly one value.`,
             ].join(" ");
             sections = [
               { key: "fit_assessment", label: "Fit Assessment", desc: fitDesc },
@@ -484,8 +485,9 @@ USER REQUEST:
         }
       }),
 
-    // Conversational job configurator — chat-style alternative to the targeting brief form
-    configureChat: protectedProcedure
+    // Conversational job configurator — Claude Sonnet + web search researches the
+    // market in real time and returns structured chip selections for the brief UI.
+    configureBrief: protectedProcedure
       .input(z.object({
         messages: z.array(z.object({
           role: z.enum(["user", "assistant"]),
@@ -493,90 +495,59 @@ USER REQUEST:
         })).min(1),
       }))
       .mutation(async ({ input }) => {
-        const { invokeLLM } = await import("./_core/openaiLLM");
+        const Anthropic = (await import("@anthropic-ai/sdk")).default;
+        const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-        const systemMsg = `You are an AI assistant helping configure a web data extraction job. Your job is to understand what the user wants and get them to extraction AS FAST AS POSSIBLE — ideally in 1-2 messages.
+        const systemPrompt = `You are a B2B data targeting expert helping configure a web scraping job.
+The user describes who they're selling to or researching. You:
+1. Use web_search to research the market segment they describe (decision-maker titles, company sizes, ICP signals)
+2. Respond conversationally in 2-3 sentences explaining your reasoning
+3. Return structured targeting parameters inside <brief>...</brief> XML tags
 
-SPEED RULES (follow strictly):
-- If the user's first message tells you WHAT companies + WHAT data they want: set readyToGenerate: true IMMEDIATELY on your first response. No follow-up questions needed.
-- If the first message is vague on only ONE thing: ask that one question, then set readyToGenerate: true on your NEXT response no matter what.
-- NEVER ask more than one follow-up question total. After 2 user messages, ALWAYS set readyToGenerate: true.
-- Infer and fill in anything you're unsure about — do NOT ask the user to clarify minor details.
-- Do not ask about fit signals, exclusion signals, or goal unless the user brings them up. You can infer reasonable defaults.
-
-What to extract from the conversation:
-- description: What data columns they want from each company website (most important — infer this aggressively)
-- icpSummary: What type of companies they're targeting (infer from context if not stated)
-- targetTitles: Job titles to find (only if they mention needing contacts/people)
-- outreachGoal: What they'll do with the data (infer from context)
-- fitSignals / exclusionSignals: Only fill if they explicitly mention these
-
-When readyToGenerate is true, your message should be a SHORT confirmation: "Got it — [1 sentence summary of what you'll extract]. Generating your plan now."
-
-Always return valid JSON (no markdown):
+Always include a <brief> block in your response using this exact JSON format:
+<brief>
 {
-  "message": "your response",
-  "readyToGenerate": false,
-  "brief": {
-    "outreachGoal": "inferred or empty string",
-    "icpSummary": "inferred or empty string",
-    "targetTitles": "comma-separated or empty string",
-    "fitSignals": "comma-separated or empty string",
-    "exclusionSignals": "comma-separated or empty string",
-    "description": "what data columns to extract — always fill this from context"
-  }
-}`;
+  "outreachGoal": "one of: Cold email outreach | VC due diligence | Market research | Lead qualification | Competitor analysis | Building a directory | Recruiting intelligence",
+  "companyTypes": ["array", "of", "company", "type", "strings"],
+  "companySizes": ["array of size strings, e.g.: SMB (1-50)", "Mid-market (51-500)"],
+  "titles": ["array", "of", "job", "titles"],
+  "fitSignals": ["array", "of", "positive", "fit", "signal", "strings"],
+  "exclusionSignals": ["array", "of", "exclusion", "signal", "strings"]
+}
+</brief>
 
-        const response = await invokeLLM({
-          messages: [
-            { role: "system", content: systemMsg },
-            ...input.messages,
-          ],
-          response_format: {
-            type: "json_schema",
-            json_schema: {
-              name: "chat_response",
-              strict: true,
-              schema: {
-                type: "object",
-                properties: {
-                  message: { type: "string" },
-                  readyToGenerate: { type: "boolean" },
-                  brief: {
-                    type: "object",
-                    properties: {
-                      outreachGoal:     { type: "string" },
-                      icpSummary:       { type: "string" },
-                      targetTitles:     { type: "string" },
-                      fitSignals:       { type: "string" },
-                      exclusionSignals: { type: "string" },
-                      description:      { type: "string" },
-                    },
-                    required: ["outreachGoal", "icpSummary", "targetTitles", "fitSignals", "exclusionSignals", "description"],
-                    additionalProperties: false,
-                  },
-                },
-                required: ["message", "readyToGenerate", "brief"],
-                additionalProperties: false,
-              },
-            },
-          },
+On follow-up messages, update the <brief> to reflect refined selections.`;
+
+        const response = await client.messages.create({
+          model: "claude-sonnet-4-6",
+          max_tokens: 1024,
+          system: systemPrompt,
+          tools: [{ type: "web_search_20250305" as const, name: "web_search" }],
+          messages: input.messages.map(m => ({ role: m.role, content: m.content })),
         });
 
-        const raw = response!.choices[0]?.message?.content ?? "{}";
-        const parsed = JSON.parse(typeof raw === "string" ? raw : "{}");
+        // Extract all text blocks from the response (web_search may interleave tool_use blocks)
+        const text = response.content
+          .filter((b): b is { type: "text"; text: string } => b.type === "text")
+          .map(b => b.text)
+          .join("");
+
+        const briefMatch = text.match(/<brief>([\s\S]*?)<\/brief>/);
+        let brief: {
+          outreachGoal?: string;
+          companyTypes?: string[];
+          companySizes?: string[];
+          titles?: string[];
+          fitSignals?: string[];
+          exclusionSignals?: string[];
+        } | null = null;
+        if (briefMatch) {
+          try { brief = JSON.parse(briefMatch[1].trim()); } catch {}
+        }
 
         return {
-          message:          String(parsed.message ?? "Sorry, I couldn't process that. Please try again."),
-          readyToGenerate:  Boolean(parsed.readyToGenerate),
-          brief: {
-            outreachGoal:     String(parsed.brief?.outreachGoal     ?? ""),
-            icpSummary:       String(parsed.brief?.icpSummary       ?? ""),
-            targetTitles:     String(parsed.brief?.targetTitles     ?? ""),
-            fitSignals:       String(parsed.brief?.fitSignals       ?? ""),
-            exclusionSignals: String(parsed.brief?.exclusionSignals ?? ""),
-            description:      String(parsed.brief?.description      ?? ""),
-          },
+          message: text.replace(/<brief>[\s\S]*?<\/brief>/, "").trim(),
+          brief,
         };
       }),
 
@@ -1240,6 +1211,8 @@ export async function processAgentJob(jobId: number) {
     const CONCURRENCY = Math.min(50, Math.max(5, Math.floor(RPM / 7 / 2)));
     const firmQueue = [...firms.slice(resumeFrom)];
     const originalColumns = firms[0] ? Object.keys(firms[0].originalRow) : [];
+    // Track original input position so concurrent workers don't scramble row order
+    const firmIndexMap = new Map(firms.map((f, i) => [f.websiteUrl, i]));
 
     keepAlive.start();
 
@@ -1341,7 +1314,7 @@ export async function processAgentJob(jobId: number) {
               profileData[peopleSec.key] = JSON.stringify(apolloContacts);
             }
 
-            profileResults.push({ ...profileData, ...firm.originalRow });
+            profileResults.push({ ...profileData, ...firm.originalRow, __inputIndex: String(firmIndexMap.get(firm.websiteUrl) ?? 999999) });
 
             if (fieldResultsForRow) {
               fieldResultsMapArr.push({ companyName: firm.companyName, websiteUrl: firm.websiteUrl, fieldResults: fieldResultsForRow });
@@ -1414,9 +1387,15 @@ export async function processAgentJob(jobId: number) {
     // Status is already "paused" in DB (set by the pauseJob mutation).
     if (isJobPaused(jobId)) {
       console.log(`[processAgentJob] ⏸️ Job ${jobId} paused after ${profileResults.length} profiles. Saving partial results...`);
+      profileResults.sort((a, b) => Number(a.__inputIndex ?? 0) - Number(b.__inputIndex ?? 0));
+      profileResults.forEach(r => { delete r.__inputIndex; });
       await savePartialResults();
       return;
     }
+
+    // Restore input row order (concurrent workers complete out-of-order)
+    profileResults.sort((a, b) => Number(a.__inputIndex ?? 0) - Number(b.__inputIndex ?? 0));
+    profileResults.forEach(r => { delete r.__inputIndex; });
 
     // Generate output Excel and upload to S3
     const excelBuffer = createAgentOutputExcel(sections, profileResults, collectedUrls, fieldResultsMapArr, originalColumns);

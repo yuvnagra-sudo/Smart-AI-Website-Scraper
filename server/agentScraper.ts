@@ -208,6 +208,7 @@ Return ONLY valid JSON (no markdown):
   try {
     const response = await queuedLLMCall({
       messages: [{ role: "user", content: prompt }],
+      temperature: 0,
       response_format: {
         type: "json_schema",
         json_schema: {
@@ -431,6 +432,7 @@ Return ONLY valid JSON with these keys: ${sections.map((s) => s.key).join(", ")}
   try {
     const response = await queuedLLMCall({
       messages: [{ role: "user", content: userMsg }],
+      temperature: 0,
       response_format: {
         type: "json_schema",
         json_schema: {

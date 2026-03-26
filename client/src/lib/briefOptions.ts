@@ -1,0 +1,87 @@
+// Pre-defined chip options for the Claude-powered targeting brief UI.
+// These are shown in the Chips tab so users can toggle on/off Claude's suggestions.
+
+export const BRIEF_OPTIONS = {
+  goals: [
+    "Cold email outreach",
+    "VC due diligence",
+    "Market research",
+    "Lead qualification",
+    "Competitor analysis",
+    "Building a directory",
+    "Recruiting intelligence",
+  ],
+
+  companyTypes: [
+    "SaaS / Software",
+    "Agency / Consulting",
+    "VC / PE firm",
+    "E-commerce",
+    "Healthcare",
+    "Financial services",
+    "Real estate",
+    "Law firm",
+    "Recruiting / Staffing",
+    "Media / Publishing",
+    "Non-profit",
+    "Enterprise",
+    "Startup / Scale-up",
+    "SMB / Local business",
+  ],
+
+  companySizes: [
+    "Solo / 1 person",
+    "Micro (2–10)",
+    "SMB (11–50)",
+    "SMB (51–200)",
+    "Mid-market (201–500)",
+    "Mid-market (501–1000)",
+    "Enterprise (1000+)",
+  ],
+
+  titles: [
+    "Founder / Co-founder",
+    "CEO / President",
+    "COO",
+    "CTO / VP Engineering",
+    "CMO / VP Marketing",
+    "CFO",
+    "VP Sales",
+    "Head of Growth",
+    "Head of Product",
+    "Director of Operations",
+    "Hiring Manager",
+    "Partner",
+    "Managing Director",
+    "General Manager",
+  ],
+
+  fitSignals: [
+    "Has client portfolio / case studies",
+    "Runs paid advertising for clients",
+    "Active blog or content marketing",
+    "Hiring sales or marketing roles",
+    "Series A–C funded",
+    "Bootstrapped / profitable",
+    "Publicly traded",
+    "Multi-location",
+    "Has e-commerce / online store",
+    "Has pricing page",
+    "Has live chat or demo CTA",
+    "Recently launched product",
+    "Has job listings",
+  ],
+
+  exclusionSignals: [
+    "Solo freelancer",
+    "In-house / non-commercial",
+    "Enterprise (too large)",
+    "Micro / less than 5 employees",
+    "No active website",
+    "Government / public sector",
+    "Non-profit",
+    "Already a customer",
+    "Competitor",
+    "Outside target geography",
+  ],
+} as const;
