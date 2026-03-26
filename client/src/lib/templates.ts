@@ -479,3 +479,74 @@ export const TEMPLATE_SYSTEM_PROMPTS: Record<string, string> = {
   local:      "You are a local business researcher. For each business website or listing page, extract the requested fields about services, hours, pricing, and customer feedback. Return ONLY valid JSON with one key per requested field.",
   directory:  "You are a business researcher analyzing companies sourced from directory listings. The scraper automatically visits each company's own website (not the directory page). Extract the requested fields from the company's native website. Be specific and factual — use what's actually stated on the site. Return ONLY valid JSON with one key per requested field.",
 };
+
+// ---------------------------------------------------------------------------
+// Default skill contexts for template-mode jobs
+// ---------------------------------------------------------------------------
+// These are sent to the worker so Apollo can be called even when the user
+// hasn't gone through the AI-plan flow (which normally generates apolloSeniorities).
+// Templates with a contacts/people section use broad seniorities; others use empty.
+
+import type { SkillContext } from "../../../shared/skillContext";
+
+const CONTACTS_SENIORITIES = ["c_suite", "owner", "partner", "director"] as const;
+
+export const TEMPLATE_SKILL_CONTEXTS: Partial<Record<string, SkillContext>> = {
+  b2b: {
+    icpSummary: "B2B companies with identifiable decision makers",
+    fitSignals: [],
+    exclusionSignals: [],
+    targetTitles: ["CEO", "Founder", "CTO", "VP Sales", "Owner"],
+    apolloSeniorities: [...CONTACTS_SENIORITIES],
+    outreachGoal: "Find and contact key decision makers at B2B companies",
+  },
+  people: {
+    icpSummary: "Individual professional profiles",
+    fitSignals: [],
+    exclusionSignals: [],
+    targetTitles: ["Executive", "Director", "Manager", "Consultant"],
+    apolloSeniorities: [...CONTACTS_SENIORITIES, "manager"],
+    outreachGoal: "Find contact information for individual professionals",
+  },
+  healthcare: {
+    icpSummary: "Healthcare organizations with clinical or administrative leadership",
+    fitSignals: [],
+    exclusionSignals: [],
+    targetTitles: ["Medical Director", "CEO", "CMO", "Practice Manager", "Owner"],
+    apolloSeniorities: [...CONTACTS_SENIORITIES],
+    outreachGoal: "Find decision makers at healthcare organizations",
+  },
+  ecommerce: {
+    icpSummary: "E-commerce stores with identifiable ownership or management",
+    fitSignals: [],
+    exclusionSignals: [],
+    targetTitles: ["Founder", "CEO", "Owner", "Head of Marketing", "E-commerce Manager"],
+    apolloSeniorities: [...CONTACTS_SENIORITIES],
+    outreachGoal: "Find contacts at e-commerce businesses",
+  },
+  realestate: {
+    icpSummary: "Real estate agencies and brokerages",
+    fitSignals: [],
+    exclusionSignals: [],
+    targetTitles: ["Broker Owner", "Managing Broker", "Owner", "Principal"],
+    apolloSeniorities: [...CONTACTS_SENIORITIES],
+    outreachGoal: "Find decision makers at real estate agencies",
+  },
+  local: {
+    icpSummary: "Local businesses with identifiable owners or managers",
+    fitSignals: [],
+    exclusionSignals: [],
+    targetTitles: ["Owner", "Manager", "General Manager", "Director"],
+    apolloSeniorities: [...CONTACTS_SENIORITIES, "manager"],
+    outreachGoal: "Find contacts at local businesses",
+  },
+  directory: {
+    icpSummary: "Companies sourced from directory listings",
+    fitSignals: [],
+    exclusionSignals: [],
+    targetTitles: ["CEO", "Founder", "Owner", "Director", "Manager"],
+    apolloSeniorities: [...CONTACTS_SENIORITIES],
+    outreachGoal: "Find key contacts at companies from directory listings",
+  },
+  // vc template uses the old enrichment pipeline, not the agent loop
+};

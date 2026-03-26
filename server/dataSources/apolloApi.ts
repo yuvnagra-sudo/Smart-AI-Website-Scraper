@@ -20,6 +20,24 @@ export interface ApolloPerson {
   seniority: string;
 }
 
+/** Company-level data extracted from Apollo's mixed_people response (free, no extra credits). */
+export interface ApolloOrganization {
+  employeeCount: number | null;
+  /** e.g. "11-50", "51-200" */
+  employeeRange: string | null;
+  industry: string | null;
+  foundedYear: number | null;
+  city: string | null;
+  country: string | null;
+  shortDescription: string | null;
+}
+
+export interface ApolloSearchResult {
+  people: ApolloPerson[];
+  /** First organization found in the response, or null if none. */
+  organization: ApolloOrganization | null;
+}
+
 // Read at call time so env vars set after module load are picked up (fix #4)
 function getApiKey(): string {
   return process.env.APOLLO_API_KEY ?? "";
@@ -27,8 +45,9 @@ function getApiKey(): string {
 
 /**
  * Search for people at a company by domain.
- * Returns name/title. No credits consumed — Apollo charges credits only when
- * you request email reveal, which we never do here.
+ * Returns name/title plus any organization data embedded in the response.
+ * No credits consumed — Apollo charges credits only when you request email
+ * reveal, which we never do here.
  *
  * @param domain - Company domain, e.g. "acme.com"
  * @param seniorities - Apollo seniority labels to filter by
@@ -38,11 +57,11 @@ export async function apolloSearchPeople(
   domain: string,
   seniorities: string[] = ["c_suite", "vp", "director", "manager", "partner", "owner"],
   maxResults = 25,
-): Promise<ApolloPerson[]> {
+): Promise<ApolloSearchResult> {
   const apiKey = getApiKey();
   if (!apiKey) {
     console.log("[apolloApi] APOLLO_API_KEY not set — skipping Apollo lookup");
-    return [];
+    return { people: [], organization: null };
   }
 
   // Strip protocol/path — Apollo needs bare domain
@@ -52,7 +71,7 @@ export async function apolloSearchPeople(
     .toLowerCase()
     .trim();
 
-  if (!cleanDomain) return [];
+  if (!cleanDomain) return { people: [], organization: null };
 
   console.log(`[apolloApi] Searching people at domain: ${cleanDomain}`);
 
@@ -77,7 +96,7 @@ export async function apolloSearchPeople(
       console.warn(
         `[apolloApi] HTTP ${response.status} for domain ${cleanDomain}: ${errorText.slice(0, 200)}`,
       );
-      return [];
+      return { people: [], organization: null };
     }
 
     const data = (await response.json()) as {
@@ -86,24 +105,54 @@ export async function apolloSearchPeople(
         last_name_obfuscated?: string;
         title?: string;
         seniority?: string;
+        organization_id?: string;
+      }>;
+      organizations?: Record<string, {
+        estimated_num_employees?: number;
+        employee_count_range?: string;
+        industry?: string;
+        founded_year?: number;
+        city?: string;
+        country?: string;
+        short_description?: string;
       }>;
     };
 
     const people = data.people ?? [];
     console.log(`[apolloApi] Found ${people.length} people at ${cleanDomain}`);
 
-    return people
-      .filter((p) => p.first_name && p.title)
-      .map((p) => ({
-        firstName: p.first_name ?? "",
-        lastName: p.last_name_obfuscated ?? "",
-        name: `${p.first_name ?? ""} ${p.last_name_obfuscated ?? ""}`.trim(),
-        title: p.title ?? "",
-        linkedinUrl: "",
-        seniority: p.seniority ?? "",
-      }));
+    // Extract the first organization record embedded in the response (free, no extra credits)
+    let organization: ApolloOrganization | null = null;
+    const orgs = data.organizations ? Object.values(data.organizations) : [];
+    if (orgs.length > 0) {
+      const org = orgs[0];
+      organization = {
+        employeeCount: org.estimated_num_employees ?? null,
+        employeeRange: org.employee_count_range ?? null,
+        industry: org.industry ?? null,
+        foundedYear: org.founded_year ?? null,
+        city: org.city ?? null,
+        country: org.country ?? null,
+        shortDescription: org.short_description ?? null,
+      };
+      console.log(`[apolloApi] Org data for ${cleanDomain}: ${organization.employeeRange ?? organization.employeeCount ?? "no size"}, ${organization.industry ?? "no industry"}`);
+    }
+
+    return {
+      people: people
+        .filter((p) => p.first_name && p.title)
+        .map((p) => ({
+          firstName: p.first_name ?? "",
+          lastName: p.last_name_obfuscated ?? "",
+          name: `${p.first_name ?? ""} ${p.last_name_obfuscated ?? ""}`.trim(),
+          title: p.title ?? "",
+          linkedinUrl: "",
+          seniority: p.seniority ?? "",
+        })),
+      organization,
+    };
   } catch (err) {
     console.warn(`[apolloApi] Request failed for ${cleanDomain}:`, err);
-    return [];
+    return { people: [], organization: null };
   }
 }

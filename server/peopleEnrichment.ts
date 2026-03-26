@@ -11,7 +11,9 @@
 
 import { classifyDecisionMakerTier } from "./decisionMakerTiers";
 import { findPersonByName } from "./nameNormalization";
-import { apolloSearchPeople } from "./dataSources/apolloApi";
+import { apolloSearchPeople, ApolloOrganization } from "./dataSources/apolloApi";
+
+export type { ApolloOrganization };
 
 // Minimal shape required by the people enrichment pipeline.
 // Both TeamMember (vcEnrichment.ts) and custom agent contact shapes satisfy this.
@@ -55,46 +57,53 @@ export function classifyTiersInPlace(
  *
  * No-ops silently when APOLLO_API_KEY is absent.
  */
+/**
+ * Returns the ApolloOrganization record if Apollo returned org data, null otherwise.
+ */
 export async function mergeApolloContacts(
   members: EnrichableContact[],
   domain: string,
   onProgress?: (msg: string) => void,
   apolloSeniorities?: string[],
-): Promise<void> {
+): Promise<ApolloOrganization | null> {
   const cleanDomain = domain.replace(/^https?:\/\//, "").replace(/\/.*$/, "").toLowerCase();
-  if (!cleanDomain) return;
+  if (!cleanDomain) return null;
 
-  const apolloPeople = await apolloSearchPeople(cleanDomain, apolloSeniorities);
-  if (apolloPeople.length === 0) return;
+  const { people: apolloPeople, organization } = await apolloSearchPeople(cleanDomain, apolloSeniorities);
+  if (apolloPeople.length === 0 && !organization) return null;
 
-  console.log(`[peopleEnrichment] Apollo returned ${apolloPeople.length} people for ${cleanDomain}`);
-  let added = 0;
+  if (apolloPeople.length > 0) {
+    console.log(`[peopleEnrichment] Apollo returned ${apolloPeople.length} people for ${cleanDomain}`);
+    let added = 0;
 
-  for (const person of apolloPeople) {
-    const tier = classifyDecisionMakerTier(person.title);
-    if (tier.tier === "Exclude") continue;
+    for (const person of apolloPeople) {
+      const tier = classifyDecisionMakerTier(person.title);
+      if (tier.tier === "Exclude") continue;
 
-    const existing = findPersonByName(members, person.name) as EnrichableContact | undefined;
-    if (existing) {
-      if (!existing.linkedinUrl && person.linkedinUrl) {
-        existing.linkedinUrl = person.linkedinUrl;
+      const existing = findPersonByName(members, person.name) as EnrichableContact | undefined;
+      if (existing) {
+        if (!existing.linkedinUrl && person.linkedinUrl) {
+          existing.linkedinUrl = person.linkedinUrl;
+        }
+        continue;
       }
-      continue;
+
+      members.push({
+        name: person.name,
+        title: person.title,
+        linkedinUrl: person.linkedinUrl,
+        decisionMakerTier: tier.tier,
+      });
+      added++;
     }
 
-    members.push({
-      name: person.name,
-      title: person.title,
-      linkedinUrl: person.linkedinUrl,
-      decisionMakerTier: tier.tier,
-    });
-    added++;
+    if (added > 0) {
+      onProgress?.(`Apollo added ${added} new contacts`);
+      console.log(`[peopleEnrichment] Apollo added ${added} new contacts`);
+    }
   }
 
-  if (added > 0) {
-    onProgress?.(`Apollo added ${added} new contacts`);
-    console.log(`[peopleEnrichment] Apollo added ${added} new contacts`);
-  }
+  return organization;
 }
 
 // ---------------------------------------------------------------------------

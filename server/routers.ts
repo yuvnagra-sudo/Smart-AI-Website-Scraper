@@ -12,6 +12,7 @@ import { enrichedFirms, teamMembers, portfolioCompanies, investmentThesis } from
 import { eq, and, like, count } from "drizzle-orm";
 import { parseInputExcel, parseInputHeaders, createOutputExcel, createAgentOutputExcel, type EnrichedVCData, type TeamMemberData, type PortfolioCompanyData, type ProcessingSummaryData, type FileHeaders } from "./excelProcessor";
 import { scrapeUrl, scrapeUrlAsDirectory, type AgentSection, type DirectoryEntry as AgentDirectoryEntry, type ScrapeStats, type FieldResultMap } from "./agentScraper";
+import type { SkillContext } from "../shared/skillContext";
 import { generateInvestmentThesisSummaries } from "./investmentThesisAnalyzer";
 import { generateResultsFile } from "./generateResultsService";
 import { createCSVExport } from "./csvExporter";
@@ -20,12 +21,13 @@ import { ConnectionKeepAlive } from "./dbConnectionManager";
 import { isJobCancelled, isJobPaused } from "./_core/jobCancellation";
 import { VCEnrichmentService } from "./vcEnrichment";
 import { getOpenAIStats } from "./_core/openaiLLM";
+import { queuedLLMCall } from "./_core/llmQueue";
 import { classifyDecisionMakerTier } from './decisionMakerTiers';
 import { calculateRecencyScore } from './portfolioIntelligence';
 import { canResumeJob, prepareJobForResume, getResumeProgress } from "./resumeJob";
 import { extractDirectory } from "./directoryExtractor";
 import { mergeApolloContacts, classifyTiersInPlace } from "./peopleEnrichment";
-import type { EnrichableContact } from "./peopleEnrichment";
+import type { EnrichableContact, ApolloOrganization } from "./peopleEnrichment";
 import { nanoid } from "nanoid";
 import { saveFirmImmediately, getProcessedFirms } from "./incrementalSave";
 
@@ -98,7 +100,7 @@ export const appRouter = router({
           const avgDescLength = firms.length > 0
             ? firms.reduce((sum, f) => sum + (f.description?.length ?? 0), 0) / firms.length
             : 200;
-          const costEstimate = estimateEnrichmentCost(firms.length, avgDescLength);
+          const costEstimate = estimateEnrichmentCost(firms.length, 6, avgDescLength);
 
           return {
             status: "ready" as const,
@@ -161,7 +163,7 @@ export const appRouter = router({
 
         const fileKey = `enrichment/${ctx.user.id}/${nanoid()}-discovery.csv`;
         const stored = await storagePut(fileKey, Buffer.from(csv, "utf-8"), "text/csv");
-        const costEstimate = estimateEnrichmentCost(entries.length, 200);
+        const costEstimate = estimateEnrichmentCost(entries.length, 6, 200);
 
         return {
           status: "ready" as const,
@@ -216,9 +218,13 @@ export const appRouter = router({
         }),
       )
       .mutation(async ({ ctx, input }) => {
-        // Compute cost estimate (using description length for accuracy)
+        // Compute cost estimate (using section count + description length for accuracy)
         const avgDescLen = input.avgDescriptionLength ?? 200;
-        const estimate = estimateEnrichmentCost(input.firmCount, avgDescLen);
+        let sectionCount = 6;
+        try {
+          if (input.sectionsJson) sectionCount = (JSON.parse(input.sectionsJson) as unknown[]).length || 6;
+        } catch { /* default to 6 */ }
+        const estimate = estimateEnrichmentCost(input.firmCount, sectionCount, avgDescLen);
 
         // Create job
         const jobId = await createEnrichmentJob({
@@ -1205,6 +1211,101 @@ function classifyAgentError(err: unknown): string {
 // Agentic job processor (custom sections mode)
 // ---------------------------------------------------------------------------
 
+/**
+ * Uses an LLM to select the best contact(s) from Apollo's list based on the
+ * section description and skillContext targetTitles.
+ *
+ * Apollo may return 5-20 people; this step picks the most relevant one(s) and
+ * formats them as a human-readable string for the output column.
+ */
+async function selectBestApolloContacts(
+  contacts: EnrichableContact[],
+  peopleSec: AgentSection,
+  skillContext: SkillContext | null | undefined,
+  companyName: string,
+): Promise<string> {
+  if (contacts.length === 0) return "";
+
+  // Format the candidate list for the LLM
+  const candidateList = contacts
+    .map((c, i) => `${i + 1}. ${c.name} — ${c.title}${c.decisionMakerTier ? ` (${c.decisionMakerTier})` : ""}`)
+    .join("\n");
+
+  const targetTitlesHint = skillContext?.targetTitles?.length
+    ? `Priority titles: ${skillContext.targetTitles.join(", ")}`
+    : "";
+
+  const prompt = `You are selecting the best contact(s) from an Apollo.io people search result.
+
+Company: ${companyName}
+Field being filled: "${peopleSec.label}"
+Field description: ${peopleSec.desc}
+${targetTitlesHint}
+
+Apollo returned these contacts:
+${candidateList}
+
+TASK: Select the most relevant contact(s) for the field above.
+- If the field asks for ONE person (e.g. "CEO", "Key Decision Maker"), return the single best match.
+- If the field asks for MULTIPLE people (e.g. "Leadership Team", "Key Contacts"), return up to 3 best matches.
+- Format each selected contact as: "Name — Title"
+- If multiple, separate with semicolons: "Name1 — Title1; Name2 — Title2"
+- If none of the contacts are relevant, return an empty string.
+
+Return ONLY the formatted result string, nothing else.`;
+
+  try {
+    const response = await queuedLLMCall({
+      messages: [{ role: "user", content: prompt }],
+    });
+    const result = response.choices[0]?.message?.content?.trim() ?? "";
+    console.log(`[processAgentJob] Apollo contact selected for ${companyName}: ${result.slice(0, 100)}`);
+    return result;
+  } catch (err) {
+    console.warn(`[processAgentJob] Apollo contact selection LLM failed for ${companyName}:`, err);
+    // Fallback: return the first Tier 1 contact, or the first contact
+    const best = contacts.find(c => c.decisionMakerTier === "Tier 1") ?? contacts[0];
+    return best ? `${best.name} — ${best.title}` : "";
+  }
+}
+
+/**
+ * Maps Apollo organization data to section keys using fuzzy label matching.
+ * Pre-seeds fieldResults at confidence 0.7 so the scraper treats Apollo data
+ * as a baseline it can override with higher-confidence website data.
+ */
+function buildApolloOrgHints(
+  org: ApolloOrganization,
+  sections: AgentSection[],
+): Record<string, { value: string; confidence: number }> {
+  const hints: Record<string, { value: string; confidence: number }> = {};
+
+  for (const s of sections) {
+    const key = s.key.toLowerCase();
+    const label = s.label.toLowerCase();
+    const combined = key + " " + label;
+
+    if (/company.?size|employee|headcount|team.?size|staff.?size|num.?employee|size/i.test(combined)) {
+      const val = org.employeeRange ?? (org.employeeCount ? String(org.employeeCount) : null);
+      if (val) hints[s.key] = { value: val, confidence: 0.7 };
+    } else if (/industry|vertical|sector|niche/i.test(combined)) {
+      if (org.industry) hints[s.key] = { value: org.industry, confidence: 0.65 };
+    } else if (/location|hq|headquarter|city|country|region/i.test(combined)) {
+      const loc = [org.city, org.country].filter(Boolean).join(", ");
+      if (loc) hints[s.key] = { value: loc, confidence: 0.65 };
+    } else if (/founded|established|start.?year|year.?founded/i.test(combined)) {
+      if (org.foundedYear) hints[s.key] = { value: String(org.foundedYear), confidence: 0.65 };
+    } else if (/description|about|overview|summary|what.*(do|is)/i.test(combined)) {
+      if (org.shortDescription) hints[s.key] = { value: org.shortDescription, confidence: 0.5 };
+    }
+  }
+
+  if (Object.keys(hints).length > 0) {
+    console.log(`[processAgentJob] Apollo org hints: ${Object.keys(hints).join(", ")}`);
+  }
+  return hints;
+}
+
 export async function processAgentJob(jobId: number) {
   const keepAlive = new ConnectionKeepAlive();
   try {
@@ -1289,17 +1390,22 @@ export async function processAgentJob(jobId: number) {
 
         try {
           // ── STEP 1: Apollo first ──────────────────────────────────────────────
-          // Search for contacts via Apollo before touching the website. Apollo is
-          // free (no credit consumption) and instant — scraping for people is only
-          // done when Apollo finds nobody.
+          // Search for contacts AND org data via Apollo before touching the website.
+          // People search is free (no email-reveal credits consumed).
+          // Org data (employee count, industry, location) is embedded in the same response.
+          // Falls back to broad seniorities when none are explicitly configured.
           let apolloContacts: EnrichableContact[] = [];
-          const peopleSec = skillContext?.apolloSeniorities?.length
-            ? sections.find(s => /team|people|contact|staff|member|decision.?maker/i.test(s.key + " " + s.label))
-            : undefined;
+          const peopleSec = sections.find(s =>
+            /team|people|contact|staff|member|decision.?maker/i.test(s.key + " " + s.label)
+          );
+          const apolloSenioritiesToUse = skillContext?.apolloSeniorities?.length
+            ? skillContext.apolloSeniorities
+            : ["c_suite", "owner", "partner", "director"];
 
+          let apolloOrg: ApolloOrganization | null = null;
           if (peopleSec) {
             try {
-              await mergeApolloContacts(apolloContacts, firm.websiteUrl, undefined, skillContext!.apolloSeniorities);
+              apolloOrg = await mergeApolloContacts(apolloContacts, firm.websiteUrl, undefined, apolloSenioritiesToUse);
               classifyTiersInPlace(apolloContacts);
               if (apolloContacts.length > 0) {
                 console.log(`[processAgentJob] Apollo: ${apolloContacts.length} contacts for ${firm.companyName} — skipping contacts scrape`);
@@ -1309,9 +1415,15 @@ export async function processAgentJob(jobId: number) {
             }
           }
 
+          // Build initial field hints from Apollo org data so the scraper can
+          // enhance/override them rather than searching from scratch.
+          const apolloOrgHints = apolloOrg ? buildApolloOrgHints(apolloOrg, sections) : {};
+
           // ── STEP 2: Scrape website for non-people sections ───────────────────
           // If Apollo found contacts, exclude the people section from scraping.
           // If Apollo found nobody, keep it so the website scrape tries to find people.
+          // Apollo org hints are passed as initial values — scraper overrides with
+          // higher confidence when the website has better data.
           const sectionsToScrape = (apolloContacts.length > 0 && peopleSec)
             ? sections.filter(s => s.key !== peopleSec.key)
             : sections;
@@ -1331,6 +1443,7 @@ export async function processAgentJob(jobId: number) {
               () => isJobCancelled(jobId),
               undefined, // callbacks
               skillContext,
+              apolloOrgHints,
             );
 
             if (scrapeResult.type === "directory") {
@@ -1351,9 +1464,12 @@ export async function processAgentJob(jobId: number) {
           }
 
           if (!isDirectoryResult) {
-            // ── STEP 3: Merge Apollo contacts into output ───────────────────────
+            // ── STEP 3: LLM-select the best Apollo contact(s) and merge into output ──
+            // Apollo returns 5-20+ people; the LLM picks the best match for the
+            // section description (e.g. "key decision maker" → picks CEO over intern).
             if (peopleSec && apolloContacts.length > 0) {
-              profileData[peopleSec.key] = JSON.stringify(apolloContacts);
+              const selected = await selectBestApolloContacts(apolloContacts, peopleSec, skillContext, firm.companyName);
+              if (selected) profileData[peopleSec.key] = selected;
             }
 
             profileResults.push({ ...profileData, ...firm.originalRow, __inputIndex: String(firmIndexMap.get(firm.websiteUrl) ?? 999999) });

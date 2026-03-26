@@ -119,6 +119,7 @@ async function planNextAction(
   hopsUsed: number,
   maxHops: number,
   skillContext?: SkillContext | null,
+  webSearchedFields?: Set<string>,
 ): Promise<AgentAction> {
   // Build a summary of current state
   const fieldSummary = sections.map(s => {
@@ -173,6 +174,10 @@ Fit signals (look for these): ${skillContext.fitSignals.join(", ")}
 Skip if company shows: ${skillContext.exclusionSignals.join(", ")}
 ` : "";
 
+  const searchedList = webSearchedFields && webSearchedFields.size > 0
+    ? Array.from(webSearchedFields).join(", ")
+    : "(none yet)";
+
   const prompt = `You are an autonomous data enrichment agent. Your mission: fill in all missing fields for this company using the fewest possible page fetches.
 
 Company: ${companyName}
@@ -189,18 +194,23 @@ URLs already visited — DO NOT revisit these:
 Available links from last page:
   ${linkList || "(none — use web_search)"}
 
+Fields already attempted via web_search — DO NOT search again for these:
+  ${searchedList}
+
 Hops used: ${hopsUsed} / ${maxHops}${urgency ? "\n" + urgency : ""}
 
 ${linkHints}
 
 DECISION RULES (follow in order):
 1. If a link in the available list clearly matches the missing field type (e.g. /about or /team for contacts), choose fetch_url with that link.
-2. If no available link is relevant AND the missing fields are people/contacts, choose web_search with a targeted query like "${companyName} CEO founder team site:${websiteUrl.replace(/https?:\/\//, '').split('/')[0]}" or "${companyName} leadership team".
+2. If no available link is relevant AND the missing fields are people/contacts AND the field is NOT in the "already attempted" list, choose web_search with a targeted query like "${companyName} CEO founder team site:${websiteUrl.replace(/https?:\/\//, '').split('/')[0]}" or "${companyName} leadership team".
 3. If the company website is a one-page site, a social media profile, or completely irrelevant to the missing fields, choose web_search.
-4. Choose done ONLY if: all fields are filled, OR you have already searched the web and found nothing, OR the data genuinely does not exist publicly.
+4. Choose done if: all fields are filled, OR every remaining weak field is in the "already attempted via web_search" list above, OR the data genuinely does not exist publicly.
 5. NEVER fetch a URL already in the visited list.
 6. NEVER fetch social media profiles (linkedin.com/in/, twitter.com, instagram.com, facebook.com) — they are blocked.
 7. NEVER fetch image files, PDFs, or asset URLs.
+8. If the ONLY remaining weak field is employee count / headcount / company size AND you have already visited the About or Team page, choose done immediately — this data is almost never on company websites and is behind paywalls on LinkedIn/ZoomInfo.
+9. If a field key appears in the "already attempted via web_search" list above, do NOT web_search for it again — choose done or fetch_url for other weak fields instead.
 
 Return ONLY valid JSON (no markdown):
 {"action":"fetch_url"|"web_search"|"done","target":"full URL if fetch_url, else null","query":"search query if web_search, else null","reason":"one sentence explaining why this is the best next step"}`;
@@ -857,6 +867,7 @@ export async function scrapeUrl(
   isCancelled?: () => boolean,
   callbacks?: PageCallbacks,
   skillContext?: SkillContext | null,
+  initialFieldValues?: Record<string, { value: string; confidence: number }>,
 ): Promise<AgentScrapeResult> {
   console.log(`[agentScraper] 🚀 Starting agent loop: ${url}`);
 
@@ -864,13 +875,21 @@ export async function scrapeUrl(
   let companyName = "";
   try { companyName = new URL(url).hostname.replace(/^www\./, "").split(".")[0]; } catch { companyName = url; }
 
-  // Agent state
+  // Agent state — pre-seed with Apollo org hints when available
   let fieldResults: FieldResultMap = {};
-  for (const s of sections) fieldResults[s.key] = { value: "", confidence: 0.0 };
+  for (const s of sections) {
+    const hint = initialFieldValues?.[s.key];
+    fieldResults[s.key] = hint ?? { value: "", confidence: 0.0 };
+  }
+  if (initialFieldValues && Object.keys(initialFieldValues).length > 0) {
+    const preFilledCount = Object.keys(initialFieldValues).length;
+    console.log(`[agentScraper] Pre-seeded ${preFilledCount} fields from Apollo org data`);
+  }
 
   const visitedUrls = new Set<string>();
   let availableLinks: string[] = [];
   let hopsUsed = 0;
+  const webSearchedFields = new Set<string>();
   const extras: Record<string, unknown> = {};
 
   // ── STEP 0: Fetch the primary URL first (always) ──────────────────────────
@@ -965,6 +984,7 @@ export async function scrapeUrl(
       hopsUsed,
       maxHops,
       skillContext,
+      webSearchedFields,
     );
 
     console.log(`[agentScraper] PLAN [hop ${hopsUsed}/${maxHops}]: ${plan.action} — ${plan.reason}`);
@@ -1046,6 +1066,12 @@ export async function scrapeUrl(
 
       const filled = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD).length;
       console.log(`[agentScraper] After web_search: ${filled}/${sections.length} fields confident`);
+
+      // Mark every still-weak field as "already attempted via web_search" so the
+      // planner won't search for it again.
+      sections
+        .filter(s => (fieldResults[s.key]?.confidence ?? 0) < CONFIDENCE_THRESHOLD)
+        .forEach(s => webSearchedFields.add(s.key));
     }
   }
 

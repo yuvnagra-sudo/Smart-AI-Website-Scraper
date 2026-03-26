@@ -26,7 +26,7 @@ import { useState, useRef, useEffect } from "react";
 import { toast } from "sonner";
 import { Link } from "wouter";
 import ResultsSheet from "@/components/ResultsSheet";
-import { ALL_TEMPLATES, getTemplate, TEMPLATE_SECTIONS, TEMPLATE_SYSTEM_PROMPTS, type AgentSection as TemplateAgentSection } from "@/lib/templates";
+import { ALL_TEMPLATES, getTemplate, TEMPLATE_SECTIONS, TEMPLATE_SYSTEM_PROMPTS, TEMPLATE_SKILL_CONTEXTS, type AgentSection as TemplateAgentSection } from "@/lib/templates";
 import type { SkillContext } from "../../../shared/skillContext";
 
 // ---------------------------------------------------------------------------
@@ -442,6 +442,9 @@ export default function Dashboard() {
           sectionsJson: JSON.stringify(templateSections),
           systemPrompt: TEMPLATE_SYSTEM_PROMPTS[selectedTemplate] ?? "",
           objective: TEMPLATE_OBJECTIVES[selectedTemplate] ?? "",
+          skillContextJson: TEMPLATE_SKILL_CONTEXTS[selectedTemplate]
+            ? JSON.stringify(TEMPLATE_SKILL_CONTEXTS[selectedTemplate])
+            : undefined,
         }
       : {};
 
