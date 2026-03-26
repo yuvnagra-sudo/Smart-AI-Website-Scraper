@@ -11,7 +11,7 @@ import { getDb } from "./db";
 import { enrichedFirms, teamMembers, portfolioCompanies, investmentThesis } from "../drizzle/schema";
 import { eq, and, like, count } from "drizzle-orm";
 import { parseInputExcel, parseInputHeaders, createOutputExcel, createAgentOutputExcel, type EnrichedVCData, type TeamMemberData, type PortfolioCompanyData, type ProcessingSummaryData, type FileHeaders } from "./excelProcessor";
-import { scrapeUrl, scrapeUrlAsDirectory, type AgentSection, type DirectoryEntry as AgentDirectoryEntry, type ScrapeStats } from "./agentScraper";
+import { scrapeUrl, scrapeUrlAsDirectory, type AgentSection, type DirectoryEntry as AgentDirectoryEntry, type ScrapeStats, type FieldResultMap } from "./agentScraper";
 import { generateInvestmentThesisSummaries } from "./investmentThesisAnalyzer";
 import { generateResultsFile } from "./generateResultsService";
 import { createCSVExport } from "./csvExporter";
@@ -1273,67 +1273,80 @@ export async function processAgentJob(jobId: number) {
           .replace(/\{websiteUrl\}/g, firm.websiteUrl);
 
         try {
-          // The new agent loop (scrapeUrl) never misclassifies a company site as a
-          // directory — it always enriches the target company. Directory expansion is
-          // only triggered when the user explicitly opts in via the isExpanded flag.
-          const result = await scrapeUrl(
-            firm.websiteUrl,
-            rowObjective,
-            sections,
-            resolvedPrompt,
-            5, // maxHops: 5 hops is enough for Clutch→company→about/team. 8 was causing cost overrun.
-            () => isJobCancelled(jobId),
-            undefined, // callbacks
-            skillContext,
-          );
+          // ── STEP 1: Apollo first ──────────────────────────────────────────────
+          // Search for contacts via Apollo before touching the website. Apollo is
+          // free (no credit consumption) and instant — scraping for people is only
+          // done when Apollo finds nobody.
+          let apolloContacts: EnrichableContact[] = [];
+          const peopleSec = skillContext?.apolloSeniorities?.length
+            ? sections.find(s => /team|people|contact|staff|member|decision.?maker/i.test(s.key + " " + s.label))
+            : undefined;
 
-          if (result.type === "directory") {
-            // Directory expansion is DISABLED for profile-enrichment jobs.
-            // scrapeUrl() returns type="profile" for all inputs now — this branch
-            // is dead code but kept as a safety net. Log and skip.
-            console.warn(`[processAgentJob] Unexpected directory result for ${firm.websiteUrl} — skipping expansion to prevent counter overflow`);
-            insertJobLog({ jobId, url: firm.websiteUrl, companyName: firm.companyName, status: "failed", fieldsTotal: 0, fieldsFilled: 0, durationMs: Date.now() - startMs }).catch(() => {});
-          } else {
-            // Apollo enrichment — runs when skillContext.apolloSeniorities is set.
-            // Finds a people-like section in the output and merges Apollo contacts into it.
-            if (skillContext?.apolloSeniorities?.length) {
-              try {
-                const peopleSec = sections.find(s =>
-                  /team|people|contact|staff|member|decision.?maker/i.test(s.key + " " + s.label)
-                );
-                if (peopleSec) {
-                  let contacts: EnrichableContact[] = [];
-                  const existing = result.data[peopleSec.key];
-                  if (existing) {
-                    try {
-                      const parsed = JSON.parse(existing);
-                      if (Array.isArray(parsed)) contacts = parsed.filter((p: any) => p.name && p.title);
-                    } catch { /* plain-text value — leave contacts empty */ }
-                  }
-                  await mergeApolloContacts(contacts, firm.websiteUrl, undefined, skillContext.apolloSeniorities);
-                  classifyTiersInPlace(contacts);
-                  if (contacts.length > 0) {
-                    result.data[peopleSec.key] = JSON.stringify(contacts);
-                  }
-                }
-              } catch (apolloErr) {
-                console.warn(`[processAgentJob] Apollo enrichment failed for ${firm.websiteUrl}:`, apolloErr);
+          if (peopleSec) {
+            try {
+              await mergeApolloContacts(apolloContacts, firm.websiteUrl, undefined, skillContext!.apolloSeniorities);
+              classifyTiersInPlace(apolloContacts);
+              if (apolloContacts.length > 0) {
+                console.log(`[processAgentJob] Apollo: ${apolloContacts.length} contacts for ${firm.companyName} — skipping contacts scrape`);
               }
+            } catch (apolloErr) {
+              console.warn(`[processAgentJob] Apollo lookup failed for ${firm.websiteUrl}:`, apolloErr);
+            }
+          }
+
+          // ── STEP 2: Scrape website for non-people sections ───────────────────
+          // If Apollo found contacts, exclude the people section from scraping.
+          // If Apollo found nobody, keep it so the website scrape tries to find people.
+          const sectionsToScrape = (apolloContacts.length > 0 && peopleSec)
+            ? sections.filter(s => s.key !== peopleSec.key)
+            : sections;
+
+          let profileData: Record<string, string> = {};
+          let fieldResultsForRow: FieldResultMap | undefined;
+          let stats: ScrapeStats = { fieldsTotal: sections.length, fieldsFilled: apolloContacts.length > 0 && peopleSec ? 1 : 0, emptyFields: [] };
+          let isDirectoryResult = false;
+
+          if (sectionsToScrape.length > 0) {
+            const scrapeResult = await scrapeUrl(
+              firm.websiteUrl,
+              rowObjective,
+              sectionsToScrape,
+              resolvedPrompt,
+              5, // maxHops
+              () => isJobCancelled(jobId),
+              undefined, // callbacks
+              skillContext,
+            );
+
+            if (scrapeResult.type === "directory") {
+              // Dead-code safety net — scrapeUrl always returns profile for agent jobs.
+              console.warn(`[processAgentJob] Unexpected directory result for ${firm.websiteUrl} — skipping`);
+              insertJobLog({ jobId, url: firm.websiteUrl, companyName: firm.companyName, status: "failed", fieldsTotal: 0, fieldsFilled: 0, durationMs: Date.now() - startMs }).catch(() => {});
+              isDirectoryResult = true;
+            } else {
+              profileData = scrapeResult.data;
+              fieldResultsForRow = scrapeResult.fieldResults;
+              // Roll Apollo people section into the final stats
+              stats = {
+                fieldsTotal: scrapeResult.stats.fieldsTotal + (peopleSec && apolloContacts.length > 0 ? 1 : 0),
+                fieldsFilled: scrapeResult.stats.fieldsFilled + (peopleSec && apolloContacts.length > 0 ? 1 : 0),
+                emptyFields: scrapeResult.stats.emptyFields.filter(k => k !== peopleSec?.key),
+              };
+            }
+          }
+
+          if (!isDirectoryResult) {
+            // ── STEP 3: Merge Apollo contacts into output ───────────────────────
+            if (peopleSec && apolloContacts.length > 0) {
+              profileData[peopleSec.key] = JSON.stringify(apolloContacts);
             }
 
-            profileResults.push({
-              ...result.data,
-              ...firm.originalRow,
-            });
-            // Collect fieldResults for the Sources sheet
-            if (result.fieldResults) {
-              fieldResultsMapArr.push({
-                companyName: firm.companyName,
-                websiteUrl: firm.websiteUrl,
-                fieldResults: result.fieldResults,
-              });
+            profileResults.push({ ...profileData, ...firm.originalRow });
+
+            if (fieldResultsForRow) {
+              fieldResultsMapArr.push({ companyName: firm.companyName, websiteUrl: firm.websiteUrl, fieldResults: fieldResultsForRow });
             }
-            const stats: ScrapeStats = result.stats;
+
             const logStatus = stats.fieldsFilled === 0 ? "failed" : stats.fieldsFilled < stats.fieldsTotal ? "partial" : "success";
             insertJobLog({
               jobId,
