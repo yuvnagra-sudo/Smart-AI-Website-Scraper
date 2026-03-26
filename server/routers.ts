@@ -521,18 +521,31 @@ Always include a <brief> block in your response using this exact JSON format:
 
 On follow-up messages, update the <brief> to reflect refined selections.`;
 
-        const response = await client.messages.create({
-          model: "claude-sonnet-4-6",
-          max_tokens: 1024,
-          system: systemPrompt,
-          messages: input.messages.map(m => ({ role: m.role, content: m.content })),
-        });
+        let response;
+        try {
+          response = await client.messages.create({
+            model: "claude-sonnet-4-6",
+            max_tokens: 1024,
+            system: systemPrompt,
+            messages: input.messages.map(m => ({ role: m.role, content: m.content })),
+          });
+        } catch (err: any) {
+          const status = err?.status ?? err?.statusCode ?? "?";
+          const body = err?.message ?? String(err);
+          console.error(`[configureBrief] Anthropic API error (${status}):`, body);
+          throw new TRPCError({
+            code: "INTERNAL_SERVER_ERROR",
+            message: `AI service error (${status}): ${body.slice(0, 200)}`,
+          });
+        }
 
         // Extract text from response
         const text = response.content
           .filter((b): b is { type: "text"; text: string } => b.type === "text")
           .map(b => b.text)
           .join("");
+
+        console.log(`[configureBrief] Response length: ${text.length} chars`);
 
         const briefMatch = text.match(/<brief>([\s\S]*?)<\/brief>/);
         let brief: {
