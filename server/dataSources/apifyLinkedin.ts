@@ -140,7 +140,7 @@ export async function apifySearchLinkedInEmployees(
 
   // Step 2: run Apify actor synchronously
   try {
-    const actorId = "harvestapi~linkedin-company-employees";
+    const actorId = "Vb6LZkh4EqRlR0Ka9";
     const endpoint =
       `https://api.apify.com/v2/acts/${actorId}/run-sync-get-dataset-items` +
       `?token=${apiKey}&timeout=120&memory=256`;
@@ -149,9 +149,8 @@ export async function apifySearchLinkedInEmployees(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        startUrls: [{ url: linkedInUrl }],
-        maxItems: Math.min(maxResults, 100),
-        proxy: { useApifyProxy: true },
+        companies: [linkedInUrl],
+        profileScraperMode: process.env.APIFY_SCRAPER_MODE ?? "Full ($8 per 1k)",
       }),
       signal: AbortSignal.timeout(130_000), // 130s: 120s actor + network margin
     });

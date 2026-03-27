@@ -1507,7 +1507,7 @@ export async function processAgentJob(jobId: number) {
               rowObjective,
               sectionsToScrape,
               resolvedPrompt,
-              5, // maxHops
+              7, // maxHops — increased from 5 to allow deeper team/contact page discovery
               () => isJobCancelled(jobId),
               undefined, // callbacks
               skillContext,

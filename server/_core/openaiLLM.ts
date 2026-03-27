@@ -5,7 +5,7 @@
  *
  * Railway env vars:
  *   OPENAI_API_KEY  — OpenAI API key (required)
- *   OPENAI_MODEL    — model name (default: gpt-5-mini)
+ *   OPENAI_MODEL    — model name (default: gpt-5.4-mini)
  *
  * Cost comparison (per 1M tokens):
  *   gpt-5-mini:   $0.25 input / $2.00 output  ← default, best value for structured extraction
@@ -21,7 +21,7 @@ import { ENV } from "./env";
 // Provider configuration
 // ---------------------------------------------------------------------------
 const OPENAI_API_KEY  = process.env.OPENAI_API_KEY ?? ENV.openAiApiKey ?? "";
-const OPENAI_MODEL    = process.env.OPENAI_MODEL ?? "gpt-5-mini";
+const OPENAI_MODEL    = process.env.OPENAI_MODEL ?? "gpt-5.4-mini";
 const OPENAI_BASE_URL = "https://api.openai.com/v1/";
 
 // ---------------------------------------------------------------------------
