@@ -3,10 +3,17 @@
  *
  * Models the actual agent loop structure:
  *   per firm = AVG_HOPS × (planNextAction call + extractProfileFields call)
+ *            × PRE_LLM_SKIP_RATE (pre-LLM extraction skips some LLM calls)
  *
- * planNextAction:   ~800 input + 100 output tokens (fixed, just the decision prompt)
- * extractProfileFields: scales with page content size and number of sections
+ * Uses the active profile's model selection (gpt-5-nano by default) for pricing.
+ * Pre-LLM extraction handles ~30-50% of fields deterministically, reducing
+ * the number and size of LLM calls.
+ *
+ * planNextAction:       ~2000 input + 100 output tokens (decision prompt + field state)
+ * extractProfileFields: scales with page content and remaining sections after pre-LLM
  */
+
+import { getProfile } from "./agentConfig";
 
 export interface CostEstimate {
   totalCost: number;
@@ -28,36 +35,57 @@ export interface CostEstimate {
 // Agent loop token constants (based on observed averages)
 // ---------------------------------------------------------------------------
 
-/** Tokens for one planNextAction call (the decision prompt is ~800 tokens in, ~100 out). */
-const PLAN_INPUT_TOKENS  = 800;
+/** Tokens for one planNextAction call (~2K input: prompt + field state + links). */
+const PLAN_INPUT_TOKENS  = 2000;
 const PLAN_OUTPUT_TOKENS = 100;
 
 /**
  * Tokens for one extractProfileFields call.
- * Base is the page content (typically 5,000–8,000 tokens for a company homepage).
- * Each additional section adds ~50 input tokens to the prompt and ~20 output tokens.
+ * Base is the page content (~4K tokens average after pre-LLM reduces section count).
+ * Each section adds ~50 input tokens to the prompt and ~25 output tokens.
+ * Pre-LLM extraction handles ~30-50% of sections, so effective sections are lower.
  */
-const EXTRACT_INPUT_BASE           = 6000;
+const EXTRACT_INPUT_BASE           = 4000;
 const EXTRACT_INPUT_PER_SECTION    = 50;
-const EXTRACT_OUTPUT_BASE          = 250;
+const EXTRACT_OUTPUT_BASE          = 200;
 const EXTRACT_OUTPUT_PER_SECTION   = 25;
 
-/** Average hops per firm across all jobs (primary page counts as hop 0 + ~2.5 agent hops). */
-const AVG_HOPS = 3.5;
+/**
+ * Average hops per firm. Failed fetches no longer waste hops (hop counter
+ * increments after success check), so effective hops are lower than before.
+ * Primary page = 1 hop + ~2 agent hops on average.
+ */
+const AVG_HOPS = 3;
+
+/**
+ * Fraction of hops where pre-LLM extraction fills ALL remaining fields,
+ * allowing the LLM extraction call to be skipped entirely.
+ * Observed on sites with good JSON-LD/CSS structure: ~20-30%.
+ */
+const PRE_LLM_FULL_SKIP_RATE = 0.25;
 
 // ---------------------------------------------------------------------------
-// Pricing — dynamic based on active provider
+// Pricing — uses the active profile's model selection
 // ---------------------------------------------------------------------------
 
-const USE_GEMINI = !!process.env.GEMINI_API_KEY;
-const PRICING = {
-  inputPer1M:  USE_GEMINI ? 0.075 : 0.15,
-  outputPer1M: USE_GEMINI ? 0.30  : 0.60,
+/** OpenAI model pricing (per 1M tokens) */
+const MODEL_PRICING: Record<string, { input: number; output: number }> = {
+  "gpt-5-nano":   { input: 0.05,  output: 0.40  },
+  "gpt-5-mini":   { input: 0.25,  output: 2.00  },
+  "gpt-5":        { input: 1.25,  output: 10.00 },
+  "gpt-4.1-nano": { input: 0.10,  output: 0.40  },
+  "gpt-4.1-mini": { input: 0.40,  output: 1.60  },
+  "gpt-4o-mini":  { input: 0.15,  output: 0.60  },
 };
 
-function calculateCost(inputTokens: number, outputTokens: number): number {
-  return (inputTokens / 1_000_000) * PRICING.inputPer1M
-       + (outputTokens / 1_000_000) * PRICING.outputPer1M;
+function getModelPricing(model: string): { input: number; output: number } {
+  return MODEL_PRICING[model] ?? MODEL_PRICING["gpt-5-nano"];
+}
+
+function calculateCost(inputTokens: number, outputTokens: number, model: string): number {
+  const p = getModelPricing(model);
+  return (inputTokens / 1_000_000) * p.input
+       + (outputTokens / 1_000_000) * p.output;
 }
 
 // ---------------------------------------------------------------------------
@@ -78,15 +106,23 @@ export function estimateEnrichmentCost(
   sectionCount = 6,
   avgDescriptionLength = 200,
 ): CostEstimate {
+  const profile = getProfile();
+  const planModel = profile.planningModel;
+  const extractModel = profile.extractionModel;
+
   // Content scale: richer sites have larger pages → more input tokens per extract call.
-  // Clamped to [0.7, 2.5] to avoid extreme estimates for very bare or very long descriptions.
-  const contentScale = Math.min(2.5, Math.max(0.7, avgDescriptionLength / 200));
+  // Clamped to [0.7, 2.0] to avoid extreme estimates.
+  const contentScale = Math.min(2.0, Math.max(0.7, avgDescriptionLength / 200));
+
+  // Pre-LLM reduces effective section count by ~30-50% (those fields extracted deterministically)
+  const effectiveSections = Math.ceil(sectionCount * 0.65);
 
   // Per-hop cost
-  const planCostPerHop = calculateCost(PLAN_INPUT_TOKENS, PLAN_OUTPUT_TOKENS);
-  const scaledExtractInput  = (EXTRACT_INPUT_BASE  + sectionCount * EXTRACT_INPUT_PER_SECTION)  * contentScale;
-  const scaledExtractOutput =  EXTRACT_OUTPUT_BASE + sectionCount * EXTRACT_OUTPUT_PER_SECTION;
-  const extractCostPerHop = calculateCost(scaledExtractInput, scaledExtractOutput);
+  const planCostPerHop = calculateCost(PLAN_INPUT_TOKENS, PLAN_OUTPUT_TOKENS, planModel);
+  const scaledExtractInput  = (EXTRACT_INPUT_BASE + effectiveSections * EXTRACT_INPUT_PER_SECTION) * contentScale;
+  const scaledExtractOutput =  EXTRACT_OUTPUT_BASE + effectiveSections * EXTRACT_OUTPUT_PER_SECTION;
+  // Account for hops where pre-LLM fills all fields and LLM call is skipped
+  const extractCostPerHop = calculateCost(scaledExtractInput, scaledExtractOutput, extractModel) * (1 - PRE_LLM_FULL_SKIP_RATE);
 
   // Per-firm cost (midpoint)
   const planCostPerFirm    = AVG_HOPS * planCostPerHop;
@@ -96,20 +132,21 @@ export function estimateEnrichmentCost(
   // Total cost (midpoint)
   const totalCost = perFirmCost * firmCount;
 
-  // Variance: fewer/more hops and page sizes vary ±50%
-  const variance = 0.50;
+  // Variance: fewer/more hops and page sizes vary ±60%
+  const variance = 0.60;
   const totalCostLow  = Math.round(totalCost * (1 - variance) * 100) / 100;
   const totalCostHigh = Math.round(totalCost * (1 + variance) * 100) / 100;
 
-  // Token totals
-  const inputTokensPerFirm  = AVG_HOPS * (PLAN_INPUT_TOKENS  + scaledExtractInput);
-  const outputTokensPerFirm = AVG_HOPS * (PLAN_OUTPUT_TOKENS + scaledExtractOutput);
+  // Token totals (for display — approximate)
+  const inputTokensPerFirm  = AVG_HOPS * (PLAN_INPUT_TOKENS + scaledExtractInput * (1 - PRE_LLM_FULL_SKIP_RATE));
+  const outputTokensPerFirm = AVG_HOPS * (PLAN_OUTPUT_TOKENS + scaledExtractOutput * (1 - PRE_LLM_FULL_SKIP_RATE));
 
-  // Duration estimate — 50 concurrent workers at 1,000 RPM (Gemini Tier 2)
-  // LLM bottleneck: firmCount × AVG_HOPS × 2 calls / (1000 RPM / 60) seconds
-  // Scraping bottleneck: ceil(firmCount / 50) × 25s per batch
-  const llmSeconds      = (firmCount * AVG_HOPS * 2) / (1000 / 60);
-  const scrapingSeconds = Math.ceil(firmCount / 50) * 25;
+  // Duration estimate — 50 concurrent workers at 8,000 RPM (OpenAI Tier 4)
+  // LLM calls per firm: planNextAction + extractProfileFields per hop (minus skips)
+  const llmCallsPerFirm = AVG_HOPS * (1 + (1 - PRE_LLM_FULL_SKIP_RATE));
+  const rpm = parseInt(process.env.LLM_RPM_LIMIT ?? "8000", 10);
+  const llmSeconds      = (firmCount * llmCallsPerFirm) / (rpm / 60);
+  const scrapingSeconds = Math.ceil(firmCount / 50) * 20;
   const totalSeconds    = Math.max(llmSeconds, scrapingSeconds);
   const hours   = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
