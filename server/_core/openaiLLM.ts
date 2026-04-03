@@ -75,10 +75,11 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
     throw new Error("OPENAI_API_KEY is not configured");
   }
 
-  const { messages, tools, response_format, temperature } = params;
+  const { messages, tools, response_format, temperature, model } = params;
+  const effectiveModel = model ?? OPENAI_MODEL;
 
   const payload: Record<string, unknown> = {
-    model: OPENAI_MODEL,
+    model: effectiveModel,
     messages: messages.map(msg => ({
       role: msg.role,
       content: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content),
@@ -109,7 +110,7 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
   // Track cost
   const inputTokens  = data.usage?.prompt_tokens    || 0;
   const outputTokens = data.usage?.completion_tokens || 0;
-  const p            = OPENAI_PRICING[OPENAI_MODEL] ?? { input: 0.25, output: 2.00 };
+  const p            = OPENAI_PRICING[effectiveModel] ?? OPENAI_PRICING[OPENAI_MODEL] ?? { input: 0.25, output: 2.00 };
   const cost         = (inputTokens * p.input + outputTokens * p.output) / 1_000_000;
 
   totalCalls++;

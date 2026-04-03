@@ -71,6 +71,52 @@ const SKIP_DOMAINS = [
   "youtube.com", "google.com", "apple.com", "microsoft.com",
 ];
 
+/**
+ * Known directory pagination patterns.
+ * For directories where we know the URL structure upfront, we construct
+ * the next page URL deterministically instead of detecting it from content.
+ * This handles JS-rendered pagination that Jina/simple HTTP can't see.
+ */
+interface KnownPagination {
+  domains: string[];
+  /** Build the URL for a given page number. Page 1 = first page. */
+  getNextUrl: (baseUrl: string, nextPage: number) => string;
+  /** Skip Jina and go straight to Puppeteer (for JS-rendered directories). */
+  preferPuppeteer: boolean;
+}
+
+const KNOWN_PAGINATION: KnownPagination[] = [
+  {
+    // Clutch: ?page=N, JS-rendered pagination, "See more providers" expand button
+    domains: ["clutch.co"],
+    getNextUrl: (base, page) => {
+      const u = new URL(base);
+      u.searchParams.delete("page");
+      if (page > 1) u.searchParams.set("page", String(page));
+      return u.href;
+    },
+    preferPuppeteer: true,
+  },
+  {
+    // GoodFirms: ?page=N, similar JS-rendered pattern
+    domains: ["goodfirms.co"],
+    getNextUrl: (base, page) => {
+      const u = new URL(base);
+      u.searchParams.delete("page");
+      if (page > 1) u.searchParams.set("page", String(page));
+      return u.href;
+    },
+    preferPuppeteer: true,
+  },
+];
+
+function getKnownPagination(url: string): KnownPagination | null {
+  try {
+    const host = new URL(url).hostname;
+    return KNOWN_PAGINATION.find(kp => kp.domains.some(d => host.includes(d))) ?? null;
+  } catch { return null; }
+}
+
 function isSkipDomain(url: string): boolean {
   try {
     const host = new URL(url).hostname.toLowerCase();
@@ -399,21 +445,38 @@ export async function extractDirectory(
   } = config;
 
   const allEntries: DirectoryEntry[] = [];
+  const seenUrls = new Set<string>(); // Cross-page deduplication
   const errors: string[] = [];
   let pagesVisited = 0;
   let currentUrl: string | null = startUrl;
   let detectedPattern: string | undefined;
 
+  // Check if this is a known directory with deterministic pagination
+  const knownPag = getKnownPagination(startUrl);
+  // For known pagination, strip page param to get the clean base URL
+  let baseUrl = startUrl;
+  if (knownPag) {
+    try {
+      const u = new URL(startUrl);
+      u.searchParams.delete("page");
+      baseUrl = u.href;
+    } catch { /* ignore */ }
+    console.log(`[directoryExtractor] Known directory detected — using deterministic pagination (preferPuppeteer: ${knownPag.preferPuppeteer})`);
+  }
+  let currentPage = 1;
+
   while (currentUrl && pagesVisited < maxPages) {
     const pageNum = pagesVisited + 1;
     console.log(`[directoryExtractor] Fetching page ${pageNum}: ${currentUrl}`);
 
-    // ── Fetch via Jina ──────────────────────────────────────────────────────
+    // ── Fetch via Jina (skip for known JS-rendered directories) ─────────────
     let jinaText: string | null = null;
-    try {
-      const result = await withDomainRateLimit(currentUrl, () => fetchViaJina(currentUrl!));
-      if (result?.success && result.content) jinaText = result.content;
-    } catch { /* ignore */ }
+    if (!knownPag?.preferPuppeteer) {
+      try {
+        const result = await withDomainRateLimit(currentUrl, () => fetchViaJina(currentUrl!));
+        if (result?.success && result.content) jinaText = result.content;
+      } catch { /* ignore */ }
+    }
 
     pagesVisited++;
 
@@ -421,20 +484,19 @@ export async function extractDirectory(
     let next_page_url: string | null = null;
     let rawHtml: string | null = null;
 
-    // ── Heuristic extraction from Jina markdown ─────────────────────────────
-    if (jinaText) {
+    // ── Heuristic extraction from Jina markdown (skip for known JS dirs) ────
+    if (jinaText && !knownPag?.preferPuppeteer) {
       const heuristic = heuristicExtractFromMarkdown(jinaText, currentUrl, detectedPattern);
       entries = heuristic.entries;
       if (heuristic.detectedPattern) detectedPattern = heuristic.detectedPattern;
 
       if (entries.length >= 3) {
-        // Heuristic succeeded — detect next page before possibly going to LLM
         next_page_url = detectNextPageUrl(jinaText, currentUrl, false);
       }
     }
 
-    // ── Puppeteer fallback for JS-rendered pages ────────────────────────────
-    if (entries.length < 3) {
+    // ── Puppeteer (always for known JS dirs, fallback for others) ───────────
+    if (entries.length < 3 || knownPag?.preferPuppeteer) {
       console.log(`[directoryExtractor] Heuristic found ${entries.length} entries on page ${pageNum}, trying Puppeteer`);
       try {
         const { scrapeWebsite } = await import("./scraper");
@@ -490,26 +552,44 @@ export async function extractDirectory(
       break;
     }
 
-    // ── LLM for next_page_url if heuristic didn't find one ──────────────────
-    if (entries.length >= 3 && next_page_url === null && jinaText) {
-      // Only ask LLM for next page if heuristic pagination failed
+    // ── LLM for next_page_url if heuristic didn't find one (skip for known dirs) ──
+    if (!knownPag && entries.length >= 3 && next_page_url === null && jinaText) {
       const llmResult = await extractEntriesViaLLM(jinaText, currentUrl, entryLabel);
       next_page_url = llmResult.next_page_url;
     }
 
-    console.log(`[directoryExtractor] Found ${entries.length} entries on page ${pageNum}`);
-    allEntries.push(...entries);
+    // ── Cross-page deduplication ────────────────────────────────────────────
+    const newEntries = entries.filter(e => {
+      const key = e.url.toLowerCase().replace(/\/$/, "");
+      if (seenUrls.has(key)) return false;
+      seenUrls.add(key);
+      return true;
+    });
 
-    // Stop if no next page or same as current
-    if (
-      !next_page_url ||
-      next_page_url.toLowerCase().replace(/\/$/, "") ===
-        currentUrl.toLowerCase().replace(/\/$/, "")
-    ) {
-      break;
+    console.log(`[directoryExtractor] Page ${pageNum}: ${entries.length} entries found, ${newEntries.length} new (${entries.length - newEntries.length} duplicates)`);
+    allEntries.push(...newEntries);
+
+    // ── Determine next page URL ─────────────────────────────────────────────
+    if (knownPag) {
+      // Known directory: construct next URL deterministically
+      // Stop when a page adds 0 new entries (all duplicates = past last page)
+      if (newEntries.length === 0) {
+        console.log(`[directoryExtractor] Page ${pageNum} returned only duplicates — stopping pagination`);
+        break;
+      }
+      currentPage++;
+      currentUrl = knownPag.getNextUrl(baseUrl, currentPage);
+    } else {
+      // Unknown directory: rely on detected pagination
+      if (
+        !next_page_url ||
+        next_page_url.toLowerCase().replace(/\/$/, "") ===
+          currentUrl.toLowerCase().replace(/\/$/, "")
+      ) {
+        break;
+      }
+      currentUrl = next_page_url;
     }
-
-    currentUrl = next_page_url;
 
     if (pagesVisited < maxPages) {
       await new Promise((r) => setTimeout(r, delayMs));
@@ -517,7 +597,7 @@ export async function extractDirectory(
   }
 
   return {
-    entries: dedupeByUrl(allEntries),
+    entries: allEntries, // Already deduplicated via seenUrls
     pagesVisited,
     errors,
   };

@@ -483,13 +483,8 @@ export const TEMPLATE_SYSTEM_PROMPTS: Record<string, string> = {
 // ---------------------------------------------------------------------------
 // Default skill contexts for template-mode jobs
 // ---------------------------------------------------------------------------
-// These are sent to the worker so Apollo can be called even when the user
-// hasn't gone through the AI-plan flow (which normally generates apolloSeniorities).
-// Templates with a contacts/people section use broad seniorities; others use empty.
 
 import type { SkillContext } from "../../../shared/skillContext";
-
-const CONTACTS_SENIORITIES = ["c_suite", "owner", "partner", "director"] as const;
 
 export const TEMPLATE_SKILL_CONTEXTS: Partial<Record<string, SkillContext>> = {
   b2b: {
@@ -497,7 +492,6 @@ export const TEMPLATE_SKILL_CONTEXTS: Partial<Record<string, SkillContext>> = {
     fitSignals: [],
     exclusionSignals: [],
     targetTitles: ["CEO", "Founder", "CTO", "VP Sales", "Owner"],
-    apolloSeniorities: [...CONTACTS_SENIORITIES],
     outreachGoal: "Find and contact key decision makers at B2B companies",
   },
   people: {
@@ -505,7 +499,6 @@ export const TEMPLATE_SKILL_CONTEXTS: Partial<Record<string, SkillContext>> = {
     fitSignals: [],
     exclusionSignals: [],
     targetTitles: ["Executive", "Director", "Manager", "Consultant"],
-    apolloSeniorities: [...CONTACTS_SENIORITIES, "manager"],
     outreachGoal: "Find contact information for individual professionals",
   },
   healthcare: {
@@ -513,7 +506,6 @@ export const TEMPLATE_SKILL_CONTEXTS: Partial<Record<string, SkillContext>> = {
     fitSignals: [],
     exclusionSignals: [],
     targetTitles: ["Medical Director", "CEO", "CMO", "Practice Manager", "Owner"],
-    apolloSeniorities: [...CONTACTS_SENIORITIES],
     outreachGoal: "Find decision makers at healthcare organizations",
   },
   ecommerce: {
@@ -521,7 +513,6 @@ export const TEMPLATE_SKILL_CONTEXTS: Partial<Record<string, SkillContext>> = {
     fitSignals: [],
     exclusionSignals: [],
     targetTitles: ["Founder", "CEO", "Owner", "Head of Marketing", "E-commerce Manager"],
-    apolloSeniorities: [...CONTACTS_SENIORITIES],
     outreachGoal: "Find contacts at e-commerce businesses",
   },
   realestate: {
@@ -529,7 +520,6 @@ export const TEMPLATE_SKILL_CONTEXTS: Partial<Record<string, SkillContext>> = {
     fitSignals: [],
     exclusionSignals: [],
     targetTitles: ["Broker Owner", "Managing Broker", "Owner", "Principal"],
-    apolloSeniorities: [...CONTACTS_SENIORITIES],
     outreachGoal: "Find decision makers at real estate agencies",
   },
   local: {
@@ -537,7 +527,6 @@ export const TEMPLATE_SKILL_CONTEXTS: Partial<Record<string, SkillContext>> = {
     fitSignals: [],
     exclusionSignals: [],
     targetTitles: ["Owner", "Manager", "General Manager", "Director"],
-    apolloSeniorities: [...CONTACTS_SENIORITIES, "manager"],
     outreachGoal: "Find contacts at local businesses",
   },
   directory: {
@@ -545,8 +534,6 @@ export const TEMPLATE_SKILL_CONTEXTS: Partial<Record<string, SkillContext>> = {
     fitSignals: [],
     exclusionSignals: [],
     targetTitles: ["CEO", "Founder", "Owner", "Director", "Manager"],
-    apolloSeniorities: [...CONTACTS_SENIORITIES],
     outreachGoal: "Find key contacts at companies from directory listings",
   },
-  // vc template uses the old enrichment pipeline, not the agent loop
 };

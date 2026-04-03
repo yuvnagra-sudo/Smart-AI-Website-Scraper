@@ -211,3 +211,33 @@ export function searchQueryForField(
 
   return `${companyName}${domain ? ` ${domain}` : ""} ${readable}`;
 }
+
+/**
+ * Generate a diverse search query variant based on attempt number.
+ * Each attempt uses a different query structure to find different sources.
+ * Prevents the agent from repeating the exact same query on consecutive searches.
+ */
+export function searchQueryVariant(
+  companyName: string,
+  websiteUrl: string,
+  fieldLabel: string,
+  attempt: number,
+): string {
+  let domain = "";
+  try { domain = new URL(websiteUrl).hostname.replace(/^www\./, ""); } catch { /* ignore */ }
+
+  const readable = fieldLabel
+    .replace(/_/g, " ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .toLowerCase();
+
+  const variants = [
+    `${companyName} ${readable}`,                              // Broad: "Acme Corp CEO"
+    `${companyName} leadership team`,                          // People-focused
+    `site:${domain} ${readable}`,                              // Site-specific
+    `"${companyName}" "${readable}"`,                          // Exact match
+    `${companyName} ${domain} about team contact`,             // Multi-signal
+  ];
+
+  return variants[attempt % variants.length];
+}

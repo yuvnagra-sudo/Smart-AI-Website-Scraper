@@ -4,7 +4,6 @@
  */
 import { invokeLLM } from "./_core/openaiLLM";
 import { aggregateFreeApiData } from "./dataSources/freeApis";
-import { enrichPeopleInPlace } from "./peopleEnrichment";
 import { scrapeUrl, type PageCallbacks } from "./agentScraper";
 import { VC_FLAT_SECTIONS, VC_FLAT_SYSTEM_PROMPT, TEAM_PAGE_PATTERN, PORTFOLIO_PAGE_PATTERN } from "./vcSections";
 import { formatNichesForPrompt } from "./nicheTaxonomy";
@@ -1594,8 +1593,8 @@ If you cannot determine the investment stages, return: {"stages": []}`;
       console.log(`[enrichVCFirm] 🔍 Deep profile scraping was enabled`);
     }
 
-    // Step 5b: Tier classification + Apollo people-discovery
-    await enrichPeopleInPlace(result.teamMembers, websiteUrl, { companyName, onProgress });
+    // Step 5b: Tier classification
+    // People discovery is handled by the agent loop's pre-LLM + LLM extraction pipeline.
 
     // Step 6: Extract portfolio companies (using multi-page content)
     onProgress?.(`Extracting portfolio companies for ${companyName}`);

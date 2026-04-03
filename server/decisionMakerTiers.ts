@@ -18,6 +18,7 @@
  */
 
 import { queuedLLMCall } from './_core/llmQueue';
+import { getProfile } from './agentConfig';
 
 export type DecisionMakerTier = "Tier 1" | "Tier 2" | "Tier 3" | "Exclude";
 
@@ -227,6 +228,21 @@ const PRE_TIER_EXCLUSIONS = [
   "portfolio director",
 ];
 
+// ---------------------------------------------------------------------------
+// Profile-sourced pattern getters (prefer profile, fall back to hardcoded)
+// ---------------------------------------------------------------------------
+
+function getTierPatterns() {
+  const tp = getProfile().tierPatterns;
+  return {
+    tier1: tp.tier1.length > 0 ? tp.tier1 : TIER1_PATTERNS,
+    tier2: tp.tier2.length > 0 ? tp.tier2 : TIER2_PATTERNS,
+    tier3: tp.tier3.length > 0 ? tp.tier3 : TIER3_PATTERNS,
+    exclude: tp.exclude.length > 0 ? tp.exclude : EXCLUDE_PATTERNS,
+    preTierExclusions: tp.pre_tier_exclusions.length > 0 ? tp.pre_tier_exclusions : PRE_TIER_EXCLUSIONS,
+  };
+}
+
 /**
  * Check if title matches any pattern (case-insensitive, whole-word matching).
  */
@@ -263,8 +279,11 @@ export function classifyDecisionMakerTier(title: string): TierClassification {
 
   const titleLower = title.toLowerCase().trim();
 
+  // Get patterns from profile (or fallback to hardcoded)
+  const tp = getTierPatterns();
+
   // Exclude compound titles before any tier patterns (e.g. "fund controller" before "controller" in Tier 2)
-  if (matchesPattern(title, PRE_TIER_EXCLUSIONS)) {
+  if (matchesPattern(title, tp.preTierExclusions)) {
     return {
       tier: "Exclude",
       priority: 999,
@@ -273,7 +292,7 @@ export function classifyDecisionMakerTier(title: string): TierClassification {
   }
 
   // TIER 1: Budget authority / decision makers
-  if (matchesPattern(titleLower, TIER1_PATTERNS)) {
+  if (matchesPattern(titleLower, tp.tier1)) {
     // Special case: "partner" alone — verify it's not an excluded partner type
     if (titleLower === "partner") {
       // Already passed the excluded partner types check above, so this is a legitimate partner
@@ -292,7 +311,7 @@ export function classifyDecisionMakerTier(title: string): TierClassification {
   }
 
   // TIER 2: Senior influencers / champions
-  if (matchesPattern(titleLower, TIER2_PATTERNS)) {
+  if (matchesPattern(titleLower, tp.tier2)) {
     return {
       tier: "Tier 2",
       priority: 2,
@@ -301,7 +320,7 @@ export function classifyDecisionMakerTier(title: string): TierClassification {
   }
 
   // TIER 3: Junior influencers / gatekeepers
-  if (matchesPattern(titleLower, TIER3_PATTERNS)) {
+  if (matchesPattern(titleLower, tp.tier3)) {
     return {
       tier: "Tier 3",
       priority: 3,
@@ -310,7 +329,7 @@ export function classifyDecisionMakerTier(title: string): TierClassification {
   }
 
   // EXCLUDE: Non-decision-making roles
-  if (matchesPattern(titleLower, EXCLUDE_PATTERNS)) {
+  if (matchesPattern(titleLower, tp.exclude)) {
     return {
       tier: "Exclude",
       priority: 999,

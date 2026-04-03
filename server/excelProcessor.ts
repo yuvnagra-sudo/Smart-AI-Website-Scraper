@@ -144,7 +144,7 @@ const WEBSITE_URL_VARIANTS = [
   "Business URL", "business url", "Place URL", "place url",
   "Maps URL", "maps url", "Google Maps URL", "google maps url",
   "Profile URL", "profile url", "Listing URL", "listing url",
-  // Apollo / Hunter / ZoomInfo / LinkedIn Sales Nav exports
+  // Hunter / ZoomInfo / LinkedIn Sales Nav exports
   "Company Domain", "company domain", "Domain", "domain",
   "Company URL", "company url", "Org URL", "org url",
   "LinkedIn URL", "linkedin url", "LinkedIn", "linkedin",
@@ -417,11 +417,62 @@ export function createOutputExcel(
 }
 
 /**
- * Create output Excel for agentic extraction jobs.
- * - "Results" sheet: one row per profile entity, one column per custom section
- * - "Sources" sheet: source URLs and confidence scores per field per company
- * - "Collected URLs" sheet: entries gathered from directory pages
+ * Try to parse a value as a JSON array. Returns null if not valid JSON array.
  */
+function tryParseJsonArray(value: string): Array<Record<string, string>> | null {
+  if (!value || !value.startsWith("[")) return null;
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === "object") {
+      return parsed;
+    }
+  } catch { /* not valid JSON */ }
+  return null;
+}
+
+/**
+ * Expand array sections into multiple columns per item.
+ * E.g., "decision_makers" with [{name:"John", title:"CEO"}] becomes:
+ *   "Decision Makers 1 - Name": "John"
+ *   "Decision Makers 1 - Title": "CEO"
+ *   "Decision Makers 2 - Name": ...
+ */
+function expandArraySection(
+  section: AgentSection,
+  value: string,
+  maxExpand = 5,
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  const items = tryParseJsonArray(value);
+
+  if (!items) {
+    // Not a JSON array — store as-is (backward compatibility)
+    result[section.label] = value;
+    return result;
+  }
+
+  // Get field names from arraySchema or from the first item
+  const fieldNames = section.arraySchema
+    ? Object.keys(section.arraySchema)
+    : Object.keys(items[0]).filter(k => k !== "quote_source");
+
+  for (let i = 0; i < Math.min(items.length, maxExpand); i++) {
+    const item = items[i];
+    const prefix = `${section.label} ${i + 1}`;
+    for (const field of fieldNames) {
+      const columnName = `${prefix} - ${field.charAt(0).toUpperCase() + field.slice(1).replace(/_/g, " ")}`;
+      result[columnName] = String(item[field] ?? "");
+    }
+  }
+
+  // If there are more items than maxExpand, add a count indicator
+  if (items.length > maxExpand) {
+    result[`${section.label} (Total)`] = String(items.length);
+  }
+
+  return result;
+}
+
 export function createAgentOutputExcel(
   sections: AgentSection[],
   profileResults: Array<Record<string, string>>,
@@ -431,17 +482,36 @@ export function createAgentOutputExcel(
 ): Buffer {
   const workbook = XLSX.utils.book_new();
 
+  // Identify which sections have array schemas
+  const arraySections = new Set(sections.filter(s => s.arraySchema).map(s => s.key));
+
   // Section label set — used to avoid duplicating columns that appear in both
   // the scraped output and the original input (scraped value takes precedence).
   const sectionLabels = new Set(sections.map(s => s.label));
+  // Also include expanded array column prefixes
+  for (const s of sections) {
+    if (s.arraySchema) {
+      for (let i = 1; i <= 5; i++) {
+        for (const field of Object.keys(s.arraySchema)) {
+          sectionLabels.add(`${s.label} ${i} - ${field.charAt(0).toUpperCase() + field.slice(1).replace(/_/g, " ")}`);
+        }
+      }
+    }
+  }
 
   // Sheet 1: Results (profile extractions — clean data only)
   if (profileResults.length > 0) {
     const rows = profileResults.map((r) => {
       const row: Record<string, string> = {};
-      // Scraped section fields first (new enriched data — left columns, like Anymail Finder)
+      // Scraped section fields first (new enriched data — left columns)
       for (const s of sections) {
-        row[s.label] = r[s.key] ?? "";
+        if (arraySections.has(s.key)) {
+          // Expand array sections into multiple columns
+          const expanded = expandArraySection(s, r[s.key] ?? "");
+          Object.assign(row, expanded);
+        } else {
+          row[s.label] = r[s.key] ?? "";
+        }
       }
       // Original input columns after — preserves every column from the source file
       if (originalColumns) {
@@ -470,8 +540,10 @@ export function createAgentOutputExcel(
       for (const s of sections) {
         const fr = fieldResults[s.key];
         const conf = fr?.confidence ?? 0;
+        const method = fr?.extractionMethod ?? "unknown";
         const confLabel = conf >= 0.9 ? "High" : conf >= 0.7 ? "Good" : conf >= 0.4 ? "Partial" : "Not found";
         row[`${s.label} (Confidence)`] = fr?.value ? `${confLabel} (${(conf * 100).toFixed(0)}%)` : "Not found";
+        row[`${s.label} (Source)`] = method;
         row[`${s.label} (Source URL)`] = fr?.sourceUrl ?? "";
       }
       return row;
@@ -481,7 +553,7 @@ export function createAgentOutputExcel(
     XLSX.utils.book_append_sheet(workbook, sourceSheet, "Sources");
   }
 
-  // Sheet 2: Collected URLs (from directory pages)
+  // Sheet 3: Collected URLs (from directory pages)
   if (collectedUrls.length > 0) {
     const urlRows = collectedUrls.map((e) => ({
       "Company Name": e.name,

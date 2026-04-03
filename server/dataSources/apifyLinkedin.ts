@@ -5,8 +5,7 @@
  *   1. Find the LinkedIn company page URL via SERP (company name/domain → linkedin.com/company/X)
  *   2. Run the Apify actor with that URL to get the employee list
  *
- * Returns full, unobfuscated names + LinkedIn profile URLs — a significant
- * improvement over Apollo's free tier which only returns obfuscated initials.
+ * Returns full, unobfuscated names + LinkedIn profile URLs.
  *
  * Gate: APIFY_API_KEY env var — returns [] when absent.
  */

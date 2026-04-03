@@ -15,6 +15,9 @@ export const ENV = {
   vayneApiKey: process.env.VAYNE_API_KEY ?? "",
   // Optional HTTP/SOCKS proxy for browser scraping (e.g. "http://host:port")
   proxyUrl: process.env.PROXY_URL ?? "",
+  // Manus Forge API (image gen, voice, maps, hybrid LLM)
+  forgeApiUrl: process.env.BUILT_IN_FORGE_API_URL ?? "",
+  forgeApiKey: process.env.BUILT_IN_FORGE_API_KEY ?? "",
 };
 
 export const env = ENV;

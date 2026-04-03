@@ -14,11 +14,6 @@ export interface SkillContext {
   exclusionSignals: string[];
   /** Job titles most likely to be the right decision maker for this use case, in priority order. */
   targetTitles: string[];
-  /**
-   * Apollo.io seniority labels that map to targetTitles.
-   * Valid values: "c_suite" | "vp" | "director" | "manager" | "individual_contributor" | "partner" | "owner"
-   */
-  apolloSeniorities: string[];
   /** One sentence explaining why these companies are being researched. */
   outreachGoal: string;
 }

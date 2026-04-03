@@ -56,6 +56,7 @@ export const enrichmentJobs = mysqlTable("enrichmentJobs", {
   objective:    text("objective"),      // Plain-text user objective
   columnMappingJson: text("columnMappingJson"), // JSON: {companyNameColumn, websiteUrlColumn, descriptionColumn?}
   skillContextJson: text("skillContextJson"),   // JSON: SkillContext — auto-inferred ICP, DM titles, fit/exclusion signals
+  profileName: varchar("profileName", { length: 50 }).default("base"), // Agent profile used for this job
   errorMessage: text("errorMessage"),
   // Worker tracking fields
   workerPid: int("workerPid"), // Process ID of worker processing this job
@@ -231,3 +232,38 @@ export const jobLogs = mysqlTable("jobLogs", {
 
 export type JobLog = typeof jobLogs.$inferSelect;
 export type InsertJobLog = typeof jobLogs.$inferInsert;
+
+/**
+ * Agent Traces — per-company decision trace summaries for observability.
+ * Full step-by-step traces are stored in S3 (referenced by traceFileKey).
+ * This table holds queryable summaries for dashboards and review queues.
+ */
+export const agentTraces = mysqlTable("agentTraces", {
+  id:                    int("id").autoincrement().primaryKey(),
+  jobId:                 int("jobId").notNull(),
+  firmName:              text("firmName").notNull(),
+  websiteUrl:            text("websiteUrl"),
+  profileName:           varchar("profileName", { length: 50 }),
+  status:                varchar("status", { length: 20 }).notNull(), // "success" | "partial" | "error"
+  hopsUsed:              int("hopsUsed"),
+  maxHops:               int("maxHops"),
+  fieldsTotal:           int("fieldsTotal"),
+  fieldsConfident:       int("fieldsConfident"),
+  fieldsFilled:          int("fieldsFilled"),
+  preLLMFieldsExtracted: int("preLLMFieldsExtracted"),
+  citationFailures:      int("citationFailures"),
+  totalPromptTokens:     int("totalPromptTokens"),
+  totalCompletionTokens: int("totalCompletionTokens"),
+  totalCostUSD:          decimal("totalCostUSD", { precision: 10, scale: 6 }),
+  totalLatencyMs:        int("totalLatencyMs"),
+  needsReview:           boolean("needsReview").default(false),
+  reviewReason:          text("reviewReason"),
+  traceFileKey:          text("traceFileKey"),    // S3 key to full trace JSON
+  createdAt:             timestamp("createdAt").defaultNow().notNull(),
+}, (table) => ({
+  jobIdIdx: index("agentTraces_jobId_idx").on(table.jobId),
+  reviewIdx: index("agentTraces_review_idx").on(table.needsReview),
+}));
+
+export type AgentTrace = typeof agentTraces.$inferSelect;
+export type InsertAgentTrace = typeof agentTraces.$inferInsert;

@@ -275,7 +275,7 @@ function TemplateJobSheet({ jobId, open, onClose, template }: {
 
   const { data, isLoading } = trpc.enrichment.getJobResults.useQuery(
     { jobId, tab: activeSheetKey as QueryTab, page, search: search || undefined },
-    { enabled: open, keepPreviousData: true }
+    { enabled: open, placeholderData: (prev: any) => prev }
   );
 
   const downloadMutation = trpc.enrichment.generateResults.useMutation({

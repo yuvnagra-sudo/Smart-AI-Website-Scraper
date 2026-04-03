@@ -172,9 +172,15 @@ export async function updateJobProgressSafely(
   },
   maxRetries: number = 3
 ): Promise<boolean> {
+  // Convert numeric totalCostUSD to string for the DB decimal column
+  const dbUpdates: Record<string, unknown> = { ...updates };
+  if (typeof dbUpdates.totalCostUSD === "number") {
+    dbUpdates.totalCostUSD = String(dbUpdates.totalCostUSD);
+  }
+
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      await updateEnrichmentJob(jobId, updates);
+      await updateEnrichmentJob(jobId, dbUpdates as any);
       return true;
     } catch (error: any) {
       console.error(`[DB Update] Attempt ${attempt}/${maxRetries} failed:`, error.message);

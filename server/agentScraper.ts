@@ -25,6 +25,10 @@ import { extractDirectory, type DirectoryEntry as DirEntry } from "./directoryEx
 import { queuedLLMCall } from "./_core/llmQueue";
 import { webSearch, searchQueryForField } from "./_core/webSearch";
 import type { SkillContext } from "../shared/skillContext";
+import { preLLMExtract, CONFIDENCE } from "./preLLMExtractor";
+import { mapUrlsHeuristic, mapUrlsWithLLM, generateTeamPageCandidates, type MappedUrl } from "./mapPhase";
+import { getProfile, getSection, getSubSection, type AgentProfile } from "./agentConfig";
+import { getCachedFetch, setCachedFetch } from "./fetchCache";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -34,6 +38,15 @@ export interface AgentSection {
   key: string;
   label: string;
   desc: string;
+  /**
+   * Optional: defines this section as an array of structured objects.
+   * When set, extraction returns a JSON array instead of a flat string.
+   * Example: { "name": "string", "title": "string", "linkedin": "string" }
+   * The Excel processor expands these into multiple rows/columns.
+   */
+  arraySchema?: Record<string, "string" | "number">;
+  /** Maximum number of items when arraySchema is set (default: 10). */
+  arrayMaxItems?: number;
 }
 
 export interface DirectoryEntry {
@@ -49,7 +62,7 @@ export interface ScrapeStats {
 }
 
 /**
- * Per-field extraction result with a confidence score.
+ * Per-field extraction result with a confidence score and citation.
  * confidence: 0.0 = not found / guessed, 1.0 = explicitly stated on page.
  * The agent loop uses this to decide whether to keep searching.
  */
@@ -57,13 +70,18 @@ export interface FieldResult {
   value: string;
   confidence: number; // 0.0 – 1.0
   sourceUrl?: string; // which URL this value was extracted from
+  /** The extraction source method (for deterministic confidence scoring). */
+  extractionMethod?: "json_ld" | "css_pattern" | "regex" | "llm_cited" | "llm_uncited" | "search_snippet";
+  /** Exact text snippet from the page that grounds this extraction (anti-hallucination). */
+  quoteSource?: string;
 }
 
 /** Map of field key → FieldResult */
 export type FieldResultMap = Record<string, FieldResult>;
 
-/** Confidence threshold: fields below this are considered "needs more search" */
-export const CONFIDENCE_THRESHOLD = 0.7;
+/** Confidence threshold: fields below this are considered "needs more search".
+ * Sourced from the active agent profile (default: 0.7). */
+export const CONFIDENCE_THRESHOLD = getProfile().confidenceThreshold;
 
 export type AgentScrapeResult =
   | { type: "directory"; entries: DirectoryEntry[] }
@@ -120,6 +138,7 @@ async function planNextAction(
   maxHops: number,
   skillContext?: SkillContext | null,
   webSearchedFields?: Set<string>,
+  failedDomains?: Map<string, number>,
 ): Promise<AgentAction> {
   // Build a summary of current state
   const fieldSummary = sections.map(s => {
@@ -140,31 +159,37 @@ async function planNextAction(
   const linkList = availableLinks.slice(0, 20).join("\n  ");
   const weakList = weakFields.map(s => `${s.key} (${s.label})`).join(", ");
 
-  // Build a smart hint about what kind of page to look for next
-  const needsPeople = weakFields.some(s =>
-    /decision.maker|contact|ceo|founder|owner|director|manager|team|people|staff|leadership/i.test(s.key + " " + s.label)
-  );
-  const needsTechScore = weakFields.some(s =>
-    /tech|score|dev|digital|software|website/i.test(s.key + " " + s.label)
-  );
-  const needsDomain = weakFields.some(s =>
-    /domain|website|url|web/i.test(s.key + " " + s.label)
-  );
+  // Build link hints from profile based on what fields are missing
+  const profile = getProfile();
+  const peoplePattern = new RegExp(profile.peopleFieldPattern, "i");
+  const techPattern = new RegExp(profile.techFieldPattern, "i");
+  const domainPattern = new RegExp(profile.domainFieldPattern, "i");
 
+  const needsPeople = weakFields.some(s => peoplePattern.test(s.key + " " + s.label));
+  const needsTechScore = weakFields.some(s => techPattern.test(s.key + " " + s.label));
+  const needsDomain = weakFields.some(s => domainPattern.test(s.key + " " + s.label));
+
+  // Source link hints from profile
+  const linkHintsSection = getSection(profile, "Link Priority Hints");
   const linkHints = needsPeople
-    ? `PRIORITY LINKS for people/contacts: prefer URLs containing /about, /team, /people, /leadership, /founders, /executives, /our-team, /staff, /meet-the-team`
+    ? (linkHintsSection.match(/People\/contacts needed:\s*(.+)/i)?.[1] ?? "PRIORITY LINKS: prefer /about, /team, /people, /leadership")
     : needsTechScore
-    ? `PRIORITY LINKS for tech assessment: prefer URLs containing /services, /work, /portfolio, /case-studies, /technology, /solutions`
+    ? (linkHintsSection.match(/Tech assessment needed:\s*(.+)/i)?.[1] ?? "PRIORITY LINKS: prefer /services, /work, /portfolio")
     : needsDomain
-    ? `PRIORITY LINKS for company domain: prefer the company homepage or any non-directory URL`
-    : `PRIORITY LINKS: prefer pages most likely to contain the missing fields listed above`;
+    ? (linkHintsSection.match(/Domain\/website needed:\s*(.+)/i)?.[1] ?? "PRIORITY LINKS: prefer the company homepage")
+    : (linkHintsSection.match(/Default:\s*(.+)/i)?.[1] ?? "PRIORITY LINKS: prefer pages most likely to contain the missing fields listed above");
 
+  // Source urgency thresholds from profile
   const hopsRemaining = maxHops - hopsUsed;
-  const urgency = hopsRemaining <= 1
-    ? `URGENT: Only ${hopsRemaining} hop(s) remaining. If no good link is available, use web_search immediately.`
-    : hopsRemaining <= 2
-    ? `${hopsRemaining} hops remaining. Be selective — only fetch a page if it is very likely to have the missing data.`
-    : ``;
+  const urgencySection = getSection(profile, "Urgency Thresholds");
+  let urgency = "";
+  if (hopsRemaining <= 1) {
+    const tmpl = urgencySection.match(/1 hop remaining:\s*(.+)/i)?.[1] ?? `URGENT: Only ${hopsRemaining} hop(s) remaining. If no good link is available, use web_search immediately.`;
+    urgency = tmpl.replace("{hopsRemaining}", String(hopsRemaining));
+  } else if (hopsRemaining <= 2) {
+    const tmpl = urgencySection.match(/2 hops remaining:\s*(.+)/i)?.[1] ?? `${hopsRemaining} hops remaining. Be selective.`;
+    urgency = tmpl.replace("{hopsRemaining}", String(hopsRemaining));
+  }
 
   const skillBlock = skillContext ? `
 ICP: ${skillContext.icpSummary}
@@ -178,7 +203,13 @@ Skip if company shows: ${skillContext.exclusionSignals.join(", ")}
     ? Array.from(webSearchedFields).join(", ")
     : "(none yet)";
 
-  const prompt = `You are an autonomous data enrichment agent. Your mission: fill in all missing fields for this company using the fewest possible page fetches.
+  // Source agent persona and decision rules from profile
+  const agentPersona = getSection(profile, "Agent Persona");
+  const decisionRules = getSection(profile, "Planner Decision Rules")
+    .replace("{companyName}", companyName)
+    .replace("{domain}", websiteUrl.replace(/https?:\/\//, "").split("/")[0]);
+
+  const prompt = `${agentPersona}
 
 Company: ${companyName}
 Website: ${websiteUrl}
@@ -186,7 +217,7 @@ Objective: ${objective}${skillBlock ? "\n" + skillBlock : ""}
 Current extraction state (confidence 0.0=not found, 1.0=certain):
 ${fieldSummary}
 
-Missing fields (need confidence ≥ ${CONFIDENCE_THRESHOLD}): ${weakList}
+Missing fields (need confidence >= ${CONFIDENCE_THRESHOLD}): ${weakList}
 
 URLs already visited — DO NOT revisit these:
   ${visitedList || "(none yet)"}
@@ -198,25 +229,18 @@ Fields already attempted via web_search — DO NOT search again for these:
   ${searchedList}
 
 Hops used: ${hopsUsed} / ${maxHops}${urgency ? "\n" + urgency : ""}
+${failedDomains && failedDomains.size > 0 ? `\nDomains with repeated fetch failures (prefer web_search over fetch_url for these):\n  ${Array.from(failedDomains.entries()).filter(([, c]) => c >= 2).map(([d, c]) => `${d} (${c} failures)`).join(", ") || "(none)"}` : ""}
 
 ${linkHints}
 
-DECISION RULES (follow in order):
-1. If a link in the available list clearly matches the missing field type (e.g. /about or /team for contacts), choose fetch_url with that link.
-2. If no available link is relevant AND the missing fields are people/contacts AND the field is NOT in the "already attempted" list, choose web_search with a targeted query like "${companyName} CEO founder team site:${websiteUrl.replace(/https?:\/\//, '').split('/')[0]}" or "${companyName} leadership team".
-3. If the company website is a one-page site, a social media profile, or completely irrelevant to the missing fields, choose web_search.
-4. Choose done if: all fields are filled, OR every remaining weak field is in the "already attempted via web_search" list above, OR the data genuinely does not exist publicly.
-5. NEVER fetch a URL already in the visited list.
-6. NEVER fetch social media profiles (linkedin.com/in/, twitter.com, instagram.com, facebook.com) — they are blocked.
-7. NEVER fetch image files, PDFs, or asset URLs.
-8. If the ONLY remaining weak field is employee count / headcount / company size AND you have already visited the About or Team page, choose done immediately — this data is almost never on company websites and is behind paywalls on LinkedIn/ZoomInfo.
-9. If a field key appears in the "already attempted via web_search" list above, do NOT web_search for it again — choose done or fetch_url for other weak fields instead.
+${decisionRules}
 
 Return ONLY valid JSON (no markdown):
 {"action":"fetch_url"|"web_search"|"done","target":"full URL if fetch_url, else null","query":"search query if web_search, else null","reason":"one sentence explaining why this is the best next step"}`;
 
   try {
     const response = await queuedLLMCall({
+      model: profile.planningModel,
       messages: [{ role: "user", content: prompt }],
       response_format: {
         type: "json_schema",
@@ -278,116 +302,103 @@ export async function extractProfileFields(
   sourceUrl?: string,
   pageType?: "directory" | "company" | "search",
   skillContext?: SkillContext | null,
+  /** Raw HTML for pre-LLM extraction (if available, separate from markdown content). */
+  rawHtml?: string,
 ): Promise<FieldResultMap> {
-  // Build per-section schema properties — each field now returns value + confidence
-  const props: Record<string, { type: string; properties?: object; required?: string[]; additionalProperties?: boolean; description?: string }> = {};
-  for (const s of sections) {
+  // ── PRE-LLM EXTRACTION PASS ──────────────────────────────────────────────
+  // Run deterministic extraction before the LLM to harvest structured data
+  // at high confidence without risking hallucination.
+  let preLLMResults: FieldResultMap = {};
+  if (rawHtml && pageType !== "search") {
+    preLLMResults = preLLMExtract(rawHtml, sections, sourceUrl);
+  }
+
+  // Determine which sections still need LLM extraction
+  // (fields already extracted with high confidence are skipped)
+  const sectionsForLLM = sections.filter(s => {
+    const preLLM = preLLMResults[s.key];
+    return !preLLM || preLLM.confidence < CONFIDENCE_THRESHOLD;
+  });
+
+  // If pre-LLM extracted everything, skip the LLM call entirely
+  if (sectionsForLLM.length === 0) {
+    console.log(`[agentScraper] Pre-LLM extracted all ${sections.length} fields — skipping LLM call`);
+    return preLLMResults;
+  }
+
+  // Separate scalar vs array sections for different schema handling
+  const scalarSections = sectionsForLLM.filter(s => !s.arraySchema);
+  const arraySections = sectionsForLLM.filter(s => s.arraySchema);
+
+  // Build per-section schema properties — now includes quote_source for grounding
+  const props: Record<string, Record<string, unknown>> = {};
+  for (const s of scalarSections) {
     props[s.key] = {
       type: "object",
       description: `${s.label}: ${s.desc}`,
       properties: {
         value: { type: "string" },
         confidence: { type: "number" },
+        quote_source: { type: "string" },
       },
-      required: ["value", "confidence"],
+      required: ["value", "confidence", "quote_source"],
+      additionalProperties: false,
+    };
+  }
+
+  // Array sections get a strict array-of-objects schema
+  for (const s of arraySections) {
+    const itemProps: Record<string, { type: string }> = {};
+    const itemRequired: string[] = [];
+    for (const [fieldName, fieldType] of Object.entries(s.arraySchema!)) {
+      itemProps[fieldName] = { type: fieldType };
+      itemRequired.push(fieldName);
+    }
+    // Add quote_source to each array item for grounding
+    itemProps["quote_source"] = { type: "string" };
+    itemRequired.push("quote_source");
+
+    props[s.key] = {
+      type: "object",
+      description: `${s.label}: ${s.desc}. Return as a structured array.`,
+      properties: {
+        items: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: itemProps,
+            required: itemRequired,
+            additionalProperties: false,
+          },
+        },
+        confidence: { type: "number" },
+      },
+      required: ["items", "confidence"],
       additionalProperties: false,
     };
   }
 
   // Build a brief example from the first 2 sections so the LLM sees expected format
-  const exampleObj: Record<string, { value: string; confidence: number }> = {};
-  for (const s of sections.slice(0, 2)) {
-    exampleObj[s.key] = { value: `[extracted ${s.label.toLowerCase()} from page]`, confidence: 0.9 };
+  const exampleObj: Record<string, { value: string; confidence: number; quote_source: string }> = {};
+  for (const s of sectionsForLLM.slice(0, 2)) {
+    exampleObj[s.key] = { value: `[extracted ${s.label.toLowerCase()} from page]`, confidence: 0.9, quote_source: `[exact text from page containing ${s.label.toLowerCase()}]` };
   }
-  for (const s of sections.slice(2)) {
-    exampleObj[s.key] = { value: "", confidence: 0.0 };
+  for (const s of sectionsForLLM.slice(2)) {
+    exampleObj[s.key] = { value: "", confidence: 0.0, quote_source: "" };
   }
   const exampleJson = JSON.stringify(exampleObj, null, 2);
 
-  // Build page-type-specific extraction guidance so the LLM assigns
-  // appropriate confidence to data from each source type.
-  let pageTypeGuidance = "";
-  if (pageType === "directory") {
-    pageTypeGuidance = `
-PAGE TYPE: Business directory profile (e.g. Clutch, G2, GoodFirms, Yelp, Capterra)
+  // Source all prompt intelligence from the agent profile
+  const extractProfile = getProfile();
 
-Directories contain HIGHLY RELIABLE structured data for operational fields:
-  - Employee count, company size tier (e.g. "10-49") → confidence 0.95
-  - Hourly rate / pricing range (e.g. "$150-$199/hr") → confidence 0.95
-  - Min project size (e.g. "$10,000+") → confidence 0.95
-  - Year founded (e.g. "Founded 2009") → confidence 0.95
-  - Headquarters / office locations → confidence 0.95
-  - Service lines and focus areas with percentages → confidence 0.90
-  - Company description / About text → confidence 0.85
-  - Clutch rating and review count → confidence 0.95
-  - Business entity name (legal name) → confidence 0.95
+  // Page-type guidance from profile
+  const pageTypeKey = pageType === "directory" ? "Directory" : pageType === "search" ? "Search" : "Company";
+  const pageTypeGuidance = getSubSection(extractProfile, "Page Type Confidence Guidance", pageTypeKey);
 
-Directories contain UNRELIABLE or ABSENT data for:
-  - Individual contact names and titles → confidence 0.2 (directories rarely list staff)
-  - Email addresses → confidence 0.1 (almost never shown)
-  - Direct phone numbers → confidence 0.3
-  - Specific technology stack details → confidence 0.3
+  // Decision-maker tier guidance from profile
+  const dmPriorityGuidance = getSection(extractProfile, "Decision Maker Tiers");
 
-Assign HIGH confidence (0.9+) to operational fields that are explicitly shown in
-structured directory fields (not in client reviews or testimonials).
-Assign LOW confidence (0.1–0.3) to contact/personnel fields even if a name appears,
-because it is likely a reviewer or client, not an employee.`;
-  } else if (pageType === "search") {
-    pageTypeGuidance = `
-PAGE TYPE: Web search result snippets
-Data is partial and may be out of date. Assign confidence 0.4–0.6 for any field
-extracted from snippets. Only assign 0.7+ if the snippet explicitly states the value.`;
-  } else {
-    pageTypeGuidance = `
-PAGE TYPE: Company's own website
-This is the most authoritative source for contact names, team members, services
-description, and company culture. Assign confidence 0.9+ for fields explicitly
-stated here. Employee count and pricing are rarely on company websites — assign
-0.0 if not found rather than guessing.`;
-  }
-
-  // Build decision-maker priority guidance based on whether the system prompt
-  // mentions a specific partnership context (e.g. Calibre Consulting = tech partner for agencies)
-  const dmPriorityGuidance = `
-DECISION MAKER SELECTION RULES (apply when extracting contact / decision maker fields):
-
-Step 1 — Identify ALL people mentioned on this page who are employees of THIS company.
-  - EXCLUDE: client names, testimonial authors, case study subjects, partner company staff, reviewers
-  - INCLUDE: founders, owners, C-suite, directors, managers, developers, designers, strategists
-
-Step 2 — Rank candidates by their likelihood to approve a B2B technology partnership:
-  TIER 1 (most likely decision maker — pick first):
-    CEO, Founder, Co-Founder, Owner, President, Managing Director, Managing Partner,
-    Principal, Executive Director, Chief Executive Officer
-  TIER 2 (technical/digital decision maker — pick if no Tier 1 available):
-    CTO, Chief Technology Officer, VP Engineering, VP Technology, VP Digital,
-    Director of Technology, Head of Technology, Senior Developer, Lead Developer,
-    Technical Director, Director of Development, Head of Development,
-    VP Product, Head of Product, Director of Digital
-  TIER 3 (operational decision maker — pick if no Tier 1 or 2 available):
-    COO, VP Operations, Director of Operations, General Manager,
-    VP Client Services, Director of Client Services, Account Director,
-    VP Strategy, Director of Strategy, Head of Strategy
-  TIER 4 (creative/marketing — only if no higher tier available):
-    Creative Director, Art Director, Design Director, Marketing Director,
-    Brand Director, Content Director, Head of Creative
-  TIER 5 (individual contributors — last resort only):
-    Designer, Developer, Project Manager, Account Manager, Coordinator
-
-Step 3 — When multiple people are at the same tier, prefer:
-  - More senior title ("Senior" > "Junior", "Director" > "Manager")
-  - Person with most complete information (name + title both present)
-  - Person listed first on the page
-
-Step 4 — For Decision Maker 1: pick the highest-tier person
-         For Decision Maker 2: pick the second-highest-tier person (different from DM1)
-         For Decision Maker 3: pick the third-highest-tier person (different from DM1 and DM2)
-
-IMPORTANT: A "Creative Director" or "Art Director" should NEVER be chosen over a CEO, CTO,
-or Senior Developer when those roles are available. Technical and executive roles outrank
-creative roles for B2B technology partnership decisions.`;
-
-  // Build job-specific skill context guidance (overrides generic DM tier when provided)
+  // Job-specific skill context guidance (overrides generic DM tier when provided)
   const skillContextGuidance = skillContext ? `
 
 ━━━ JOB-SPECIFIC TARGETING (overrides generic tier rules above) ━━━
@@ -395,7 +406,7 @@ This job is targeting: ${skillContext.icpSummary}
 Goal: ${skillContext.outreachGoal}
 
 Decision maker priority for THIS job (in order):
-${skillContext.targetTitles.map((t, i) => `  ${i + 1}. ${t}`).join("\n")}
+${skillContext.targetTitles.map((t: string, i: number) => `  ${i + 1}. ${t}`).join("\n")}
 
 Fit signals — these indicate a GOOD match (increase confidence for relevant fields):
   ${skillContext.fitSignals.join(", ")}
@@ -403,43 +414,51 @@ Fit signals — these indicate a GOOD match (increase confidence for relevant fi
 Exclusion signals — if these are prominent, deprioritize this company:
   ${skillContext.exclusionSignals.join(", ")}` : "";
 
-  // Build per-field type hints to help the LLM recognize specific field formats
-  const fieldTypeHints = buildFieldTypeHints(sections);
+  // Field format hints from profile (replaces buildFieldTypeHints function)
+  const fieldTypeHints = getSection(extractProfile, "Field Format Hints");
 
-  const userMsg = `${systemPrompt}${pageTypeGuidance}${dmPriorityGuidance}${skillContextGuidance}
+  // Critical extraction rules from profile
+  const extractionRules = getSection(extractProfile, "Critical Extraction Rules")
+    .replace(/\{sourceUrl\}/g, sourceUrl ?? "the target company");
+
+  // Note which fields were already extracted by pre-LLM pass
+  const preLLMNote = Object.entries(preLLMResults)
+    .filter(([, r]) => r.value && r.confidence >= CONFIDENCE_THRESHOLD)
+    .map(([key]) => key);
+  const preLLMSkipNote = preLLMNote.length > 0
+    ? `\nNote: The following fields were already extracted from structured data (JSON-LD/CSS) and do NOT need extraction: ${preLLMNote.join(", ")}\nOnly extract the remaining fields listed below.`
+    : "";
+
+  const userMsg = `${systemPrompt}
+
+${pageTypeGuidance}
+
+${dmPriorityGuidance}${skillContextGuidance}
 
 ━━━ FIELD FORMAT HINTS ━━━
 Use these hints to recognize and correctly extract each field type:
 ${fieldTypeHints}
+${preLLMSkipNote}
 
 ━━━ CRITICAL EXTRACTION RULES ━━━
-1. ANTI-HALLUCINATION: If a field is not found on this page, return value="" and confidence=0.0. NEVER infer, guess, fabricate, or use general knowledge to fill a field. An empty string is always correct; a wrong answer is never acceptable.
-2. SOURCE AWARENESS: Only extract data about the company being profiled (${sourceUrl ? `the company at ${sourceUrl}` : 'the target company'}). Ignore ALL of the following:
-   - Client names and logos in case studies or portfolio sections
-   - Testimonial authors and reviewer names
-   - Partner company names
-   - Award bodies and certification organisations
-   - Any person who is described as a client, customer, or external collaborator
-3. PEOPLE FIELDS: Only include people who are clearly employees, founders, or officers of the target company. If you cannot confirm someone is an employee (not a client or reviewer), return "" for that field.
-4. DOMAIN FIELDS: Return only the bare domain (e.g. "tbkcreative.com"), not the full URL with https:// or trailing paths.
-5. SPECIFICITY: Use exact text from the page. Do not paraphrase, summarise, or reformat unless the field description explicitly asks for a specific format.
-6. NUMERIC RANGES: For fields like employee count, hourly rate, or project size, preserve the exact range format shown on the page (e.g. "10 - 49", "$150 - $199 / hr", "$10,000+"). Do not convert ranges to single numbers.
-7. LOCATION FIELDS: For headquarters or location fields, include the full location as shown (city, state/province, country). Do not abbreviate or truncate.
+${extractionRules}
 
 Page content (source: ${sourceUrl || 'unknown'}):
 ${content.substring(0, 60000)}
 
 For each field, return:
 - "value": exact extracted text, or "" if not found
-- "confidence": 0.0–1.0 (1.0=explicitly stated, 0.7=strongly implied, 0.4=uncertain, 0.0=not found)
+- "confidence": 0.0-1.0 (1.0=explicitly stated, 0.7=strongly implied, 0.4=uncertain, 0.0=not found)
+- "quote_source": exact text snippet from the page that contains this information (10-100 chars), or "" if not found
 
 Example output format:
 ${exampleJson}
 
-Return ONLY valid JSON with these keys: ${sections.map((s) => s.key).join(", ")}`;
+Return ONLY valid JSON with these keys: ${sectionsForLLM.map((s) => s.key).join(", ")}`;
 
   try {
     const response = await queuedLLMCall({
+      model: extractProfile.extractionModel,
       messages: [{ role: "user", content: userMsg }],
       response_format: {
         type: "json_schema",
@@ -449,7 +468,7 @@ Return ONLY valid JSON with these keys: ${sections.map((s) => s.key).join(", ")}
           schema: {
             type: "object",
             properties: props,
-            required: sections.map((s) => s.key),
+            required: sectionsForLLM.map((s) => s.key),
             additionalProperties: false,
           },
         },
@@ -459,101 +478,151 @@ Return ONLY valid JSON with these keys: ${sections.map((s) => s.key).join(", ")}
     const raw = response.choices[0]?.message?.content ?? "{}";
     const parsed = JSON.parse(typeof raw === "string" ? raw : "{}");
 
-    // Build FieldResultMap — ensure all section keys are present
-    const result: FieldResultMap = {};
-    for (const s of sections) {
+    // Build FieldResultMap with deterministic confidence scoring + citation validation
+    const result: FieldResultMap = { ...preLLMResults };
+    const contentLower = content.toLowerCase();
+    const normalizedContent = contentLower.replace(/\s+/g, " ");
+
+    for (const s of sectionsForLLM) {
       const field = parsed[s.key];
+
+      // ── ARRAY SECTION HANDLING ──────────────────────────────────────────
+      if (s.arraySchema) {
+        const items = Array.isArray(field?.items) ? field.items : [];
+        const llmConfidence = typeof field?.confidence === "number"
+          ? Math.max(0, Math.min(1, field.confidence))
+          : items.length > 0 ? 0.5 : 0.0;
+
+        if (items.length === 0) {
+          result[s.key] = { value: "", confidence: 0.0, sourceUrl, extractionMethod: "llm_uncited" };
+          continue;
+        }
+
+        // Validate citations for each array item
+        const validatedItems = items.map((item: Record<string, unknown>) => {
+          const quoteSource = String(item.quote_source ?? "").trim();
+          let citationValid = false;
+          if (quoteSource && quoteSource.length >= 5) {
+            const normalizedQuote = quoteSource.toLowerCase().replace(/\s+/g, " ");
+            citationValid = normalizedContent.includes(normalizedQuote);
+          }
+          // Remove quote_source from the item data (it's metadata, not data)
+          const { quote_source, ...itemData } = item;
+          return { data: itemData, citationValid };
+        });
+
+        // Filter out uncited items for people fields (high hallucination risk)
+        const isPeopleField = /decision.maker|contact|team|people|staff|leadership/i.test(s.key + " " + s.label);
+        const filteredItems = isPeopleField
+          ? validatedItems.filter((i: { data: Record<string, unknown>; citationValid: boolean }) => i.citationValid)
+          : validatedItems;
+
+        if (filteredItems.length === 0 && validatedItems.length > 0) {
+          console.warn(`[agentScraper] ⚠️ All ${validatedItems.length} items for ${s.key} failed citation validation — discarding as likely hallucinations`);
+          result[s.key] = { value: "", confidence: 0.0, sourceUrl, extractionMethod: "llm_uncited" };
+          continue;
+        }
+
+        // Serialize array as JSON string for storage (Excel processor will parse it)
+        const value = JSON.stringify(filteredItems.map((i: { data: Record<string, unknown>; citationValid: boolean }) => i.data));
+        const citedCount = filteredItems.filter((i: { data: Record<string, unknown>; citationValid: boolean }) => i.citationValid).length;
+        const adjustedConfidence = citedCount === filteredItems.length ? 0.90 : Math.min(llmConfidence, 0.70);
+
+        result[s.key] = {
+          value,
+          confidence: adjustedConfidence,
+          sourceUrl,
+          extractionMethod: citedCount > 0 ? "llm_cited" : "llm_uncited",
+        };
+        continue;
+      }
+
+      // ── SCALAR SECTION HANDLING ─────────────────────────────────────────
       const value = String(field?.value ?? "").trim();
-      const confidence = typeof field?.confidence === "number"
+      const quoteSource = String(field?.quote_source ?? "").trim();
+      const llmConfidence = typeof field?.confidence === "number"
         ? Math.max(0, Math.min(1, field.confidence))
-        : value ? 0.5 : 0.0; // fallback: non-empty = 0.5, empty = 0.0
-      result[s.key] = { value, confidence, sourceUrl };
+        : value ? 0.5 : 0.0;
+
+      if (!value) {
+        result[s.key] = { value: "", confidence: 0.0, sourceUrl, extractionMethod: "llm_uncited" };
+        continue;
+      }
+
+      // ── CITATION POST-VALIDATION ────────────────────────────────────────
+      // Check if the quote_source actually exists in the page content.
+      // This is the anti-hallucination check inspired by Perplexity's approach.
+      let citationValid = false;
+      if (quoteSource && quoteSource.length >= 5) {
+        const normalizedQuote = quoteSource.toLowerCase().replace(/\s+/g, " ");
+        citationValid = normalizedContent.includes(normalizedQuote);
+      }
+
+      // ── DETERMINISTIC CONFIDENCE SCORING ────────────────────────────────
+      // Override LLM's self-assessed confidence with source-based scoring.
+      // All thresholds sourced from the active agent profile.
+      const co = extractProfile.confidenceOverrides;
+      let adjustedConfidence: number;
+      let extractionMethod: FieldResult["extractionMethod"];
+
+      if (pageType === "directory") {
+        adjustedConfidence = citationValid ? (co.directory_cited ?? 0.95) : Math.min(llmConfidence, co.directory_uncited ?? 0.85);
+        extractionMethod = citationValid ? "llm_cited" : "llm_uncited";
+      } else if (pageType === "search") {
+        adjustedConfidence = citationValid ? (co.search_cited ?? 0.60) : Math.min(llmConfidence, co.search_uncited ?? 0.45);
+        extractionMethod = "search_snippet";
+      } else {
+        if (citationValid) {
+          adjustedConfidence = Math.min(co.company_cited ?? 0.90, Math.max(llmConfidence, co.company_cited_min ?? 0.85));
+          extractionMethod = "llm_cited";
+        } else if (quoteSource) {
+          adjustedConfidence = Math.min(llmConfidence, co.company_uncited_with_quote ?? 0.40);
+          extractionMethod = "llm_uncited";
+          console.warn(`[agentScraper] ⚠️ Citation mismatch for ${s.key}: quote "${quoteSource.slice(0, 50)}..." not found in page`);
+        } else {
+          adjustedConfidence = Math.min(llmConfidence, co.company_uncited_no_quote ?? 0.50);
+          extractionMethod = "llm_uncited";
+        }
+      }
+
+      result[s.key] = {
+        value,
+        confidence: adjustedConfidence,
+        sourceUrl,
+        extractionMethod,
+        quoteSource: citationValid ? quoteSource : undefined,
+      };
     }
+
+    // Ensure all sections have entries (including pre-LLM results)
+    for (const s of sections) {
+      if (!result[s.key]) {
+        result[s.key] = { value: "", confidence: 0.0, sourceUrl };
+      }
+    }
+
     return result;
   } catch (err) {
     console.error("[agentScraper] extractProfileFields error:", err instanceof Error ? err.message : String(err).slice(0, 200));
-    const empty: FieldResultMap = {};
-    for (const s of sections) empty[s.key] = { value: "", confidence: 0.0, sourceUrl };
-    return empty;
+    // On error, return pre-LLM results (better than nothing)
+    const fallback: FieldResultMap = { ...preLLMResults };
+    for (const s of sections) {
+      if (!fallback[s.key]) fallback[s.key] = { value: "", confidence: 0.0, sourceUrl };
+    }
+    return fallback;
   }
-}
-
-// ---------------------------------------------------------------------------
-// Helper: Build per-field type hints based on field keys and labels
-// ---------------------------------------------------------------------------
-
-function buildFieldTypeHints(sections: AgentSection[]): string {
-  const hints: string[] = [];
-
-  for (const s of sections) {
-    const keyLower = s.key.toLowerCase();
-    const labelLower = s.label.toLowerCase();
-    const combined = keyLower + " " + labelLower;
-
-    // Employee count / company size
-    if (/employee|company.?size|team.?size|staff.?count|headcount|num.?employees/i.test(combined)) {
-      hints.push(`• ${s.key}: Look for employee count ranges like "10-49", "50-249", "250-999", "1,000-9,999" or exact numbers like "45 employees". On directories, this is often in a sidebar or structured info section labeled "Employees", "Company Size", or "Team Size". Return the range or number exactly as shown.`);
-    }
-    // Hourly rate
-    else if (/hourly.?rate|avg.?hourly|billing.?rate|rate.?per.?hour/i.test(combined)) {
-      hints.push(`• ${s.key}: Look for hourly rate ranges like "$150 - $199 / hr", "$100 - $149/hr", "$200+/hr", or "< $25/hr". On directories (Clutch, GoodFirms), this appears in a sidebar or header section. Return the exact range with currency symbol.`);
-    }
-    // Min project size
-    else if (/min.?project|project.?size|minimum.?budget|starting.?price/i.test(combined)) {
-      hints.push(`• ${s.key}: Look for minimum project budget like "$10,000+", "$25,000+", "$5,000+", "$1,000+", "Undisclosed". On directories, this is labeled "Min. Project Size" or "Minimum Budget". Return with dollar sign and plus sign as shown.`);
-    }
-    // Founded year
-    else if (/founded|year.?founded|established|year.?established|since/i.test(combined)) {
-      hints.push(`• ${s.key}: Look for founding year like "Founded 2009", "Est. 2015", "Since 2001", or just a 4-digit year in the company info section. Return ONLY the 4-digit year (e.g. "2009"), not the full phrase.`);
-    }
-    // Location / headquarters
-    else if (/headquarter|hq|location|city|office|address|based.?in/i.test(combined)) {
-      hints.push(`• ${s.key}: Look for city, state/province, and country. Examples: "Austin, TX", "Toronto, Canada", "London, United Kingdom". On directories, check the sidebar for "Headquarters" or "Location". Return the full location string.`);
-    }
-    // Domain / website
-    else if (/domain|website|web.?url|company.?url|homepage/i.test(combined)) {
-      hints.push(`• ${s.key}: Return ONLY the bare domain without protocol or path. Examples: "tbkcreative.com", "example.co.uk". Do NOT include "https://" or "www." prefix or any trailing path like "/about".`);
-    }
-    // Service lines / focus areas
-    else if (/service|focus|specialt|expertise|capability|practice/i.test(combined)) {
-      hints.push(`• ${s.key}: Look for service offerings, focus areas, or specialties. On directories, these often appear with percentage breakdowns like "Web Design (40%), SEO (30%), PPC (30%)". Include the percentages if shown. On company sites, list the main services mentioned.`);
-    }
-    // Decision maker / contact name
-    else if (/decision.?maker|contact.?name|dm\d|key.?person/i.test(combined)) {
-      hints.push(`• ${s.key}: Extract the FULL NAME (first + last) of an employee. Must be an employee/founder/officer of the target company, NOT a client, reviewer, or testimonial author. Return "" if uncertain whether the person is an employee.`);
-    }
-    // Decision maker title
-    else if (/title|role|position|job.?title|dm\d.*title/i.test(combined)) {
-      hints.push(`• ${s.key}: Extract the exact job title as shown on the page (e.g. "CEO", "Founder & Creative Director", "VP of Engineering"). Do not abbreviate or expand titles.`);
-    }
-    // Email
-    else if (/email|e-mail|contact.?email/i.test(combined)) {
-      hints.push(`• ${s.key}: Look for email addresses in contact sections, footer, or team pages. Must be a real email (user@domain.com), not a contact form URL. Return "" if no email is explicitly shown.`);
-    }
-    // Phone
-    else if (/phone|tel|telephone|call/i.test(combined)) {
-      hints.push(`• ${s.key}: Look for phone numbers in contact sections or footer. Include country code if shown. Return the number exactly as displayed.`);
-    }
-    // Rating / reviews
-    else if (/rating|review|score|stars/i.test(combined)) {
-      hints.push(`• ${s.key}: Look for numerical ratings (e.g. "4.8", "4.5/5.0") or review counts (e.g. "47 reviews"). On Clutch, look for the large rating number near the top. Return the exact number.`);
-    }
-    // Description / tagline / about
-    else if (/description|tagline|about|overview|summary|bio/i.test(combined)) {
-      hints.push(`• ${s.key}: Extract the company description or tagline. Prefer the structured "About" or "Summary" section. On directories, use the company description, not individual review text.`);
-    }
-  }
-
-  if (hints.length === 0) {
-    return "(No specific format hints — extract values exactly as they appear on the page.)";
-  }
-
-  return hints.join("\n");
 }
 
 // ---------------------------------------------------------------------------
 // 3. REFLECT — merge two FieldResultMaps, keeping the higher-confidence value
 // ---------------------------------------------------------------------------
+
+/** Extraction method reliability ranking — sourced from active agent profile. */
+const METHOD_RANK: Record<string, number> = getProfile().methodRank;
+
+function getMethodRank(method?: string): number {
+  return METHOD_RANK[method ?? "llm_uncited"] ?? 1;
+}
 
 function mergeFieldResults(base: FieldResultMap, incoming: FieldResultMap): FieldResultMap {
   const merged: FieldResultMap = { ...base };
@@ -570,8 +639,25 @@ function mergeFieldResults(base: FieldResultMap, incoming: FieldResultMap): Fiel
     // If existing is empty, use incoming
     if (!existingVal) { merged[key] = incomingResult; continue; }
 
-    // Both have content — prefer higher confidence
+    // Both have content — prefer by: (1) extraction method reliability, (2) confidence, (3) length
+    const incomingRank = getMethodRank(incomingResult.extractionMethod);
+    const existingRank = getMethodRank(existing.extractionMethod);
+
+    // Deterministic source always beats LLM-inferred
+    if (incomingRank > existingRank) {
+      merged[key] = incomingResult;
+      continue;
+    }
+    if (existingRank > incomingRank) continue;
+
+    // Same method type — prefer higher confidence
     if (incomingResult.confidence > existing.confidence) {
+      merged[key] = incomingResult;
+      continue;
+    }
+
+    // Same confidence — prefer cited over uncited
+    if (incomingResult.quoteSource && !existing.quoteSource) {
       merged[key] = incomingResult;
       continue;
     }
@@ -589,7 +675,7 @@ function mergeFieldResults(base: FieldResultMap, incoming: FieldResultMap): Fiel
       // Combine, keeping the higher-confidence source attribution
       const combinedValue = `${existingVal}; ${incomingVal}`;
       const combinedConf = Math.max(existing.confidence, incomingResult.confidence);
-      merged[key] = { value: combinedValue, confidence: combinedConf, sourceUrl: existing.sourceUrl };
+      merged[key] = { value: combinedValue, confidence: combinedConf, sourceUrl: existing.sourceUrl, extractionMethod: existing.extractionMethod };
     }
   }
   return merged;
@@ -739,12 +825,10 @@ function extractLinksFromContent(content: string, baseUrl: string): string[] {
   const links: string[] = [];
   const seen = new Set<string>();
 
-  // Noise domains: images, CDNs, social media, and all known directory domains.
-  // Links to these are deprioritised or filtered out.
+  // Noise domains sourced from agent profile + directory extractor domains
+  const linkProfile = getProfile();
   const noiseDomains = [
-    'shgstatic.com', 'cloudfront.net', 'amazonaws.com', 'googleusercontent.com',
-    'facebook.com', 'twitter.com', 'x.com', 'linkedin.com', 'instagram.com',
-    'youtube.com', 'tiktok.com', 'pinterest.com',
+    ...linkProfile.noiseDomains,
     ...DIRECTORY_EXTRACTORS.flatMap(e => e.domains),
   ];
   const isNoise = (u: string) => {
@@ -831,18 +915,58 @@ function extractLinksFromContent(content: string, baseUrl: string): string[] {
 // 5. Fetch a URL and return content + extracted links
 // ---------------------------------------------------------------------------
 
-async function fetchAndExtract(url: string): Promise<{ content: string; links: string[] } | null> {
+async function fetchAndExtract(url: string): Promise<{ content: string; links: string[]; rawHtml?: string } | null> {
+  // Check shared cache first (cross-firm deduplication)
+  const cached = getCachedFetch(url);
+  if (cached !== undefined) {
+    if (cached) console.log(`[agentScraper] Cache hit: ${url} (${cached.content.length} chars)`);
+    return cached;
+  }
+  let rawHtmlFromPuppeteer: string | null = null;
+
   const result = await fetchWebsiteContentHybrid(url, async () => {
     try {
       const { scrapeWebsite } = await import("./scraper");
       const r = await scrapeWebsite({ url, cache: true, cacheTTL: 7 * 24 * 60 * 60, timeout: 45000 });
-      return r.success ? r.text || r.html || null : null;
+      if (r.success) {
+        // Capture raw HTML for pre-LLM extraction (JSON-LD, CSS patterns)
+        rawHtmlFromPuppeteer = r.html || null;
+        return r.text || r.html || null;
+      }
+      return null;
     } catch { return null; }
   });
 
-  if (!result?.success || !result.content) return null;
+  if (!result?.success || !result.content) {
+    setCachedFetch(url, null); // Cache failed fetches too (avoid retrying blocked URLs)
+    return null;
+  }
   const links = extractLinksFromContent(result.content, url);
-  return { content: result.content, links };
+
+  // If Puppeteer was used, we already have raw HTML.
+  // If Jina was used (markdown), try a lightweight HTML fetch for JSON-LD extraction.
+  let rawHtml: string | undefined = rawHtmlFromPuppeteer ?? undefined;
+  if (!rawHtml && result.source === "jina") {
+    try {
+      const resp = await fetch(url, {
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; SmartScraper/1.0)" },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (resp.ok) {
+        const html = await resp.text();
+        // Only keep if it has JSON-LD or structured data (worth the overhead)
+        if (html.includes("application/ld+json") || html.includes("itemtype")) {
+          rawHtml = html;
+        }
+      }
+    } catch {
+      // Non-fatal — we'll still have the markdown content for LLM extraction
+    }
+  }
+
+  const fetchResult = { content: result.content, links, rawHtml };
+  setCachedFetch(url, fetchResult);
+  return fetchResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -875,7 +999,7 @@ export async function scrapeUrl(
   let companyName = "";
   try { companyName = new URL(url).hostname.replace(/^www\./, "").split(".")[0]; } catch { companyName = url; }
 
-  // Agent state — pre-seed with Apollo org hints when available
+  // Agent state — pre-seed with initial field values when available
   let fieldResults: FieldResultMap = {};
   for (const s of sections) {
     const hint = initialFieldValues?.[s.key];
@@ -883,7 +1007,7 @@ export async function scrapeUrl(
   }
   if (initialFieldValues && Object.keys(initialFieldValues).length > 0) {
     const preFilledCount = Object.keys(initialFieldValues).length;
-    console.log(`[agentScraper] Pre-seeded ${preFilledCount} fields from Apollo org data`);
+    console.log(`[agentScraper] Pre-seeded ${preFilledCount} fields from initial values`);
   }
 
   const visitedUrls = new Set<string>();
@@ -891,6 +1015,8 @@ export async function scrapeUrl(
   let hopsUsed = 0;
   const webSearchedFields = new Set<string>();
   const extras: Record<string, unknown> = {};
+  const failedDomains = new Map<string, number>(); // Track fetch failures per domain
+  let webSearchAttemptCount = 0; // For query diversification
 
   // ── STEP 0: Fetch the primary URL first (always) ──────────────────────────
   console.log(`[agentScraper] Fetching primary URL: ${url}`);
@@ -917,6 +1043,7 @@ export async function scrapeUrl(
         primary.content, sections, systemPrompt, url,
         isDirectoryUrl(url) ? "directory" : "company",
         skillContext,
+        primary.rawHtml,
       );
       fieldResults = mergeFieldResults(fieldResults, extracted);
       const filled = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD).length;
@@ -932,37 +1059,72 @@ export async function scrapeUrl(
     if (isDirectoryUrl(url)) {
       const companyWebsite = extractCompanyWebsiteFromDirectory(url, primary.content);
       if (companyWebsite && !visitedUrls.has(companyWebsite)) {
-        // Inject at front so it is the first link the planner sees
         availableLinks = [companyWebsite, ...availableLinks.filter(l => l !== companyWebsite)];
         console.log(`[agentScraper] 📌 Directory-exit: injected company website at top of queue: ${companyWebsite}`);
+      } else if (!companyWebsite) {
+        // Directory-exit fallback: regex extraction failed, use web search to find real site
+        console.log(`[agentScraper] 📌 Directory-exit failed — searching for company website`);
+        try {
+          const fallbackResults = await webSearch(`${companyName} official website`, 3);
+          const dirDomains = DIRECTORY_EXTRACTORS.flatMap(e => e.domains);
+          const realSite = fallbackResults.find(r => !dirDomains.some(d => r.url.includes(d)));
+          if (realSite && !visitedUrls.has(realSite.url)) {
+            availableLinks = [realSite.url, ...availableLinks];
+            console.log(`[agentScraper] 📌 Directory fallback: found company website via search → ${realSite.url}`);
+          }
+        } catch { /* Non-fatal */ }
       }
     }
 
-    // ── PEOPLE BOOST: inject common team page paths when people fields are weak ──
-    // After the primary page, if sections need people/contact data and none was
-    // found, proactively add standard team page URLs so the planner sees them first.
-    const needsPeopleData = sections.some(s =>
-      /decision.maker|contact|ceo|founder|owner|director|manager|team|people|staff|leadership/i.test(
-        s.key + " " + s.label,
-      ),
-    );
-    if (needsPeopleData) {
-      const peopleConfident = sections
-        .filter(s => /decision.maker|contact|ceo|founder|owner|director|manager|team|people|staff|leadership/i.test(s.key + " " + s.label))
-        .every(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD);
+    // ── MAP PHASE: Structured URL Discovery ───────────────────────────────────
+    // Replace the ad-hoc "people boost" with a structured map phase that
+    // classifies all available links by content type and prioritizes them.
+    const mappedUrls = mapUrlsHeuristic(availableLinks, url, sections);
+    const hasTeamUrl = mappedUrls.some(m => m.category === "team");
 
-      if (!peopleConfident) {
-        try {
-          const origin = new URL(url).origin;
-          const teamPaths = ["/team", "/about/team", "/our-team", "/people", "/leadership", "/executives", "/management", "/meet-the-team", "/about"];
-          const teamCandidates = teamPaths
-            .map(p => origin + p)
-            .filter(u => !visitedUrls.has(u) && !availableLinks.includes(u));
-          if (teamCandidates.length > 0) {
-            availableLinks = [...teamCandidates, ...availableLinks];
-            console.log(`[agentScraper] 👥 People boost: injected ${teamCandidates.length} team page candidates`);
-          }
-        } catch { /* ignore URL parse error */ }
+    // If no team URLs found heuristically but we need people data, try:
+    // 1. Generate candidate team page URLs
+    // 2. Use LLM-assisted mapping for ambiguous navigation
+    const scrapeProfile = getProfile();
+    const peoplePat = new RegExp(scrapeProfile.peopleFieldPattern, "i");
+    const needsPeopleData = sections.some(s => peoplePat.test(s.key + " " + s.label));
+    const peopleConfident = needsPeopleData && sections
+      .filter(s => peoplePat.test(s.key + " " + s.label))
+      .every(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD);
+
+    if (needsPeopleData && !peopleConfident) {
+      if (!hasTeamUrl) {
+        // Inject candidate team page URLs
+        const teamCandidates = generateTeamPageCandidates(url)
+          .filter(u => !visitedUrls.has(u) && !availableLinks.includes(u));
+        if (teamCandidates.length > 0) {
+          availableLinks = [...teamCandidates, ...availableLinks];
+          console.log(`[agentScraper] 🗺️ Map phase: injected ${teamCandidates.length} team page candidates`);
+        }
+
+        // If still no clear team URL, use LLM-assisted mapping (cheap, gpt-5-nano)
+        if (availableLinks.length > 5) {
+          try {
+            const llmMapped = await mapUrlsWithLLM(availableLinks, url, sections, companyName);
+            const teamFromLLM = llmMapped.filter(m => m.category === "team" || m.category === "about");
+            if (teamFromLLM.length > 0) {
+              const newUrls = teamFromLLM
+                .map(m => m.url)
+                .filter(u => !visitedUrls.has(u) && !availableLinks.includes(u));
+              availableLinks = [...newUrls, ...availableLinks];
+              console.log(`[agentScraper] 🗺️ Map phase (LLM): identified ${teamFromLLM.length} team/about pages`);
+            }
+          } catch { /* Non-fatal — fall back to regular agent loop */ }
+        }
+      } else {
+        // Re-order available links based on map results (team/about URLs first)
+        const prioritized = mappedUrls
+          .filter(m => !visitedUrls.has(m.url))
+          .sort((a, b) => a.priority - b.priority)
+          .map(m => m.url);
+        const remaining = availableLinks.filter(u => !prioritized.includes(u));
+        availableLinks = [...prioritized, ...remaining];
+        console.log(`[agentScraper] 🗺️ Map phase: re-prioritized ${prioritized.length} URLs (team/about first)`);
       }
     }
   }
@@ -985,6 +1147,7 @@ export async function scrapeUrl(
       maxHops,
       skillContext,
       webSearchedFields,
+      failedDomains,
     );
 
     console.log(`[agentScraper] PLAN [hop ${hopsUsed}/${maxHops}]: ${plan.action} — ${plan.reason}`);
@@ -996,13 +1159,18 @@ export async function scrapeUrl(
       if (isCancelled?.()) throw new Error("JOB_CANCELLED");
 
       const fetched = await fetchAndExtract(plan.target);
-      hopsUsed++;
 
       if (!fetched) {
-        console.warn(`[agentScraper] ⚠️ fetch_url failed: ${plan.target}`);
+        console.warn(`[agentScraper] ⚠️ fetch_url failed: ${plan.target} — not counting as hop`);
         availableLinks = availableLinks.filter(l => l !== plan.target);
-        continue;
+        // Track failed domain for intelligence
+        try {
+          const failedHost = new URL(plan.target).hostname;
+          failedDomains.set(failedHost, (failedDomains.get(failedHost) ?? 0) + 1);
+        } catch { /* ignore invalid URL */ }
+        continue; // Don't increment hopsUsed — failed fetches shouldn't waste hops
       }
+      hopsUsed++;
 
       visitedUrls.add(plan.target);
       availableLinks = [...new Set([...availableLinks, ...fetched.links])].filter(l => !visitedUrls.has(l));
@@ -1022,7 +1190,7 @@ export async function scrapeUrl(
       if (!skipGenericForFetch) {
         if (isCancelled?.()) throw new Error("JOB_CANCELLED");
         const fetchPageType = isDirectoryUrl(plan.target) ? "directory" : "company";
-        const extracted = await extractProfileFields(fetched.content, sections, systemPrompt, plan.target, fetchPageType, skillContext);
+        const extracted = await extractProfileFields(fetched.content, sections, systemPrompt, plan.target, fetchPageType, skillContext, fetched.rawHtml);
 
         // REFLECT — merge, keeping higher-confidence values
         fieldResults = mergeFieldResults(fieldResults, extracted);
@@ -1035,12 +1203,12 @@ export async function scrapeUrl(
 
       console.log(`[agentScraper] 🔍 Web search: "${plan.query}"`);
       const searchResults = await webSearch(plan.query, 5);
-      hopsUsed++;
 
       if (searchResults.length === 0) {
-        console.warn(`[agentScraper] Web search returned no results`);
-        continue;
+        console.warn(`[agentScraper] Web search returned no results — not counting as hop`);
+        continue; // Don't increment hopsUsed — empty searches shouldn't waste hops
       }
+      hopsUsed++;
 
       // Fetch the top search result that hasn't been visited
       const topResult = searchResults.find(r => !visitedUrls.has(r.url));
@@ -1060,7 +1228,7 @@ export async function scrapeUrl(
         availableLinks = [...new Set([...availableLinks, ...fetched.links])].filter(l => !visitedUrls.has(l));
         if (isCancelled?.()) throw new Error("JOB_CANCELLED");
         const searchPageType = isDirectoryUrl(topResult.url) ? "directory" : "company";
-        const extracted = await extractProfileFields(fetched.content, sections, systemPrompt, topResult.url, searchPageType, skillContext);
+        const extracted = await extractProfileFields(fetched.content, sections, systemPrompt, topResult.url, searchPageType, skillContext, fetched.rawHtml);
         fieldResults = mergeFieldResults(fieldResults, extracted);
       }
 

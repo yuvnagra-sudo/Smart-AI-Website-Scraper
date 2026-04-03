@@ -18,7 +18,7 @@ import { generateResultsFile } from "./generateResultsService";
 import { createCSVExport } from "./csvExporter";
 import { updateJobProgressSafely, incrementJobProcessedCountSafely } from "./batchProcessor";
 import { ConnectionKeepAlive } from "./dbConnectionManager";
-import { isJobCancelled, isJobPaused } from "./_core/jobCancellation";
+import { isJobCancelled, isJobPaused, markJobCancelled } from "./_core/jobCancellation";
 import { VCEnrichmentService } from "./vcEnrichment";
 import { getOpenAIStats } from "./_core/openaiLLM";
 import { queuedLLMCall } from "./_core/llmQueue";
@@ -26,9 +26,8 @@ import { classifyDecisionMakerTier } from './decisionMakerTiers';
 import { calculateRecencyScore } from './portfolioIntelligence';
 import { canResumeJob, prepareJobForResume, getResumeProgress } from "./resumeJob";
 import { extractDirectory } from "./directoryExtractor";
-import { mergeApolloContacts, classifyTiersInPlace } from "./peopleEnrichment";
-import type { EnrichableContact, ApolloOrganization } from "./peopleEnrichment";
 import { webSearch } from "./_core/webSearch";
+import { getProfile } from "./agentConfig";
 import { nanoid } from "nanoid";
 import { saveFirmImmediately, getProcessedFirms } from "./incrementalSave";
 
@@ -312,7 +311,6 @@ Infer the following from the user's description. These are used to calibrate the
 - fitSignals: 2-4 observable signals ON THE WEBSITE that indicate a good match (e.g. "SaaS pricing page visible", "active engineering team > 5 people", "Series A-B funding mentioned")
 - exclusionSignals: 2-4 observable signals that mean the company should be deprioritized or skipped (e.g. "agency or consultancy", "less than 10 employees", "crypto/web3 focus")
 - targetTitles: 3-6 job titles most likely to be the right decision maker FOR THIS SPECIFIC USE CASE in priority order. Be specific to the domain — don't default to "CEO" if a more relevant role exists.
-- apolloSeniorities: Apollo.io seniority labels that map to targetTitles. ONLY use these exact values: "c_suite", "vp", "director", "manager", "individual_contributor", "partner", "owner"
 - outreachGoal: One sentence explaining WHY these companies are being researched and what action will follow
 
 ━━━ RETURN FORMAT ━━━
@@ -326,7 +324,6 @@ Return ONLY valid JSON (no markdown, no code fences):
     "fitSignals": ["..."],
     "exclusionSignals": ["..."],
     "targetTitles": ["..."],
-    "apolloSeniorities": ["..."],
     "outreachGoal": "..."
   }
 }`;
@@ -384,10 +381,9 @@ USER REQUEST:
                             fitSignals: { type: "array", items: { type: "string" } },
                             exclusionSignals: { type: "array", items: { type: "string" } },
                             targetTitles: { type: "array", items: { type: "string" } },
-                            apolloSeniorities: { type: "array", items: { type: "string" } },
                             outreachGoal: { type: "string" },
                           },
-                          required: ["icpSummary", "fitSignals", "exclusionSignals", "targetTitles", "apolloSeniorities", "outreachGoal"],
+                          required: ["icpSummary", "fitSignals", "exclusionSignals", "targetTitles", "outreachGoal"],
                           additionalProperties: false,
                         },
                       },
@@ -468,7 +464,6 @@ USER REQUEST:
             fitSignals:       tb?.fitSignals        ? tb.fitSignals.split(",").map((s: string) => s.trim()).filter(Boolean)        : (parsedSC.fitSignals        ?? []),
             exclusionSignals: tb?.exclusionSignals  ? tb.exclusionSignals.split(",").map((s: string) => s.trim()).filter(Boolean)  : (parsedSC.exclusionSignals  ?? []),
             targetTitles:     tb?.targetTitles      ? tb.targetTitles.split(",").map((s: string) => s.trim()).filter(Boolean)      : (parsedSC.targetTitles      ?? []),
-            apolloSeniorities: parsedSC.apolloSeniorities ?? [],
             outreachGoal:     tb?.outreachGoal      || parsedSC.outreachGoal     || "",
           };
 
@@ -569,9 +564,9 @@ Always call the submit_brief tool — it is your only way to respond.`;
             tool_choice: { type: "tool", name: "submit_brief" },
             messages: apiMessages,
           });
-          const toolUse = response.content.find((b): b is { type: "tool_use"; name: string; input: any } => b.type === "tool_use");
-          if (!toolUse) throw new Error("Claude did not call submit_brief tool");
-          toolInput = toolUse.input;
+          const toolUse = response.content.find((b) => b.type === "tool_use");
+          if (!toolUse || toolUse.type !== "tool_use") throw new Error("Claude did not call submit_brief tool");
+          toolInput = (toolUse as any).input;
         } catch (err: any) {
           const status = err?.status ?? err?.statusCode ?? "?";
           const body = err?.message ?? String(err);
@@ -1212,168 +1207,6 @@ function classifyAgentError(err: unknown): string {
 // Agentic job processor (custom sections mode)
 // ---------------------------------------------------------------------------
 
-/**
- * Uses an LLM to select the best contact(s) from Apollo's list based on the
- * section description and skillContext targetTitles.
- *
- * Apollo may return 5-20 people; this step picks the most relevant one(s) and
- * formats them as a human-readable string for the output column.
- */
-/**
- * Attempts to recover the full last name for an Apollo contact via a SERP lookup.
- * Only fires when the last name looks like an obfuscated initial (e.g. "F.").
- * Falls back silently to the original formatted string if no full name is found.
- *
- * @param formatted  The string returned by selectBestApolloContacts, e.g. "Andrew P. — Owner"
- * @param companyName  Used in the search query to anchor the person to this company
- * @returns  Enriched string e.g. "Andrew Polanski — Owner", or original if lookup fails
- */
-async function resolveFullNamesInResult(
-  formatted: string,
-  companyName: string,
-): Promise<string> {
-  if (!formatted) return formatted;
-
-  // Regex: match "FirstName I. — Title" patterns (initial = single capital letter + ".")
-  const initialPattern = /^([A-Z][a-z]+)\s([A-Z])\.\s*—\s*(.+)$/;
-  const match = formatted.match(initialPattern);
-  if (!match) return formatted; // no obfuscated initial → nothing to resolve
-
-  const [, firstName, initial, title] = match;
-  const query = `"${firstName}" "${companyName}" ${title.toLowerCase()}`;
-
-  try {
-    const results = await webSearch(query, 5);
-    if (results.length === 0) return formatted;
-
-    // Build a short context from the top result snippets
-    const snippets = results
-      .slice(0, 3)
-      .map((r) => r.snippet ?? r.title ?? "")
-      .filter(Boolean)
-      .join("\n");
-
-    const llmResponse = await queuedLLMCall({
-      messages: [
-        {
-          role: "user",
-          content: `You are looking for the full last name of a person named "${firstName}" who works at "${companyName}" as ${title}.
-
-Their last name starts with the letter "${initial}".
-
-Search result snippets:
-${snippets}
-
-If you can clearly identify their full last name from the snippets above, return ONLY the last name (e.g. "Polanski").
-If you cannot determine the last name with confidence, return exactly: unknown`,
-        },
-      ],
-    });
-
-    const lastName = llmResponse.choices[0]?.message?.content?.trim() ?? "";
-    if (!lastName || lastName.toLowerCase() === "unknown" || lastName.length < 2) {
-      return formatted;
-    }
-
-    // Sanity check: first letter must match the initial
-    if (lastName.charAt(0).toUpperCase() !== initial.toUpperCase()) return formatted;
-
-    const enriched = `${firstName} ${lastName} — ${title}`;
-    console.log(`[processAgentJob] Resolved full name: ${firstName} ${initial}. → ${firstName} ${lastName}`);
-    return enriched;
-  } catch {
-    return formatted; // never block on resolution failure
-  }
-}
-
-async function selectBestApolloContacts(
-  contacts: EnrichableContact[],
-  peopleSec: AgentSection,
-  skillContext: SkillContext | null | undefined,
-  companyName: string,
-): Promise<string> {
-  if (contacts.length === 0) return "";
-
-  // Format the candidate list for the LLM
-  const candidateList = contacts
-    .map((c, i) => `${i + 1}. ${c.name} — ${c.title}${c.decisionMakerTier ? ` (${c.decisionMakerTier})` : ""}`)
-    .join("\n");
-
-  const targetTitlesHint = skillContext?.targetTitles?.length
-    ? `Priority titles: ${skillContext.targetTitles.join(", ")}`
-    : "";
-
-  const prompt = `You are selecting the best contact(s) from an Apollo.io people search result.
-
-Company: ${companyName}
-Field being filled: "${peopleSec.label}"
-Field description: ${peopleSec.desc}
-${targetTitlesHint}
-
-Apollo returned these contacts:
-${candidateList}
-
-TASK: Select the most relevant contact(s) for the field above.
-- If the field asks for ONE person (e.g. "CEO", "Key Decision Maker"), return the single best match.
-- If the field asks for MULTIPLE people (e.g. "Leadership Team", "Key Contacts"), return up to 3 best matches.
-- Format each selected contact as: "Name — Title"
-- If multiple, separate with semicolons: "Name1 — Title1; Name2 — Title2"
-- If none of the contacts are relevant, return an empty string.
-
-Return ONLY the formatted result string, nothing else.`;
-
-  try {
-    const response = await queuedLLMCall({
-      messages: [{ role: "user", content: prompt }],
-    });
-    const result = response.choices[0]?.message?.content?.trim() ?? "";
-    console.log(`[processAgentJob] Apollo contact selected for ${companyName}: ${result.slice(0, 100)}`);
-    return result;
-  } catch (err) {
-    console.warn(`[processAgentJob] Apollo contact selection LLM failed for ${companyName}:`, err);
-    // Fallback: return the first Tier 1 contact, or the first contact
-    const best = contacts.find(c => c.decisionMakerTier === "Tier 1") ?? contacts[0];
-    return best ? `${best.name} — ${best.title}` : "";
-  }
-}
-
-/**
- * Maps Apollo organization data to section keys using fuzzy label matching.
- * Pre-seeds fieldResults at confidence 0.7 so the scraper treats Apollo data
- * as a baseline it can override with higher-confidence website data.
- */
-function buildApolloOrgHints(
-  org: ApolloOrganization,
-  sections: AgentSection[],
-): Record<string, { value: string; confidence: number }> {
-  const hints: Record<string, { value: string; confidence: number }> = {};
-
-  for (const s of sections) {
-    const key = s.key.toLowerCase();
-    const label = s.label.toLowerCase();
-    const combined = key + " " + label;
-
-    if (/company.?size|employee|headcount|team.?size|staff.?size|num.?employee|size/i.test(combined)) {
-      const val = org.employeeRange ?? (org.employeeCount ? String(org.employeeCount) : null);
-      if (val) hints[s.key] = { value: val, confidence: 0.7 };
-    } else if (/industry|vertical|sector|niche/i.test(combined)) {
-      if (org.industry) hints[s.key] = { value: org.industry, confidence: 0.65 };
-    } else if (/location|hq|headquarter|city|country|region/i.test(combined)) {
-      const loc = [org.city, org.country].filter(Boolean).join(", ");
-      if (loc) hints[s.key] = { value: loc, confidence: 0.65 };
-    } else if (/founded|established|start.?year|year.?founded/i.test(combined)) {
-      if (org.foundedYear) hints[s.key] = { value: String(org.foundedYear), confidence: 0.65 };
-    } else if (/description|about|overview|summary|what.*(do|is)/i.test(combined)) {
-      if (org.shortDescription) hints[s.key] = { value: org.shortDescription, confidence: 0.5 };
-    }
-  }
-
-  if (Object.keys(hints).length > 0) {
-    console.log(`[processAgentJob] Apollo org hints: ${Object.keys(hints).join(", ")}`);
-  }
-  return hints;
-}
-
 export async function processAgentJob(jobId: number) {
   const keepAlive = new ConnectionKeepAlive();
   try {
@@ -1395,16 +1228,37 @@ export async function processAgentJob(jobId: number) {
     const firms = await parseInputExcel(job.inputFileUrl, columnMapping);
     console.log(`[processAgentJob] Job ${jobId}: ${firms.length} URLs, ${sections.length} sections`);
 
-    const profileResults: Array<Record<string, string>> = [];
-    const fieldResultsMapArr: Array<{ companyName: string; websiteUrl: string; fieldResults: import("./agentScraper").FieldResultMap }> = [];
+    let profileResults: Array<Record<string, string>> = [];
+    let fieldResultsMapArr: Array<{ companyName: string; websiteUrl: string; fieldResults: import("./agentScraper").FieldResultMap }> = [];
     const collectedUrls: AgentDirectoryEntry[] = [];
 
     // Resume support: skip firms already processed in a prior run (paused/failed).
     // processedCount is incremented after every firm so it's a reliable checkpoint.
     const resumeFrom = job.processedCount ?? 0;
     let processed = resumeFrom;
+
+    // ── CHECKPOINT RECOVERY ──────────────────────────────────────────────────
+    // On resume, try to load saved intermediate results from the JSON checkpoint.
+    // This avoids re-running the Excel export from scratch on resume and preserves
+    // all previously extracted data (field results + profile data) exactly.
     if (resumeFrom > 0) {
       console.log(`[processAgentJob] Resuming from firm ${resumeFrom + 1} (${firms.length - resumeFrom} remaining)`);
+      try {
+        const checkpointKey = `enrichment/${job.userId}/${jobId}-checkpoint.json`;
+        const { url: checkpointUrl } = await storageGet(checkpointKey);
+        const checkpointResp = await fetch(checkpointUrl);
+        if (checkpointResp.ok) {
+          const checkpoint = await checkpointResp.json() as {
+            profileResults: Array<Record<string, string>>;
+            fieldResultsMapArr: Array<{ companyName: string; websiteUrl: string; fieldResults: import("./agentScraper").FieldResultMap }>;
+          };
+          profileResults = checkpoint.profileResults ?? [];
+          fieldResultsMapArr = checkpoint.fieldResultsMapArr ?? [];
+          console.log(`[processAgentJob] ✅ Loaded checkpoint: ${profileResults.length} profiles, ${fieldResultsMapArr.length} field results`);
+        }
+      } catch {
+        console.log(`[processAgentJob] No checkpoint found — resuming with empty results (processed firms will be re-exported)`);
+      }
     }
 
     // Hard cap: never process more firms than the original input file contained.
@@ -1429,10 +1283,22 @@ export async function processAgentJob(jobId: number) {
 
     const savePartialResults = async () => {
       try {
+        // Save Excel for user download
         const partialBuffer = createAgentOutputExcel(sections, profileResults, collectedUrls, fieldResultsMapArr, originalColumns);
         const partialKey = `enrichment/${job.userId}/${jobId}-results.xlsx`;
         const { url: partialUrl } = await storagePut(partialKey, partialBuffer, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
         await updateEnrichmentJob(jobId, { outputFileKey: partialKey, outputFileUrl: partialUrl });
+
+        // Save JSON checkpoint for crash recovery — contains the raw data needed
+        // to resume without re-extracting. Decoupled from the Excel formatting.
+        const checkpointData = JSON.stringify({
+          profileResults,
+          fieldResultsMapArr,
+          savedAt: new Date().toISOString(),
+          processedCount: processed,
+        });
+        const checkpointKey = `enrichment/${job.userId}/${jobId}-checkpoint.json`;
+        await storagePut(checkpointKey, checkpointData, "application/json");
       } catch (err) {
         console.warn(`[processAgentJob] Partial save failed (non-fatal):`, err);
       }
@@ -1440,9 +1306,9 @@ export async function processAgentJob(jobId: number) {
 
     const runWorker = async () => {
       while (firmQueue.length > 0) {
-        // Check pause at the top of every iteration — stops cleanly without adding
-        // empty rows for unprocessed firms (unlike cancel, which uses scrapeUrl's check).
-        if (isJobPaused(jobId)) break;
+        // Check pause/cancel at the top of every iteration — stops cleanly without
+        // adding empty rows for unprocessed firms.
+        if (isJobPaused(jobId) || isJobCancelled(jobId)) break;
 
         const firm = firmQueue.shift();
         if (!firm) break;
@@ -1457,93 +1323,34 @@ export async function processAgentJob(jobId: number) {
           .replace(/\{websiteUrl\}/g, firm.websiteUrl);
 
         try {
-          // ── STEP 1: Apollo first ──────────────────────────────────────────────
-          // Search for contacts AND org data via Apollo before touching the website.
-          // People search is free (no email-reveal credits consumed).
-          // Org data (employee count, industry, location) is embedded in the same response.
-          // Falls back to broad seniorities when none are explicitly configured.
-          let apolloContacts: EnrichableContact[] = [];
-          const peopleSec = sections.find(s =>
-            /team|people|contact|staff|member|decision.?maker/i.test(s.key + " " + s.label)
-          );
-          const apolloSenioritiesToUse = skillContext?.apolloSeniorities?.length
-            ? skillContext.apolloSeniorities
-            : ["c_suite", "owner", "partner", "director"];
-
-          let apolloOrg: ApolloOrganization | null = null;
-          if (peopleSec) {
-            try {
-              apolloOrg = await mergeApolloContacts(apolloContacts, firm.websiteUrl, undefined, apolloSenioritiesToUse, firm.companyName);
-              classifyTiersInPlace(apolloContacts);
-              if (apolloContacts.length > 0) {
-                console.log(`[processAgentJob] LinkedIn: ${apolloContacts.length} contacts for ${firm.companyName} — skipping contacts scrape`);
-              }
-            } catch (apolloErr) {
-              console.warn(`[processAgentJob] LinkedIn lookup failed for ${firm.websiteUrl}:`, apolloErr);
-            }
-          }
-
-          // Build initial field hints from Apollo org data so the scraper can
-          // enhance/override them rather than searching from scratch.
-          const apolloOrgHints = apolloOrg ? buildApolloOrgHints(apolloOrg, sections) : {};
-
-          // ── STEP 2: Scrape website for non-people sections ───────────────────
-          // If Apollo found contacts, exclude the people section from scraping.
-          // If Apollo found nobody, keep it so the website scrape tries to find people.
-          // Apollo org hints are passed as initial values — scraper overrides with
-          // higher confidence when the website has better data.
-          const sectionsToScrape = (apolloContacts.length > 0 && peopleSec)
-            ? sections.filter(s => s.key !== peopleSec.key)
-            : sections;
-
+          // ── Scrape website for all sections ─────────────────────────────────
           let profileData: Record<string, string> = {};
           let fieldResultsForRow: FieldResultMap | undefined;
-          let stats: ScrapeStats = { fieldsTotal: sections.length, fieldsFilled: apolloContacts.length > 0 && peopleSec ? 1 : 0, emptyFields: [] };
+          let stats: ScrapeStats = { fieldsTotal: sections.length, fieldsFilled: 0, emptyFields: [] };
           let isDirectoryResult = false;
 
-          if (sectionsToScrape.length > 0) {
-            const scrapeResult = await scrapeUrl(
-              firm.websiteUrl,
-              rowObjective,
-              sectionsToScrape,
-              resolvedPrompt,
-              7, // maxHops — increased from 5 to allow deeper team/contact page discovery
-              () => isJobCancelled(jobId),
-              undefined, // callbacks
-              skillContext,
-              apolloOrgHints,
-            );
+          const scrapeResult = await scrapeUrl(
+            firm.websiteUrl,
+            rowObjective,
+            sections,
+            resolvedPrompt,
+            getProfile().maxHops,
+            () => isJobCancelled(jobId),
+            undefined, // callbacks
+            skillContext,
+          );
 
-            if (scrapeResult.type === "directory") {
-              // Dead-code safety net — scrapeUrl always returns profile for agent jobs.
-              console.warn(`[processAgentJob] Unexpected directory result for ${firm.websiteUrl} — skipping`);
-              insertJobLog({ jobId, url: firm.websiteUrl, companyName: firm.companyName, status: "failed", fieldsTotal: 0, fieldsFilled: 0, durationMs: Date.now() - startMs }).catch(() => {});
-              isDirectoryResult = true;
-            } else {
-              profileData = scrapeResult.data;
-              fieldResultsForRow = scrapeResult.fieldResults;
-              // Roll Apollo people section into the final stats
-              stats = {
-                fieldsTotal: scrapeResult.stats.fieldsTotal + (peopleSec && apolloContacts.length > 0 ? 1 : 0),
-                fieldsFilled: scrapeResult.stats.fieldsFilled + (peopleSec && apolloContacts.length > 0 ? 1 : 0),
-                emptyFields: scrapeResult.stats.emptyFields.filter(k => k !== peopleSec?.key),
-              };
-            }
+          if (scrapeResult.type === "directory") {
+            console.warn(`[processAgentJob] Unexpected directory result for ${firm.websiteUrl} — skipping`);
+            insertJobLog({ jobId, url: firm.websiteUrl, companyName: firm.companyName, status: "failed", fieldsTotal: 0, fieldsFilled: 0, durationMs: Date.now() - startMs }).catch(() => {});
+            isDirectoryResult = true;
+          } else {
+            profileData = scrapeResult.data;
+            fieldResultsForRow = scrapeResult.fieldResults;
+            stats = scrapeResult.stats;
           }
 
           if (!isDirectoryResult) {
-            // ── STEP 3: LLM-select the best Apollo contact(s) and merge into output ──
-            // Apollo returns 5-20+ people; the LLM picks the best match for the
-            // section description (e.g. "key decision maker" → picks CEO over intern).
-            if (peopleSec && apolloContacts.length > 0) {
-              const selected = await selectBestApolloContacts(apolloContacts, peopleSec, skillContext, firm.companyName);
-              if (selected) {
-                // Attempt SERP full-name resolution for any obfuscated initials
-                const enriched = await resolveFullNamesInResult(selected, firm.companyName);
-                profileData[peopleSec.key] = enriched;
-              }
-            }
-
             profileResults.push({ ...profileData, ...firm.originalRow, __inputIndex: String(firmIndexMap.get(firm.websiteUrl) ?? 999999) });
 
             if (fieldResultsForRow) {
@@ -1582,9 +1389,10 @@ export async function processAgentJob(jobId: number) {
         processed++;
         await incrementJobProcessedCountSafely(jobId);
 
-        // Save partial Excel to S3 every 5 firms so users can export while the job runs.
+        // Save partial results + JSON checkpoint to S3 every 3 firms so users can
+        // export while the job runs AND the job can resume from the exact state on crash.
         // Fire-and-forget — failure is non-fatal; the final save at job end is authoritative.
-        if (processed % 5 === 0) savePartialResults().catch(() => {});
+        if (processed % 3 === 0) savePartialResults().catch(() => {});
 
         // Update live cost in DB every 25 firms so dashboard shows running spend
         const currentStats = getOpenAIStats();
@@ -1604,6 +1412,7 @@ export async function processAgentJob(jobId: number) {
         if (liveCost > costCap) {
           console.warn(`[processAgentJob] 🛑 Cost cap hit: $${liveCost.toFixed(2)} > $${costCap.toFixed(2)} cap. Stopping job to prevent runaway spend.`);
           markJobCancelled(jobId);
+          firmQueue.length = 0; // drain queue so other workers stop too
           break;
         }
       }
@@ -1613,10 +1422,18 @@ export async function processAgentJob(jobId: number) {
       Array.from({ length: Math.min(CONCURRENCY, firms.length) }, runWorker),
     );
 
-    // If the job was paused, save partial results and exit without marking as completed.
-    // Status is already "paused" in DB (set by the pauseJob mutation).
+    // If the job was paused or cancelled, save partial results and exit without
+    // marking as completed. Status is already set in DB by the mutation / poller.
     if (isJobPaused(jobId)) {
       console.log(`[processAgentJob] ⏸️ Job ${jobId} paused after ${profileResults.length} profiles. Saving partial results...`);
+      profileResults.sort((a, b) => Number(a.__inputIndex ?? 0) - Number(b.__inputIndex ?? 0));
+      profileResults.forEach(r => { delete r.__inputIndex; });
+      await savePartialResults();
+      return;
+    }
+
+    if (isJobCancelled(jobId)) {
+      console.log(`[processAgentJob] 🛑 Job ${jobId} cancelled after ${profileResults.length} profiles. Saving partial results...`);
       profileResults.sort((a, b) => Number(a.__inputIndex ?? 0) - Number(b.__inputIndex ?? 0));
       profileResults.forEach(r => { delete r.__inputIndex; });
       await savePartialResults();
