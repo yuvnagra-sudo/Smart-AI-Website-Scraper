@@ -56,7 +56,7 @@ export const enrichmentJobs = mysqlTable("enrichmentJobs", {
   objective:    text("objective"),      // Plain-text user objective
   columnMappingJson: text("columnMappingJson"), // JSON: {companyNameColumn, websiteUrlColumn, descriptionColumn?}
   skillContextJson: text("skillContextJson"),   // JSON: SkillContext — auto-inferred ICP, DM titles, fit/exclusion signals
-  profileName: varchar("profileName", { length: 50 }).default("base"), // Agent profile used for this job
+  // profileName: add via migration when profile selection is wired into UI
   errorMessage: text("errorMessage"),
   // Worker tracking fields
   workerPid: int("workerPid"), // Process ID of worker processing this job
