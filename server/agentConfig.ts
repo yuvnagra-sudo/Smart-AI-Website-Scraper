@@ -61,7 +61,30 @@ export interface AgentProfile {
 const profileCache = new Map<string, AgentProfile>();
 const __filename_esm = fileURLToPath(import.meta.url);
 const __dirname_esm = path.dirname(__filename_esm);
-const PROFILES_DIR = path.join(__dirname_esm, "profiles");
+
+/**
+ * Resolve the profiles directory. Tries multiple paths to work in both
+ * development (tsx from server/) and production (esbuild bundle in dist/).
+ */
+function resolveProfilesDir(): string {
+  const candidates = [
+    path.join(__dirname_esm, "profiles"),                 // Same dir as file (dist/profiles/ or server/profiles/)
+    path.join(__dirname_esm, "..", "server", "profiles"), // Up from dist/ → server/profiles/
+    path.join(process.cwd(), "server", "profiles"),       // CWD/server/profiles/
+    path.join(process.cwd(), "dist", "profiles"),         // CWD/dist/profiles/
+  ];
+
+  for (const dir of candidates) {
+    if (fs.existsSync(path.join(dir, "base.md"))) {
+      return dir;
+    }
+  }
+
+  console.warn(`[agentConfig] Could not find profiles directory. Tried: ${candidates.join(", ")}`);
+  return candidates[0];
+}
+
+const PROFILES_DIR = resolveProfilesDir();
 
 // ---------------------------------------------------------------------------
 // Parsing
