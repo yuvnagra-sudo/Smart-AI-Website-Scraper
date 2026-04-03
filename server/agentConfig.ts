@@ -217,8 +217,11 @@ function loadRawProfile(name: string): { partial: Partial<AgentProfile>; section
   const filePath = path.join(PROFILES_DIR, `${name}.md`);
 
   if (!fs.existsSync(filePath)) {
-    console.error(`[agentConfig] Profile not found: ${filePath}`);
-    throw new Error(`Agent profile "${name}" not found at ${filePath}`);
+    // Don't crash the server — return empty partial with defaults.
+    // This allows the app to start even if profile files aren't deployed yet.
+    // All values will fall back to hardcoded defaults in resolveProfile().
+    console.warn(`[agentConfig] Profile "${name}" not found at ${filePath} — using built-in defaults`);
+    return { partial: { name }, sections: {} };
   }
 
   const content = fs.readFileSync(filePath, "utf-8");
@@ -259,17 +262,37 @@ function resolveProfile(name: string, visited = new Set<string>()): AgentProfile
       planningModel: partial.planningModel ?? "gpt-5-nano",
       confidenceThreshold: partial.confidenceThreshold ?? 0.7,
       maxHops: partial.maxHops ?? 7,
-      confidenceLevels: partial.confidenceLevels ?? {},
-      methodRank: partial.methodRank ?? {},
-      confidenceOverrides: partial.confidenceOverrides ?? {},
-      cssSelectors: partial.cssSelectors ?? { card: [], name: [], title: [] },
-      peopleFieldPattern: partial.peopleFieldPattern ?? "",
-      techFieldPattern: partial.techFieldPattern ?? "",
-      domainFieldPattern: partial.domainFieldPattern ?? "",
-      noiseDomains: partial.noiseDomains ?? [],
-      skipDomains: partial.skipDomains ?? [],
+      confidenceLevels: partial.confidenceLevels ?? {
+        json_ld: 0.99, microdata: 0.95, css_card: 0.90,
+        css_heading_pair: 0.80, regex_deterministic: 0.92, directory_field: 0.95,
+      },
+      methodRank: partial.methodRank ?? {
+        json_ld: 6, css_pattern: 5, regex: 5, llm_cited: 3, search_snippet: 2, llm_uncited: 1,
+      },
+      confidenceOverrides: partial.confidenceOverrides ?? {
+        directory_cited: 0.95, directory_uncited: 0.85,
+        company_cited: 0.90, company_cited_min: 0.85,
+        company_uncited_with_quote: 0.40, company_uncited_no_quote: 0.50,
+        search_cited: 0.60, search_uncited: 0.45,
+      },
+      cssSelectors: partial.cssSelectors ?? {
+        card: [".team-member", ".team-card", ".staff-member", ".person-card"],
+        name: ["h2", "h3", "h4", ".name", ".person-name"],
+        title: [".title", ".role", ".position", ".job-title"],
+      },
+      peopleFieldPattern: partial.peopleFieldPattern ?? "decision.maker|contact|ceo|founder|owner|director|manager|team|people|staff|leadership",
+      techFieldPattern: partial.techFieldPattern ?? "tech|score|dev|digital|software|website",
+      domainFieldPattern: partial.domainFieldPattern ?? "domain|website|url|web",
+      noiseDomains: partial.noiseDomains ?? [
+        "shgstatic.com", "cloudfront.net", "amazonaws.com", "facebook.com",
+        "twitter.com", "x.com", "linkedin.com", "instagram.com", "youtube.com",
+      ],
+      skipDomains: partial.skipDomains ?? ["linkedin.com/in/", "twitter.com", "instagram.com", "facebook.com"],
       urlCategories: partial.urlCategories ?? {},
-      teamPageCandidates: partial.teamPageCandidates ?? [],
+      teamPageCandidates: partial.teamPageCandidates ?? [
+        "/team", "/about/team", "/our-team", "/people", "/leadership",
+        "/about", "/about-us", "/staff",
+      ],
       tierPatterns: partial.tierPatterns ?? { tier1: [], tier2: [], tier3: [], exclude: [], pre_tier_exclusions: [] },
       sections,
     };
