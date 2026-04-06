@@ -484,6 +484,7 @@ For each field:
   5. SCORE: Assign confidence (1.0=explicitly stated, 0.8=clearly implied, 0.6=inferred from context, 0.4=uncertain, 0.0=not found).
 
 If a field is not found anywhere on the page, return value="" confidence=0.0 quote_source="". NEVER guess or hallucinate.
+If the extracted value is in a language other than English, translate it to English before returning it in the "value" field. The "quote_source" field should still contain the original text from the page.
 
 For each field, return:
 - "value": exact extracted text, or "" if not found

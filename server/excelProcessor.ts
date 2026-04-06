@@ -608,12 +608,16 @@ export function createAgentOutputExcel(
         row[`${s.label} (Count)`] = items ? String(items.length) : (r[s.key] ? "1" : "0");
       }
 
-      // Original input columns after — preserves every column from the source file
+      // Original input columns after — preserves meaningful columns from the source file.
+      // Skip internal keys, CSS-like names, HTML tag names, and URL-like strings.
       if (originalColumns) {
         for (const col of originalColumns) {
-          if (!sectionLabels.has(col) && !col.endsWith(" (Count)")) {
-            row[col] = r[col] ?? "";
-          }
+          if (sectionLabels.has(col)) continue;           // already in enriched columns
+          if (col.endsWith(" (Count)")) continue;         // summary count column
+          if (col === "__inputIndex") continue;           // internal sort key
+          if (/^[a-z][a-z0-9-]*(\s+src)?$/.test(col)) continue;  // CSS class / HTML tag (e.g. "table", "table src", "text-primary")
+          if (/^https?:\/\//.test(col)) continue;        // URL as column name
+          row[col] = r[col] ?? "";
         }
       }
       return row;
