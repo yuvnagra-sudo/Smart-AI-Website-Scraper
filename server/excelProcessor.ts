@@ -482,41 +482,41 @@ export function createAgentOutputExcel(
 ): Buffer {
   const workbook = XLSX.utils.book_new();
 
-  // Identify which sections have array schemas
-  const arraySections = new Set(sections.filter(s => s.arraySchema).map(s => s.key));
+  // Separate scalar sections from array sections.
+  // Array sections (those with arraySchema) get their own dedicated sheets;
+  // scalar sections appear as columns in the main Results sheet.
+  const arraySectionsList = sections.filter(s => s.arraySchema);
+  const scalarSectionsList = sections.filter(s => !s.arraySchema);
+  const arraySectionKeys = new Set(arraySectionsList.map(s => s.key));
 
-  // Section label set — used to avoid duplicating columns that appear in both
-  // the scraped output and the original input (scraped value takes precedence).
-  const sectionLabels = new Set(sections.map(s => s.label));
-  // Also include expanded array column prefixes
-  for (const s of sections) {
-    if (s.arraySchema) {
-      for (let i = 1; i <= 5; i++) {
-        for (const field of Object.keys(s.arraySchema)) {
-          sectionLabels.add(`${s.label} ${i} - ${field.charAt(0).toUpperCase() + field.slice(1).replace(/_/g, " ")}`);
-        }
-      }
-    }
-  }
+  // Section label set — used to avoid duplicating columns from the original input.
+  const sectionLabels = new Set(scalarSectionsList.map(s => s.label));
 
-  // Sheet 1: Results (profile extractions — clean data only)
+  // ── Sheet 1: Results ──────────────────────────────────────────────────────
+  // Contains only scalar fields. Array sections are replaced with a summary
+  // count column (e.g. "Team Members (Count)") so the sheet stays readable.
+  // The full array data lives in its own dedicated sheet below.
   if (profileResults.length > 0) {
     const rows = profileResults.map((r) => {
       const row: Record<string, string> = {};
-      // Scraped section fields first (new enriched data — left columns)
-      for (const s of sections) {
-        if (arraySections.has(s.key)) {
-          // Expand array sections into multiple columns
-          const expanded = expandArraySection(s, r[s.key] ?? "");
-          Object.assign(row, expanded);
-        } else {
-          row[s.label] = r[s.key] ?? "";
-        }
+
+      // Scalar fields first (enriched data — left columns)
+      for (const s of scalarSectionsList) {
+        row[s.label] = r[s.key] ?? "";
       }
+
+      // Summary count for each array section
+      for (const s of arraySectionsList) {
+        const items = tryParseJsonArray(r[s.key] ?? "");
+        row[`${s.label} (Count)`] = items ? String(items.length) : (r[s.key] ? "1" : "0");
+      }
+
       // Original input columns after — preserves every column from the source file
       if (originalColumns) {
         for (const col of originalColumns) {
-          if (!sectionLabels.has(col)) row[col] = r[col] ?? "";
+          if (!sectionLabels.has(col) && !col.endsWith(" (Count)")) {
+            row[col] = r[col] ?? "";
+          }
         }
       }
       return row;
@@ -525,12 +525,68 @@ export function createAgentOutputExcel(
     const sheet = XLSX.utils.json_to_sheet(sanitizedRows);
     XLSX.utils.book_append_sheet(workbook, sheet, "Results");
   } else {
-    // Empty placeholder sheet
     const sheet = XLSX.utils.aoa_to_sheet([["No profile results found"]]);
     XLSX.utils.book_append_sheet(workbook, sheet, "Results");
   }
 
-  // Sheet 2: Sources (confidence scores + source URLs per field)
+  // ── Dedicated sheets for each array section ───────────────────────────────
+  // Each array section (e.g. "Team Members", "Portfolio Companies",
+  // "Decision Makers") gets its own sheet with one row per extracted item,
+  // anchored by Company Name and Website URL for easy VLOOKUP joins.
+  for (const s of arraySectionsList) {
+    const arrayRows: Array<Record<string, string>> = [];
+
+    for (const r of profileResults) {
+      // Resolve company identity from common key variants
+      const companyName =
+        r["company_name"] ?? r["companyName"] ?? r["Company Name"] ?? r["name"] ?? "";
+      const websiteUrl =
+        r["website_url"] ?? r["websiteUrl"] ?? r["Website URL"] ?? r["website"] ?? r["Website"] ?? "";
+
+      const items = tryParseJsonArray(r[s.key] ?? "");
+
+      if (!items || items.length === 0) {
+        // Emit one empty row so every company appears in the sheet (easier auditing)
+        const emptyRow: Record<string, string> = {
+          "Company Name": companyName,
+          "Website": websiteUrl,
+        };
+        if (s.arraySchema) {
+          for (const field of Object.keys(s.arraySchema)) {
+            emptyRow[field.charAt(0).toUpperCase() + field.slice(1).replace(/_/g, " ")] = "";
+          }
+        }
+        arrayRows.push(emptyRow);
+        continue;
+      }
+
+      const fieldNames = s.arraySchema
+        ? Object.keys(s.arraySchema)
+        : Object.keys(items[0]).filter(k => k !== "quote_source");
+
+      for (const item of items) {
+        const row: Record<string, string> = {
+          "Company Name": companyName,
+          "Website": websiteUrl,
+        };
+        for (const field of fieldNames) {
+          const colName = field.charAt(0).toUpperCase() + field.slice(1).replace(/_/g, " ");
+          row[colName] = String(item[field] ?? "");
+        }
+        arrayRows.push(row);
+      }
+    }
+
+    if (arrayRows.length > 0) {
+      const sanitized = sanitizeForExcel(arrayRows);
+      const arraySheet = XLSX.utils.json_to_sheet(sanitized);
+      // Excel sheet names are limited to 31 characters
+      const sheetName = s.label.slice(0, 31);
+      XLSX.utils.book_append_sheet(workbook, arraySheet, sheetName);
+    }
+  }
+
+  // ── Sources sheet: confidence + source URL per field ─────────────────────
   if (fieldResultsMap && fieldResultsMap.length > 0) {
     const sourceRows = fieldResultsMap.map(({ companyName, websiteUrl, fieldResults }) => {
       const row: Record<string, string> = {
@@ -553,7 +609,7 @@ export function createAgentOutputExcel(
     XLSX.utils.book_append_sheet(workbook, sourceSheet, "Sources");
   }
 
-  // Sheet 3: Collected URLs (from directory pages)
+  // ── Collected URLs sheet ──────────────────────────────────────────────────
   if (collectedUrls.length > 0) {
     const urlRows = collectedUrls.map((e) => ({
       "Company Name": e.name,

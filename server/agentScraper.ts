@@ -23,7 +23,7 @@
 import { fetchViaJina, fetchWebsiteContentHybrid } from "./jinaFetcher";
 import { extractDirectory, type DirectoryEntry as DirEntry } from "./directoryExtractor";
 import { queuedLLMCall } from "./_core/llmQueue";
-import { webSearch, searchQueryForField } from "./_core/webSearch";
+import { webSearch, searchQueryForField, searchQueryVariant } from "./_core/webSearch";
 import type { SkillContext } from "../shared/skillContext";
 import { preLLMExtract, CONFIDENCE } from "./preLLMExtractor";
 import { mapUrlsHeuristic, mapUrlsWithLLM, generateTeamPageCandidates, type MappedUrl } from "./mapPhase";
@@ -209,15 +209,25 @@ Skip if company shows: ${skillContext.exclusionSignals.join(", ")}
     .replace("{companyName}", companyName)
     .replace("{domain}", websiteUrl.replace(/https?:\/\//, "").split("/")[0]);
 
+  // Build a summary of already-found values so the LLM can craft context-aware queries
+  const foundValuesSummary = sections
+    .filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD)
+    .map(s => `  ${s.label}: "${(fieldResults[s.key]?.value ?? "").slice(0, 80)}"`)
+    .join("\n");
+
   const prompt = `${agentPersona}
 
 Company: ${companyName}
 Website: ${websiteUrl}
 Objective: ${objective}${skillBlock ? "\n" + skillBlock : ""}
+
 Current extraction state (confidence 0.0=not found, 1.0=certain):
 ${fieldSummary}
 
 Missing fields (need confidence >= ${CONFIDENCE_THRESHOLD}): ${weakList}
+
+Already found (use these to build precise search queries):
+${foundValuesSummary || "  (none yet)"}
 
 URLs already visited — DO NOT revisit these:
   ${visitedList || "(none yet)"}
@@ -235,8 +245,15 @@ ${linkHints}
 
 ${decisionRules}
 
+WEB SEARCH QUERY GUIDANCE (apply when action is web_search):
+- Use specific, targeted queries that combine company name + the exact field you need
+- Incorporate already-found values to narrow results (e.g. if you know the CEO name, search for their email)
+- Prefer queries like: "${companyName}" CEO email, "${companyName}" founder LinkedIn, site:linkedin.com "${companyName}" CEO
+- Avoid generic queries like "${companyName} info" — be precise about what is missing
+- Use quotes around proper nouns for exact matching
+
 Return ONLY valid JSON (no markdown):
-{"action":"fetch_url"|"web_search"|"done","target":"full URL if fetch_url, else null","query":"search query if web_search, else null","reason":"one sentence explaining why this is the best next step"}`;
+{"action":"fetch_url"|"web_search"|"done","target":"full URL if fetch_url, else null","query":"precise search query if web_search, else null","reason":"one sentence explaining why this is the best next step"}`;
 
   try {
     const response = await queuedLLMCall({
@@ -270,17 +287,22 @@ Return ONLY valid JSON (no markdown):
       if (visitedUrls.has(parsed.target)) {
         console.log(`[agentScraper] PLAN: LLM chose already-visited URL, switching to web_search`);
         const weakField = weakFields[0];
+        // Use searchQueryVariant for diversification on fallback
         return {
           action: "web_search",
-          query: searchQueryForField(companyName, websiteUrl, weakField.label),
-          reason: "Chosen URL already visited, falling back to web search",
+          query: searchQueryVariant(companyName, websiteUrl, weakField.label, webSearchedFields?.size ?? 0),
+          reason: "Chosen URL already visited, falling back to diversified web search",
         };
       }
       return { action: "fetch_url", target: parsed.target, reason: parsed.reason ?? "" };
     }
 
     if (parsed.action === "web_search") {
-      const query = parsed.query || searchQueryForField(companyName, websiteUrl, weakFields[0]?.label ?? "company info");
+      // Use LLM-generated query if present and non-trivial; otherwise fall back to variant
+      const llmQuery = parsed.query?.trim();
+      const query = (llmQuery && llmQuery.length > 5)
+        ? llmQuery
+        : searchQueryVariant(companyName, websiteUrl, weakFields[0]?.label ?? "company info", webSearchedFields?.size ?? 0);
       return { action: "web_search", query, reason: parsed.reason ?? "" };
     }
 
@@ -429,6 +451,9 @@ Exclusion signals — if these are prominent, deprioritize this company:
     ? `\nNote: The following fields were already extracted from structured data (JSON-LD/CSS) and do NOT need extraction: ${preLLMNote.join(", ")}\nOnly extract the remaining fields listed below.`
     : "";
 
+  // Build a structured field list so the LLM knows exactly what to look for
+  const fieldList = sectionsForLLM.map(s => `  - ${s.key} ("${s.label}"): ${s.desc}`).join("\n");
+
   const userMsg = `${systemPrompt}
 
 ${pageTypeGuidance}
@@ -443,13 +468,27 @@ ${preLLMSkipNote}
 ━━━ CRITICAL EXTRACTION RULES ━━━
 ${extractionRules}
 
-Page content (source: ${sourceUrl || 'unknown'}):
+━━━ FIELDS TO EXTRACT ━━━
+${fieldList}
+
+━━━ PAGE CONTENT (source: ${sourceUrl || 'unknown'}) ━━━
 ${content.substring(0, 60000)}
+
+━━━ EXTRACTION INSTRUCTIONS ━━━
+Before writing your JSON answer, reason through the page carefully for each field.
+For each field:
+  1. SEARCH: Scan the page content for any text relevant to this field.
+  2. EVALUATE: Is the text about the target company itself (not a client, reviewer, or partner)?
+  3. SYNTHESIZE: What is the best single value to return? If multiple values exist, pick the most prominent or authoritative one.
+  4. CITE: Copy the exact 10-100 character snippet from the page that contains this value.
+  5. SCORE: Assign confidence (1.0=explicitly stated, 0.8=clearly implied, 0.6=inferred from context, 0.4=uncertain, 0.0=not found).
+
+If a field is not found anywhere on the page, return value="" confidence=0.0 quote_source="". NEVER guess or hallucinate.
 
 For each field, return:
 - "value": exact extracted text, or "" if not found
-- "confidence": 0.0-1.0 (1.0=explicitly stated, 0.7=strongly implied, 0.4=uncertain, 0.0=not found)
-- "quote_source": exact text snippet from the page that contains this information (10-100 chars), or "" if not found
+- "confidence": 0.0-1.0
+- "quote_source": exact text snippet from the page (10-100 chars), or "" if not found
 
 Example output format:
 ${exampleJson}
