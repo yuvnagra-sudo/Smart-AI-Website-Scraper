@@ -1275,7 +1275,9 @@ export async function processAgentJob(jobId: number) {
     // At 800 RPM: floor(800 / 7 / 2) = 57 → capped at 50
     // At 300 RPM: floor(300 / 7 / 2) = 21
     const RPM = parseInt(process.env.LLM_RPM_LIMIT ?? '800', 10);
-    const CONCURRENCY = Math.min(50, Math.max(5, Math.floor(RPM / 7 / 2)));
+    // Tier 5 OpenAI allows 30,000 RPM. At 24,000 RPM (80% of limit), this formula
+    // yields ~857 — capped at 200 to stay within Railway memory limits.
+    const CONCURRENCY = Math.min(200, Math.max(5, Math.floor(RPM / 7 / 2)));
     const firmQueue = [...firms.slice(resumeFrom)];
     const originalColumns = firms[0] ? Object.keys(firms[0].originalRow) : [];
     // Track original input position so concurrent workers don't scramble row order
@@ -1340,6 +1342,8 @@ export async function processAgentJob(jobId: number) {
             () => isJobCancelled(jobId),
             undefined, // callbacks
             skillContext,
+            undefined, // initialFieldValues
+            firm.companyName, // knownCompanyName — passed explicitly so web searches use the real name
           );
 
           if (scrapeResult.type === "directory") {

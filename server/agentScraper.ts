@@ -982,7 +982,9 @@ function extractLinksFromContent(content: string, baseUrl: string): string[] {
 // 5. Fetch a URL and return content + extracted links
 // ---------------------------------------------------------------------------
 
-async function fetchAndExtract(url: string): Promise<{ content: string; links: string[]; rawHtml?: string } | null> {
+async function fetchAndExtract(url: string, isCancelled?: () => boolean): Promise<{ content: string; links: string[]; rawHtml?: string } | null> {
+  // Bail immediately if job was cancelled before we even start the fetch
+  if (isCancelled?.()) return null;
   // Check shared cache first (cross-firm deduplication)
   const cached = getCachedFetch(url);
   if (cached !== undefined) {
@@ -1060,12 +1062,18 @@ export async function scrapeUrl(
   callbacks?: PageCallbacks,
   skillContext?: SkillContext | null,
   initialFieldValues?: Record<string, { value: string; confidence: number }>,
+  knownCompanyName?: string,
 ): Promise<AgentScrapeResult> {
   console.log(`[agentScraper] 🚀 Starting agent loop: ${url}`);
 
-  // Extract company name from URL for search queries
+  // Use the caller-supplied company name if available; fall back to hostname derivation.
+  // This is critical — using the real company name dramatically improves web search quality.
   let companyName = "";
-  try { companyName = new URL(url).hostname.replace(/^www\./, "").split(".")[0]; } catch { companyName = url; }
+  if (knownCompanyName && knownCompanyName.trim()) {
+    companyName = knownCompanyName.trim();
+  } else {
+    try { companyName = new URL(url).hostname.replace(/^www\./, "").split(".")[0]; } catch { companyName = url; }
+  }
 
   // Agent state — pre-seed with initial field values when available
   let fieldResults: FieldResultMap = {};
@@ -1087,8 +1095,10 @@ export async function scrapeUrl(
   let webSearchAttemptCount = 0; // For query diversification
 
   // ── STEP 0: Fetch the primary URL first (always) ──────────────────────────
+  // Check cancellation before the first (potentially slow) fetch
+  if (isCancelled?.()) throw new Error("JOB_CANCELLED");
   console.log(`[agentScraper] Fetching primary URL: ${url}`);
-  const primary = await fetchAndExtract(url);
+  const primary = await fetchAndExtract(url, isCancelled);
 
   if (!primary) {
     console.warn(`[agentScraper] ❌ Primary URL fetch failed: ${url} — will rely on web search`);
@@ -1278,36 +1288,48 @@ export async function scrapeUrl(
       }
       hopsUsed++;
 
-      // Fetch the top search result that hasn't been visited
-      const topResult = searchResults.find(r => !visitedUrls.has(r.url));
-      if (!topResult) continue;
+      // Fetch the top-3 unvisited search results (not just top-1) so a single
+      // bad/blocked page doesn't waste the entire hop.
+      const candidateResults = searchResults.filter(r => !visitedUrls.has(r.url)).slice(0, 3);
+      if (candidateResults.length === 0) continue;
 
-      if (isCancelled?.()) throw new Error("JOB_CANCELLED");
-      const fetched = await fetchAndExtract(topResult.url);
-
-      if (!fetched) {
-        // Use the snippet directly as content if the page can't be fetched
-        const snippetContent = searchResults.map(r => `${r.title}\n${r.snippet}`).join("\n\n");
-        visitedUrls.add(topResult.url);
-        const extracted = await extractProfileFields(snippetContent, sections, systemPrompt, topResult.url, "search", skillContext);
-        fieldResults = mergeFieldResults(fieldResults, extracted);
-      } else {
-        visitedUrls.add(topResult.url);
-        availableLinks = [...new Set([...availableLinks, ...fetched.links])].filter(l => !visitedUrls.has(l));
+      for (const result of candidateResults) {
         if (isCancelled?.()) throw new Error("JOB_CANCELLED");
-        const searchPageType = isDirectoryUrl(topResult.url) ? "directory" : "company";
-        const extracted = await extractProfileFields(fetched.content, sections, systemPrompt, topResult.url, searchPageType, skillContext, fetched.rawHtml);
-        fieldResults = mergeFieldResults(fieldResults, extracted);
+        const fetched = await fetchAndExtract(result.url, isCancelled);
+        if (!fetched) {
+          // Use snippet as fallback content for this result
+          const snippetContent = `${result.title}\n${result.snippet}`;
+          visitedUrls.add(result.url);
+          const extracted = await extractProfileFields(snippetContent, sections, systemPrompt, result.url, "search", skillContext);
+          fieldResults = mergeFieldResults(fieldResults, extracted);
+        } else {
+          visitedUrls.add(result.url);
+          availableLinks = [...new Set([...availableLinks, ...fetched.links])].filter(l => !visitedUrls.has(l));
+          if (isCancelled?.()) throw new Error("JOB_CANCELLED");
+          const searchPageType = isDirectoryUrl(result.url) ? "directory" : "company";
+          const extracted = await extractProfileFields(fetched.content, sections, systemPrompt, result.url, searchPageType, skillContext, fetched.rawHtml);
+          fieldResults = mergeFieldResults(fieldResults, extracted);
+        }
+        // Stop fetching more results if all target fields are now confident
+        const stillWeak = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) < CONFIDENCE_THRESHOLD);
+        if (stillWeak.length === 0) break;
       }
 
       const filled = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD).length;
       console.log(`[agentScraper] After web_search: ${filled}/${sections.length} fields confident`);
 
-      // Mark every still-weak field as "already attempted via web_search" so the
-      // planner won't search for it again.
-      sections
-        .filter(s => (fieldResults[s.key]?.confidence ?? 0) < CONFIDENCE_THRESHOLD)
-        .forEach(s => webSearchedFields.add(s.key));
+      // Only blacklist the specific field the planner searched for — not ALL weak fields.
+      // Blacklisting all weak fields causes premature 'done' on fields that haven't
+      // been searched yet and might still be found by navigating internal pages.
+      if ((plan as any).targetField) {
+        webSearchedFields.add((plan as any).targetField);
+      } else {
+        // Fallback: blacklist the single weakest field that triggered this search
+        const weakestField = sections
+          .filter(s => (fieldResults[s.key]?.confidence ?? 0) < CONFIDENCE_THRESHOLD)
+          .sort((a, b) => (fieldResults[a.key]?.confidence ?? 0) - (fieldResults[b.key]?.confidence ?? 0))[0];
+        if (weakestField) webSearchedFields.add(weakestField.key);
+      }
     }
   }
 

@@ -1766,7 +1766,7 @@ export default function Dashboard() {
                               <DownloadResultsButton jobId={job.id} outputFileUrl={job.outputFileUrl} compact />
                             </>
                           )}
-                          {job.status === "failed" && (
+                          {(job.status === "failed" || job.status === "cancelled") && (
                             <Button
                               size="sm"
                               variant="outline"
@@ -1777,6 +1777,9 @@ export default function Dashboard() {
                               <PlayCircle className="h-3 w-3 mr-1" />
                               Resume
                             </Button>
+                          )}
+                          {job.status === "cancelled" && (job as any).outputFileKey && (
+                            <DownloadResultsButton jobId={job.id} outputFileUrl={job.outputFileUrl} compact />
                           )}
                           <button
                             className="text-muted-foreground hover:text-foreground p-1 rounded"
@@ -1861,7 +1864,7 @@ export default function Dashboard() {
                                 <DownloadResultsButton jobId={job.id} outputFileUrl={job.outputFileUrl} />
                               </>
                             )}
-                            {(job.status === "failed" || job.status === "paused") && (
+                            {(job.status === "failed" || job.status === "paused" || job.status === "cancelled") && (
                               <Button
                                 size="sm"
                                 variant="outline"
@@ -1876,7 +1879,7 @@ export default function Dashboard() {
                                 Resume
                               </Button>
                             )}
-                            {job.status === "paused" && (job as any).outputFileKey && (
+                            {(job.status === "paused" || job.status === "cancelled") && (job as any).outputFileKey && (
                               <DownloadResultsButton jobId={job.id} outputFileUrl={job.outputFileUrl} />
                             )}
                             {(job.status === "processing" || job.status === "pending") && (
