@@ -78,6 +78,13 @@ const SUGGESTION_CHIPS = [
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
+interface InputQualityReport {
+  valid: number;
+  duplicatesRemoved: number;
+  malformedUrls: number;
+  missingCompanyNames: number;
+}
+
 interface PreviewData {
   fileUrl: string;
   fileKey: string;
@@ -95,6 +102,7 @@ interface PreviewData {
     websiteUrl: string;
     descriptionPreview: string;
   }>;
+  qualityReport?: InputQualityReport;
 }
 
 interface AgentSection {
@@ -293,6 +301,7 @@ export default function Dashboard() {
           estimatedDuration: data.costEstimate.estimatedDuration,
         },
         preview: data.preview,
+        qualityReport: (data as any).qualityReport as InputQualityReport | undefined,
       });
       setShowColumnMapping(false);
       setWizardStep("configure");
@@ -540,8 +549,20 @@ export default function Dashboard() {
       .map((u: string) => u.trim())
       .filter((u: string) => u.startsWith("http"));
     if (urls.length === 0) { toast.error("No valid URLs found — each line should start with http"); return; }
-    // Build minimal CSV: header + one row per URL with empty company name
-    const csv = "Company Name,Website URL\n" + urls.map((u: string) => `"","${u}"`).join("\n");
+    // Derive a display name from each URL hostname so preview and web searches are meaningful
+    const deriveNameFromUrl = (url: string): string => {
+      try {
+        const hostname = new URL(url).hostname
+          .replace(/^www\./, "")
+          .split(".")[0]
+          .replace(/[-_]/g, " ")
+          .replace(/([a-z])([A-Z])/g, "$1 $2");
+        return hostname.split(" ").filter(Boolean)
+          .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+      } catch { return url; }
+    };
+    // Build CSV with derived company names
+    const csv = "Company Name,Website URL\n" + urls.map((u: string) => `"${deriveNameFromUrl(u).replace(/"/g, '""')}","${u}"`).join("\n");
     // Encode as base64 (UTF-8 safe via TextEncoder)
     const bytes = new TextEncoder().encode(csv);
     let binary = "";
@@ -965,14 +986,46 @@ export default function Dashboard() {
                 </Button>
               </div>
               <CardDescription>
-                {previewData.firmCount} entries ready · Choose how to extract data from each page
+                <span>{previewData.firmCount} entries ready · Choose how to extract data from each page</span>
+                {/* Always-visible column mapping summary with edit button */}
                 {fileHeaders && (
-                  <button
-                    className="ml-2 text-xs text-primary underline hover:text-primary/80"
-                    onClick={() => setShowColumnMapping(true)}
-                  >
-                    Edit column mapping
-                  </button>
+                  <span className="flex items-center gap-1.5 mt-1 flex-wrap">
+                    <span className="text-xs text-muted-foreground">
+                      {Object.entries(columnRoles).filter(([, r]) => r).map(([col, role]) => (
+                        <span key={col} className="mr-2">
+                          <span className="font-medium">{role === "companyName" ? "Name" : role === "websiteUrl" ? "Website" : "Description"}</span>:
+                          <span className="italic ml-0.5">"{col}"</span>
+                        </span>
+                      ))}
+                    </span>
+                    <button
+                      className="text-xs text-primary underline hover:text-primary/80 shrink-0"
+                      onClick={() => setShowColumnMapping(true)}
+                    >
+                      Edit
+                    </button>
+                  </span>
+                )}
+                {/* Input quality report — shown only when there are issues */}
+                {previewData.qualityReport && (
+                  (previewData.qualityReport.duplicatesRemoved > 0 ||
+                   previewData.qualityReport.malformedUrls > 0 ||
+                   previewData.qualityReport.missingCompanyNames > 0) && (
+                    <span className="flex items-start gap-1.5 mt-2 p-2 rounded-md bg-amber-50 border border-amber-200 text-xs text-amber-800">
+                      <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0 text-amber-500" />
+                      <span>
+                        {previewData.qualityReport.duplicatesRemoved > 0 && (
+                          <span className="mr-2">{previewData.qualityReport.duplicatesRemoved} duplicate{previewData.qualityReport.duplicatesRemoved !== 1 ? "s" : ""} removed.</span>
+                        )}
+                        {previewData.qualityReport.malformedUrls > 0 && (
+                          <span className="mr-2">{previewData.qualityReport.malformedUrls} malformed URL{previewData.qualityReport.malformedUrls !== 1 ? "s" : ""} skipped.</span>
+                        )}
+                        {previewData.qualityReport.missingCompanyNames > 0 && (
+                          <span>{previewData.qualityReport.missingCompanyNames} entr{previewData.qualityReport.missingCompanyNames !== 1 ? "ies" : "y"} had no company name — derived from URL.</span>
+                        )}
+                      </span>
+                    </span>
+                  )
                 )}
               </CardDescription>
             </CardHeader>
@@ -1326,19 +1379,41 @@ export default function Dashboard() {
                           return (
                             <div
                               key={i}
-                              className={`flex items-start gap-2 p-3 rounded-lg border ${
-                                isPinned ? "bg-primary/5 border-primary/20" : "bg-muted/20"
+                              className={`flex items-start gap-2 p-3 rounded-lg border group ${
+                                isPinned ? "bg-primary/5 border-primary/20" : "bg-muted/20 hover:border-primary/30"
                               }`}
                             >
                               {isPinned && <Target className="h-4 w-4 text-primary mt-0.5 shrink-0" />}
                               <div className="flex-1 min-w-0">
-                                <p className="font-medium text-sm">{section.label}</p>
-                                <p className="text-xs text-muted-foreground mt-0.5 leading-snug">{section.desc}</p>
+                                {/* Inline-editable label */}
+                                <input
+                                  className="font-medium text-sm bg-transparent border-0 border-b border-transparent hover:border-muted-foreground focus:border-primary focus:outline-none w-full"
+                                  value={section.label}
+                                  readOnly={isPinned}
+                                  onChange={(e) => {
+                                    const updated = [...wizardSections];
+                                    updated[i] = { ...updated[i], label: e.target.value };
+                                    setWizardSections(updated);
+                                  }}
+                                  title={isPinned ? "Pinned section" : "Click to rename"}
+                                />
+                                {/* Inline-editable description */}
+                                <input
+                                  className="text-xs text-muted-foreground mt-0.5 bg-transparent border-0 border-b border-transparent hover:border-muted-foreground/50 focus:border-primary/50 focus:outline-none w-full leading-snug"
+                                  value={section.desc}
+                                  readOnly={isPinned}
+                                  onChange={(e) => {
+                                    const updated = [...wizardSections];
+                                    updated[i] = { ...updated[i], desc: e.target.value };
+                                    setWizardSections(updated);
+                                  }}
+                                  title={isPinned ? "Pinned section" : "Click to edit description"}
+                                />
                               </div>
                               {!isPinned && (
                                 <button
                                   onClick={() => setWizardSections(wizardSections.filter((_, j) => j !== i))}
-                                  className="text-muted-foreground hover:text-destructive mt-0.5 shrink-0"
+                                  className="text-muted-foreground hover:text-destructive mt-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity"
                                   title="Remove section"
                                 >
                                   <X className="h-4 w-4" />

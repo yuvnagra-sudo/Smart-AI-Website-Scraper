@@ -10,7 +10,7 @@ import { createEnrichmentJob, getEnrichmentJob, getUserEnrichmentJobs, getAllEnr
 import { getDb } from "./db";
 import { enrichedFirms, teamMembers, portfolioCompanies, investmentThesis } from "../drizzle/schema";
 import { eq, and, like, count } from "drizzle-orm";
-import { parseInputExcel, parseInputHeaders, createOutputExcel, createAgentOutputExcel, type EnrichedVCData, type TeamMemberData, type PortfolioCompanyData, type ProcessingSummaryData, type FileHeaders } from "./excelProcessor";
+import { parseInputExcel, parseInputHeaders, createOutputExcel, createAgentOutputExcel, type EnrichedVCData, type TeamMemberData, type PortfolioCompanyData, type ProcessingSummaryData, type FileHeaders, type InputQualityReport } from "./excelProcessor";
 import { scrapeUrl, scrapeUrlAsDirectory, type AgentSection, type DirectoryEntry as AgentDirectoryEntry, type ScrapeStats, type FieldResultMap } from "./agentScraper";
 import type { SkillContext } from "../shared/skillContext";
 import { generateInvestmentThesisSummaries } from "./investmentThesisAnalyzer";
@@ -102,6 +102,7 @@ export const appRouter = router({
             : 200;
           const costEstimate = estimateEnrichmentCost(firms.length, 6, avgDescLength);
 
+          const qr = (firms as any).qualityReport as InputQualityReport | undefined;
           return {
             status: "ready" as const,
             fileUrl,
@@ -121,6 +122,7 @@ export const appRouter = router({
               descriptionPreview: f.description.substring(0, 150) + (f.description.length > 150 ? "..." : ""),
             })),
             headers,
+            qualityReport: qr ?? { valid: firms.length, duplicatesRemoved: 0, malformedUrls: 0, missingCompanyNames: 0 },
           };
         } catch (err) {
           // Return to column mapping UI with an error message so user can try different columns

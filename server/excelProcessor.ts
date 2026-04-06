@@ -2,6 +2,55 @@ import * as XLSX from "xlsx";
 import axios from "axios";
 import { parse as csvParse } from "csv-parse/sync";
 
+// ---------------------------------------------------------------------------
+// URL normalization helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize a URL to a canonical form:
+ * - Trim whitespace
+ * - Prepend https:// if missing
+ * - Strip trailing slashes
+ */
+export function normalizeUrl(raw: string): string {
+  let u = raw.trim();
+  if (!u) return u;
+  if (!u.startsWith("http://") && !u.startsWith("https://")) {
+    u = "https://" + u;
+  }
+  u = u.replace(/\/+$/, "");
+  return u;
+}
+
+/**
+ * Derive a human-readable company name from a URL hostname.
+ * e.g. "https://sequoiacap.com" -> "Sequoiacap"
+ *      "https://www.acme-corp.com" -> "Acme Corp"
+ */
+export function deriveCompanyName(url: string): string {
+  try {
+    const hostname = new URL(url).hostname
+      .replace(/^www\./, "")
+      .split(".")[0]
+      .replace(/[-_]/g, " ")
+      .replace(/([a-z])([A-Z])/g, "$1 $2");
+    return hostname
+      .split(" ")
+      .filter(Boolean)
+      .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(" ");
+  } catch {
+    return url;
+  }
+}
+
+export interface InputQualityReport {
+  valid: number;
+  duplicatesRemoved: number;
+  malformedUrls: number;
+  missingCompanyNames: number;
+}
+
 export interface VCFirmInput {
   companyName: string;
   websiteUrl: string;
@@ -243,7 +292,10 @@ export async function parseInputHeaders(fileUrl: string): Promise<FileHeaders> {
 // Parse input file into firm list (with optional explicit column mapping)
 // ---------------------------------------------------------------------------
 
-export async function parseInputExcel(fileUrl: string, columnMapping?: ColumnMapping): Promise<VCFirmInput[]> {
+export async function parseInputExcel(
+  fileUrl: string,
+  columnMapping?: ColumnMapping,
+): Promise<VCFirmInput[] & { qualityReport: InputQualityReport }> {
   const data = await readFileToRows(fileUrl);
 
   if (data.length === 0) {
@@ -251,8 +303,10 @@ export async function parseInputExcel(fileUrl: string, columnMapping?: ColumnMap
   }
 
   const availableColumns = Object.keys(data[0] || {});
-  const firms: VCFirmInput[] = [];
+  const rawFirms: VCFirmInput[] = [];
   const skippedRows: number[] = [];
+  let malformedUrls = 0;
+  let missingCompanyNames = 0;
 
   for (let i = 0; i < data.length; i++) {
     const row = data[i];
@@ -263,14 +317,15 @@ export async function parseInputExcel(fileUrl: string, columnMapping?: ColumnMap
     let description: string | undefined;
 
     if (columnMapping) {
-      // Use explicit column mapping
       if (columnMapping.companyNameColumn) {
-        companyName = row[columnMapping.companyNameColumn] != null ? String(row[columnMapping.companyNameColumn]) : undefined;
+        companyName = row[columnMapping.companyNameColumn] != null
+          ? String(row[columnMapping.companyNameColumn]).trim() : undefined;
       }
-      websiteUrl = row[columnMapping.websiteUrlColumn] != null ? String(row[columnMapping.websiteUrlColumn]) : undefined;
-      description = columnMapping.descriptionColumn ? String(row[columnMapping.descriptionColumn] ?? "") : "";
+      websiteUrl = row[columnMapping.websiteUrlColumn] != null
+        ? String(row[columnMapping.websiteUrlColumn]).trim() : undefined;
+      description = columnMapping.descriptionColumn
+        ? String(row[columnMapping.descriptionColumn] ?? "") : "";
     } else {
-      // Auto-detect using variant matching
       companyName = findColumnValue(row, COMPANY_NAME_VARIANTS);
       websiteUrl = findColumnValue(row, WEBSITE_URL_VARIANTS);
       description = findColumnValue(row, DESCRIPTION_VARIANTS);
@@ -280,35 +335,75 @@ export async function parseInputExcel(fileUrl: string, columnMapping?: ColumnMap
     if (websiteUrl && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(websiteUrl.trim()) && !websiteUrl.includes("://")) {
       console.log(`[Excel Parser] Skipping row ${i + 2}: websiteUrl is an email address (${websiteUrl})`);
       skippedRows.push(i + 2);
+      malformedUrls++;
       continue;
     }
 
-    if (!websiteUrl) {
+    if (!websiteUrl || !websiteUrl.trim()) {
       console.log(`[Excel Parser] Skipping row ${i + 2}: missing required websiteUrl`);
       skippedRows.push(i + 2);
       continue;
     }
 
-    // Company name is optional — fall back to URL as identifier
-    if (!companyName) companyName = websiteUrl;
+    // Normalize URL: add protocol, strip trailing slashes
+    const normalizedUrl = normalizeUrl(websiteUrl);
 
-    // Capture all original columns as strings for pass-through to output
+    // Validate the normalized URL is parseable
+    try {
+      new URL(normalizedUrl);
+    } catch {
+      console.log(`[Excel Parser] Skipping row ${i + 2}: malformed URL (${websiteUrl})`);
+      skippedRows.push(i + 2);
+      malformedUrls++;
+      continue;
+    }
+
+    // Track missing company names before fallback
+    if (!companyName || !companyName.trim()) {
+      missingCompanyNames++;
+      // Derive a clean display name from the hostname instead of using raw URL string
+      companyName = deriveCompanyName(normalizedUrl);
+    }
+
     const originalRow: Record<string, string> = {};
     for (const col of availableColumns) originalRow[col] = String(row[col] ?? "");
 
-    firms.push({
+    rawFirms.push({
       companyName,
-      websiteUrl,
+      websiteUrl: normalizedUrl,
       description: description || '',
       originalRow,
     });
   }
 
-  console.log(`[Excel Parser] Successfully parsed ${firms.length} firms, skipped ${skippedRows.length} rows`);
+  // Deduplicate by normalized URL (keep first occurrence)
+  const seenUrls = new Set<string>();
+  const firms: VCFirmInput[] = [];
+  let duplicatesRemoved = 0;
+  for (const firm of rawFirms) {
+    if (seenUrls.has(firm.websiteUrl)) {
+      duplicatesRemoved++;
+      console.log(`[Excel Parser] Deduplicating: ${firm.websiteUrl}`);
+    } else {
+      seenUrls.add(firm.websiteUrl);
+      firms.push(firm);
+    }
+  }
+
+  const qualityReport: InputQualityReport = {
+    valid: firms.length,
+    duplicatesRemoved,
+    malformedUrls,
+    missingCompanyNames,
+  };
+
+  console.log(
+    `[Excel Parser] Parsed ${firms.length} firms, skipped ${skippedRows.length} rows, ` +
+    `removed ${duplicatesRemoved} duplicates, ${malformedUrls} malformed URLs`,
+  );
 
   if (firms.length === 0) {
     const columnList = availableColumns.join(", ");
-    // Suggest which column might contain URLs by scanning all columns for URL-like values
     const allRows = data.slice(0, 5);
     const urlLikeCols = availableColumns.filter(col =>
       allRows.some(row => looksLikeUrl(String(row[col] ?? "")))
@@ -322,7 +417,9 @@ export async function parseInputExcel(fileUrl: string, columnMapping?: ColumnMap
     );
   }
 
-  return firms;
+  // Attach quality report as a non-enumerable property so it doesn't break existing array callers
+  Object.defineProperty(firms, 'qualityReport', { value: qualityReport, enumerable: false, writable: false });
+  return firms as VCFirmInput[] & { qualityReport: InputQualityReport };
 }
 
 import type { InvestmentThesisSummary } from "./investmentThesisAnalyzer";
