@@ -1826,9 +1826,13 @@ export default function Dashboard() {
 
                             {/* Live cost counter (processing) */}
                             {isProcessing && (job as any).totalCostUSD != null && (() => {
-                              const estRaw = (job as any).estimatedCostUSD as string | undefined;
-                              const isRange = estRaw?.includes("-");
-                              const estDisplay = isRange ? `$${estRaw}` : estRaw ? `$${Number(estRaw).toFixed(2)}` : null;
+                              const low = (job as any).estimatedCostLow;
+                              const high = (job as any).estimatedCostHigh;
+                              const estDisplay = low != null && high != null
+                                ? `$${Number(low).toFixed(2)}–$${Number(high).toFixed(2)}`
+                                : (job as any).estimatedCostUSD != null
+                                  ? `$${Number((job as any).estimatedCostUSD).toFixed(2)}`
+                                  : null;
                               return (
                                 <div className="flex items-center gap-1 text-sm text-muted-foreground mt-1">
                                   <DollarSign className="h-3.5 w-3.5" />
@@ -1842,9 +1846,13 @@ export default function Dashboard() {
 
                             {/* Actual vs estimated cost (completed, expanded) */}
                             {job.status === "completed" && (job as any).totalCostUSD && (() => {
-                              const estRaw = (job as any).estimatedCostUSD as string | undefined;
-                              const isRange = estRaw?.includes("-");
-                              const estDisplay = isRange ? `$${estRaw}` : estRaw ? `$${Number(estRaw).toFixed(2)}` : null;
+                              const low = (job as any).estimatedCostLow;
+                              const high = (job as any).estimatedCostHigh;
+                              const estDisplay = low != null && high != null
+                                ? `$${Number(low).toFixed(2)}–$${Number(high).toFixed(2)}`
+                                : (job as any).estimatedCostUSD != null
+                                  ? `$${Number((job as any).estimatedCostUSD).toFixed(2)}`
+                                  : null;
                               return (
                                 <div className="text-sm text-muted-foreground mt-1">
                                   Cost: <span className="font-mono font-medium">${Number((job as any).totalCostUSD).toFixed(4)}</span>

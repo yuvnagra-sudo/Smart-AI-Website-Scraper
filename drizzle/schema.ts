@@ -47,6 +47,8 @@ export const enrichmentJobs = mysqlTable("enrichmentJobs", {
   // Template and cost tracking
   template: varchar("template", { length: 50 }).default("vc"),
   estimatedCostUSD: decimal("estimatedCostUSD", { precision: 10, scale: 4 }),
+  estimatedCostLow: decimal("estimatedCostLow", { precision: 10, scale: 4 }),
+  estimatedCostHigh: decimal("estimatedCostHigh", { precision: 10, scale: 4 }),
   totalCostUSD: decimal("totalCostUSD", { precision: 10, scale: 4 }).default("0"),
   totalInputTokens: int("totalInputTokens").default(0),
   totalOutputTokens: int("totalOutputTokens").default(0),

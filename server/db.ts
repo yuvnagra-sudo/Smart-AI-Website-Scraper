@@ -99,6 +99,8 @@ export async function runMigrations(): Promise<void> {
     { name: "activeFirmsJson",    sql: "ALTER TABLE enrichmentJobs ADD COLUMN activeFirmsJson TEXT" },
     { name: "template",           sql: "ALTER TABLE enrichmentJobs ADD COLUMN template VARCHAR(50) DEFAULT 'vc'" },
     { name: "estimatedCostUSD",   sql: "ALTER TABLE enrichmentJobs ADD COLUMN estimatedCostUSD DECIMAL(10,4)" },
+    { name: "estimatedCostLow",   sql: "ALTER TABLE enrichmentJobs ADD COLUMN estimatedCostLow DECIMAL(10,4)" },
+    { name: "estimatedCostHigh",  sql: "ALTER TABLE enrichmentJobs ADD COLUMN estimatedCostHigh DECIMAL(10,4)" },
     { name: "totalCostUSD",       sql: "ALTER TABLE enrichmentJobs ADD COLUMN totalCostUSD DECIMAL(10,4) DEFAULT 0" },
     { name: "totalInputTokens",   sql: "ALTER TABLE enrichmentJobs ADD COLUMN totalInputTokens INT DEFAULT 0" },
     { name: "totalOutputTokens",  sql: "ALTER TABLE enrichmentJobs ADD COLUMN totalOutputTokens INT DEFAULT 0" },

@@ -239,9 +239,11 @@ export const appRouter = router({
           deepTeamProfileScraping: input.deepTeamProfileScraping !== false,
           maxTeamProfiles: input.maxTeamProfiles || 200,
           template: input.template || "vc",
-          // Store as "low-high" range so the UI can show an honest range.
-          // e.g. "0.28-0.72" — the midpoint is (low+high)/2.
-          estimatedCostUSD: `${estimate.totalCostLow.toFixed(2)}-${estimate.totalCostHigh.toFixed(2)}`,
+          // Store numeric midpoint in estimatedCostUSD (DECIMAL column) and range in two separate columns.
+          // Drizzle maps decimal() columns to string in TypeScript — convert explicitly.
+          estimatedCostUSD: String(((estimate.totalCostLow + estimate.totalCostHigh) / 2).toFixed(4)),
+          estimatedCostLow: String(estimate.totalCostLow.toFixed(4)),
+          estimatedCostHigh: String(estimate.totalCostHigh.toFixed(4)),
           sectionsJson: input.sectionsJson,
           systemPrompt: input.systemPrompt,
           objective: input.objective,
