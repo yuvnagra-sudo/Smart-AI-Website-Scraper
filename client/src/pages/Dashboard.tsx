@@ -1825,29 +1825,35 @@ export default function Dashboard() {
                             </p>
 
                             {/* Live cost counter (processing) */}
-                            {isProcessing && (job as any).totalCostUSD != null && (
-                              <div className="flex items-center gap-1 text-sm text-muted-foreground mt-1">
-                                <DollarSign className="h-3.5 w-3.5" />
-                                <span className="font-mono font-medium">${Number((job as any).totalCostUSD).toFixed(4)}</span>
-                                {(job as any).estimatedCostUSD && (
-                                  <span className="text-xs opacity-70 ml-1">
-                                    / est. ${Number((job as any).estimatedCostUSD).toFixed(2)}
-                                  </span>
-                                )}
-                              </div>
-                            )}
+                            {isProcessing && (job as any).totalCostUSD != null && (() => {
+                              const estRaw = (job as any).estimatedCostUSD as string | undefined;
+                              const isRange = estRaw?.includes("-");
+                              const estDisplay = isRange ? `$${estRaw}` : estRaw ? `$${Number(estRaw).toFixed(2)}` : null;
+                              return (
+                                <div className="flex items-center gap-1 text-sm text-muted-foreground mt-1">
+                                  <DollarSign className="h-3.5 w-3.5" />
+                                  <span className="font-mono font-medium">${Number((job as any).totalCostUSD).toFixed(4)}</span>
+                                  {estDisplay && (
+                                    <span className="text-xs opacity-70 ml-1">/ est. {estDisplay}</span>
+                                  )}
+                                </div>
+                              );
+                            })()}
 
                             {/* Actual vs estimated cost (completed, expanded) */}
-                            {job.status === "completed" && (job as any).totalCostUSD && (
-                              <div className="text-sm text-muted-foreground mt-1">
-                                Cost: <span className="font-mono font-medium">${Number((job as any).totalCostUSD).toFixed(4)}</span>
-                                {(job as any).estimatedCostUSD && (
-                                  <span className="text-xs opacity-60 ml-1">
-                                    (est. ${Number((job as any).estimatedCostUSD).toFixed(2)})
-                                  </span>
-                                )}
-                              </div>
-                            )}
+                            {job.status === "completed" && (job as any).totalCostUSD && (() => {
+                              const estRaw = (job as any).estimatedCostUSD as string | undefined;
+                              const isRange = estRaw?.includes("-");
+                              const estDisplay = isRange ? `$${estRaw}` : estRaw ? `$${Number(estRaw).toFixed(2)}` : null;
+                              return (
+                                <div className="text-sm text-muted-foreground mt-1">
+                                  Cost: <span className="font-mono font-medium">${Number((job as any).totalCostUSD).toFixed(4)}</span>
+                                  {estDisplay && (
+                                    <span className="text-xs opacity-60 ml-1">(est. {estDisplay})</span>
+                                  )}
+                                </div>
+                              );
+                            })()}
                           </div>
 
                           <div className="flex gap-2 flex-wrap items-start">

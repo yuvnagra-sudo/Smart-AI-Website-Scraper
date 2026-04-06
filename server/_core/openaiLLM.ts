@@ -1,16 +1,21 @@
 /**
- * LLM Implementation — OpenAI primary (Gemini removed)
+ * LLM Implementation — OpenAI
  *
- * Provider: OpenAI (gpt-5-mini by default)
+ * Provider: OpenAI (gpt-5-nano by default — matches base.md profile)
  *
  * Railway env vars:
  *   OPENAI_API_KEY  — OpenAI API key (required)
- *   OPENAI_MODEL    — model name (default: gpt-5.4-mini)
+ *   OPENAI_MODEL    — model name override (default: gpt-5-nano)
  *
- * Cost comparison (per 1M tokens):
- *   gpt-5-mini:   $0.25 input / $2.00 output  ← default, best value for structured extraction
- *   gpt-5-nano:   $0.05 input / $0.40 output  ← cheapest, simpler tasks only
- *   gpt-5:        $1.25 input / $10.00 output
+ * MODEL SELECTION RULE:
+ *   The default here MUST match the "extraction_model" / "planning_model" in
+ *   server/profiles/base.md so that cost estimates and actual API costs agree.
+ *   If you change the profile model, change this default too (and vice versa).
+ *
+ * Cost comparison (per 1M tokens, Apr 2026):
+ *   gpt-5-nano:   $0.05 input / $0.40 output  ← default, cheapest, great for structured extraction
+ *   gpt-5-mini:   $0.25 input / $2.00 output  ← 5x more expensive, smarter for complex sites
+ *   gpt-5:        $1.25 input / $10.00 output ← full power, use sparingly
  *   gpt-4o-mini:  $0.15 input / $0.60 output  ← legacy fallback
  */
 
@@ -21,20 +26,24 @@ import { ENV } from "./env";
 // Provider configuration
 // ---------------------------------------------------------------------------
 const OPENAI_API_KEY  = process.env.OPENAI_API_KEY ?? ENV.openAiApiKey ?? "";
-const OPENAI_MODEL    = process.env.OPENAI_MODEL ?? "gpt-5.4-mini";
+
+// IMPORTANT: This default must match the profile default in server/profiles/base.md.
+// Both must be changed together to keep cost estimates accurate.
+const OPENAI_MODEL    = process.env.OPENAI_MODEL ?? "gpt-5-nano";
 const OPENAI_BASE_URL = "https://api.openai.com/v1/";
 
 // ---------------------------------------------------------------------------
-// Pricing tables (per 1M tokens, Mar 2026)
+// Pricing tables (per 1M tokens, Apr 2026)
 // ---------------------------------------------------------------------------
 const OPENAI_PRICING: Record<string, { input: number; output: number }> = {
   // GPT-5 family
   "gpt-5.4":      { input: 2.50,  output: 15.00 },
+  "gpt-5.4-mini": { input: 0.25,  output: 2.00  },
   "gpt-5.2":      { input: 1.75,  output: 14.00 },
   "gpt-5.1":      { input: 1.25,  output: 10.00 },
   "gpt-5":        { input: 1.25,  output: 10.00 },
-  "gpt-5-mini":   { input: 0.25,  output: 2.00  },  // ← default, best value
-  "gpt-5-nano":   { input: 0.05,  output: 0.40  },
+  "gpt-5-mini":   { input: 0.25,  output: 2.00  },
+  "gpt-5-nano":   { input: 0.05,  output: 0.40  },  // ← default
   // GPT-4.1 family
   "gpt-4.1":      { input: 3.00,  output: 12.00 },
   "gpt-4.1-mini": { input: 0.40,  output: 1.60  },
@@ -56,7 +65,7 @@ let totalOutputTokens = 0;
 // ---------------------------------------------------------------------------
 // Startup log
 // ---------------------------------------------------------------------------
-const pricing = OPENAI_PRICING[OPENAI_MODEL] ?? { input: 0.25, output: 2.00 };
+const pricing = OPENAI_PRICING[OPENAI_MODEL] ?? { input: 0.05, output: 0.40 };
 if (!OPENAI_API_KEY) {
   console.error(`[LLM] ❌ OPENAI_API_KEY is not set — all LLM calls will fail`);
 } else {
@@ -107,10 +116,10 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
 
   const data = await response.json();
 
-  // Track cost
+  // Track cost using actual token usage from the API response
   const inputTokens  = data.usage?.prompt_tokens    || 0;
   const outputTokens = data.usage?.completion_tokens || 0;
-  const p            = OPENAI_PRICING[effectiveModel] ?? OPENAI_PRICING[OPENAI_MODEL] ?? { input: 0.25, output: 2.00 };
+  const p            = OPENAI_PRICING[effectiveModel] ?? OPENAI_PRICING[OPENAI_MODEL] ?? { input: 0.05, output: 0.40 };
   const cost         = (inputTokens * p.input + outputTokens * p.output) / 1_000_000;
 
   totalCalls++;

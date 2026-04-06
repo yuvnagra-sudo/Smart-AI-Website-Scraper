@@ -239,7 +239,9 @@ export const appRouter = router({
           deepTeamProfileScraping: input.deepTeamProfileScraping !== false,
           maxTeamProfiles: input.maxTeamProfiles || 200,
           template: input.template || "vc",
-          estimatedCostUSD: String(estimate.totalCost),
+          // Store as "low-high" range so the UI can show an honest range.
+          // e.g. "0.28-0.72" — the midpoint is (low+high)/2.
+          estimatedCostUSD: `${estimate.totalCostLow.toFixed(2)}-${estimate.totalCostHigh.toFixed(2)}`,
           sectionsJson: input.sectionsJson,
           systemPrompt: input.systemPrompt,
           objective: input.objective,

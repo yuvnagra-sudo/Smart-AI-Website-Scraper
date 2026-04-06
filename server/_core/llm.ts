@@ -281,7 +281,8 @@ export async function invokeLLM(params: InvokeParams, retries = 3): Promise<Invo
   } = params;
 
   const payload: Record<string, unknown> = {
-    model: model ?? process.env.OPENAI_MODEL ?? "gpt-5.4-mini",
+    // Default must match openaiLLM.ts and base.md profile — all three must agree.
+    model: model ?? process.env.OPENAI_MODEL ?? "gpt-5-nano",
     messages: messages.map(normalizeMessage),
   };
 
