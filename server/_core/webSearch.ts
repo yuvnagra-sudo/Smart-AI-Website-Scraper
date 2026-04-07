@@ -140,6 +140,15 @@ async function searchViaDuckDuckGo(query: string, numResults = 10): Promise<Sear
  *   2. Jina Search (if JINA_API_KEY set) — reliable but 100 RPM cap triggers under concurrency
  *   3. DuckDuckGo — free fallback (unreliable on Railway, 3s timeout)
  */
+/**
+ * Strip `site:example.com` operator from a query string.
+ * Used as a fallback when a site-scoped query returns 0 results —
+ * small SMB sites are often not indexed at the sub-page level.
+ */
+function stripSiteOperator(query: string): string {
+  return query.replace(/\bsite:\S+/gi, "").replace(/\s{2,}/g, " ").trim();
+}
+
 export async function webSearch(query: string, numResults = 10): Promise<SearchResult[]> {
   // 1. Try Serper first (Google results, reliable at scale, no RPM issues under concurrency)
   if (process.env.SERPER_API_KEY) {
@@ -148,6 +157,19 @@ export async function webSearch(query: string, numResults = 10): Promise<SearchR
       if (results.length > 0) {
         console.log(`[webSearch] Serper: ${results.length} results for "${query}"`);
         return results;
+      }
+      // If the query contained a site: operator and returned 0 results, retry without it.
+      // Small SMB sites are often not indexed at the sub-page level by Google.
+      const stripped = stripSiteOperator(query);
+      if (stripped !== query && stripped.length > 0) {
+        console.warn(`[webSearch] Serper returned 0 results for site-scoped query — retrying without site: operator`);
+        try {
+          const retryResults = await searchViaSerper(stripped, numResults);
+          if (retryResults.length > 0) {
+            console.log(`[webSearch] Serper retry: ${retryResults.length} results for "${stripped}"`);
+            return retryResults;
+          }
+        } catch { /* fall through to next provider */ }
       }
       console.warn(`[webSearch] Serper returned 0 results — trying next provider`);
     } catch (err) {

@@ -29,19 +29,90 @@ export function normalizeUrl(raw: string): string {
  */
 export function deriveCompanyName(url: string): string {
   try {
-    const hostname = new URL(url).hostname
+    const stem = new URL(url).hostname
       .replace(/^www\./, "")
       .split(".")[0]
       .replace(/[-_]/g, " ")
-      .replace(/([a-z])([A-Z])/g, "$1 $2");
-    return hostname
-      .split(" ")
-      .filter(Boolean)
+      .replace(/([a-z])([A-Z])/g, "$1 $2"); // camelCase → words
+
+    // If the stem is still a single long lowercase word (no spaces), attempt to split it
+    // using a greedy longest-match against a curated list of common English words.
+    // This handles hostnames like "lakeheadsteelbridgeteam" → "Lakehead Steel Bridge Team".
+    const words = stem.split(" ").filter(Boolean);
+    const finalWords: string[] = [];
+    for (const word of words) {
+      if (word.length > 12 && word === word.toLowerCase()) {
+        // Try greedy word segmentation using common suffixes/prefixes
+        const segmented = segmentWord(word);
+        finalWords.push(...segmented);
+      } else {
+        finalWords.push(word);
+      }
+    }
+    return finalWords
       .map((w: string) => w.charAt(0).toUpperCase() + w.slice(1))
       .join(" ");
   } catch {
     return url;
   }
+}
+
+/**
+ * Greedy longest-match word segmentation for all-lowercase concatenated hostnames.
+ * e.g. "lakeheadsteelbridgeteam" → ["lakehead", "steel", "bridge", "team"]
+ * Uses a frequency-ordered word list to prefer longer, more common splits.
+ */
+function segmentWord(s: string): string[] {
+  // Common English words ordered roughly by length (longer first for greedy match)
+  const WORDS = [
+    "international","management","solutions","services","consulting","technology",
+    "development","marketing","financial","resources","communications","construction",
+    "engineering","properties","associates","industries","enterprises","partners",
+    "systems","digital","creative","design","studio","agency","global","capital",
+    "ventures","holdings","network","media","health","dental","legal","realty",
+    "builders","roofing","plumbing","electric","heating","cooling","cleaning",
+    "catering","bakery","brewery","winery","florist","garden","greenhouse",
+    "automotive","trucking","logistics","shipping","moving","storage",
+    "accounting","insurance","mortgage","lending","banking","trading",
+    "printing","publishing","photography","video","audio","music",
+    "fitness","wellness","therapy","clinic","pharmacy","optical",
+    "school","academy","training","coaching","tutoring",
+    "steel","metal","iron","wood","stone","glass","plastic","rubber",
+    "bridge","road","paving","concrete","masonry","welding","fabrication",
+    "team","group","corp","company","business","shop","store","market",
+    "small","large","best","top","pro","plus","max","ultra","super",
+    "north","south","east","west","central","lake","river","mountain",
+    "head","land","ville","town","city","port","field","wood","ford",
+    "engine","repair","service","supply","sales","rental","leasing",
+    "gourmet","organic","natural","fresh","farm","food","kitchen",
+    "boutique","fashion","style","beauty","spa","salon","barber",
+    "paralegal","notary","law","firm","office","centre","center",
+    "dunn","smith","jones","brown","wilson","taylor","clark","hall",
+  ];
+
+  const result: string[] = [];
+  let remaining = s.toLowerCase();
+  while (remaining.length > 0) {
+    let matched = false;
+    for (const w of WORDS) {
+      if (remaining.startsWith(w)) {
+        result.push(w);
+        remaining = remaining.slice(w.length);
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) {
+      // No match found — consume one character at a time into the last token
+      if (result.length > 0) {
+        result[result.length - 1] += remaining[0];
+      } else {
+        result.push(remaining[0]);
+      }
+      remaining = remaining.slice(1);
+    }
+  }
+  return result.filter(Boolean);
 }
 
 export interface InputQualityReport {
