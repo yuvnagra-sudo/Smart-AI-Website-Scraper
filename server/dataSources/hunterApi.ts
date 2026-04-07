@@ -62,10 +62,10 @@ const HUNTER_BASE_URL = "https://api.hunter.io/v2";
 
 /**
  * Maximum emails to request from Domain Search.
- * Hunter returns up to 100 per call; we cap at 20 to keep response small
- * and only pull the most relevant results.
+ * Hunter returns up to 100 per call; we request all 100 at no extra cost
+ * (1 credit per call regardless of result count).
  */
-const MAX_EMAILS = parseInt(process.env.HUNTER_MAX_EMAILS ?? "20", 10);
+const MAX_EMAILS = parseInt(process.env.HUNTER_MAX_EMAILS ?? "100", 10);
 
 /**
  * Seniority tiers for ranking (lower index = higher priority).
