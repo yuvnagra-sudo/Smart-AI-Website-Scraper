@@ -449,12 +449,64 @@ function sanitizeForExcel(data: any[]): any[] {
         sanitized[key] = '';
       } else if (typeof value === 'string' && value.toLowerCase() === 'nan') {
         sanitized[key] = '';
+      } else if (typeof value === 'string') {
+        sanitized[key] = normalizeFieldValue(key, value);
       } else {
         sanitized[key] = value;
       }
     }
     return sanitized;
   });
+}
+
+/**
+ * Normalize a field value based on its key name for consistent Excel output.
+ * Handles phone numbers, URLs, currencies, booleans, and whitespace.
+ */
+function normalizeFieldValue(key: string, value: string): string {
+  if (!value || value.trim() === '') return '';
+  const v = value.trim();
+  const k = key.toLowerCase();
+
+  // Phone numbers — normalize to E.164-style: +1 (555) 123-4567
+  if (/phone|tel|mobile|cell/.test(k)) {
+    const digits = v.replace(/\D/g, '');
+    if (digits.length === 10) return `(${digits.slice(0,3)}) ${digits.slice(3,6)}-${digits.slice(6)}`;
+    if (digits.length === 11 && digits[0] === '1') return `+1 (${digits.slice(1,4)}) ${digits.slice(4,7)}-${digits.slice(7)}`;
+    return v; // Return as-is if format is unrecognized
+  }
+
+  // URLs — ensure https:// prefix and remove trailing slash
+  if (/url|website|linkedin|twitter|instagram|facebook|link/.test(k)) {
+    if (v.startsWith('http://') || v.startsWith('https://')) {
+      return v.replace(/\/$/, '');
+    }
+    if (v.startsWith('www.') || v.includes('.com') || v.includes('.io') || v.includes('.co')) {
+      return `https://${v}`.replace(/\/$/, '');
+    }
+    return v;
+  }
+
+  // Currency — normalize to $X.XM or $XB format
+  if (/aum|fund.?size|revenue|arr|mrr|raised|funding|investment|capital/.test(k)) {
+    // Already formatted (e.g. "$500M", "$1.2B") — pass through
+    if (/^\$[\d,.]+[MBKmkb]?$/.test(v)) return v;
+    return v;
+  }
+
+  // Boolean-like fields — normalize to Yes/No
+  if (/is_|has_|uses_|active|enabled/.test(k)) {
+    const lower = v.toLowerCase();
+    if (['true', 'yes', '1', 'y'].includes(lower)) return 'Yes';
+    if (['false', 'no', '0', 'n'].includes(lower)) return 'No';
+    return v;
+  }
+
+  // Email — lowercase
+  if (/email|e-mail/.test(k)) return v.toLowerCase();
+
+  // Collapse excessive whitespace and newlines
+  return v.replace(/\s+/g, ' ').trim();
 }
 
 export function createOutputExcel(

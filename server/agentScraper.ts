@@ -25,7 +25,8 @@ import { extractDirectory, type DirectoryEntry as DirEntry } from "./directoryEx
 import { queuedLLMCall } from "./_core/llmQueue";
 import { webSearch, searchQueryForField, searchQueryVariant } from "./_core/webSearch";
 import type { SkillContext } from "../shared/skillContext";
-import { preLLMExtract, CONFIDENCE } from "./preLLMExtractor";
+import { preLLMExtract, preLLMExtractFull, CONFIDENCE } from "./preLLMExtractor";
+import { enrichWithLinkedIn } from "./dataSources/apifyLinkedin";
 import { mapUrlsHeuristic, mapUrlsWithLLM, generateTeamPageCandidates, type MappedUrl } from "./mapPhase";
 import { getProfile, getSection, getSubSection, type AgentProfile } from "./agentConfig";
 import { getCachedFetch, setCachedFetch } from "./fetchCache";
@@ -1094,6 +1095,8 @@ export async function scrapeUrl(
   const extras: Record<string, unknown> = {};
   const failedDomains = new Map<string, number>(); // Track fetch failures per domain
   let webSearchAttemptCount = 0; // For query diversification
+  // LinkedIn URL found on the primary page (used for post-loop enrichment)
+  let companyLinkedinUrl: string | null = null;
 
   // ── STEP 0: Fetch the primary URL first (always) ──────────────────────────
   // Check cancellation before the first (potentially slow) fetch
@@ -1114,6 +1117,15 @@ export async function scrapeUrl(
       if (cbResult) {
         extras[url] = cbResult.data;
         skipGenericForPrimary = cbResult.skipGenericExtraction ?? false;
+      }
+    }
+
+    // Capture LinkedIn URL from primary page HTML (free — no API cost)
+    if (primary.rawHtml) {
+      const { companyLinkedinUrl: liUrl } = preLLMExtractFull(primary.rawHtml, sections, url);
+      if (liUrl) {
+        companyLinkedinUrl = liUrl;
+        console.log(`[agentScraper] Found LinkedIn URL on primary page: ${liUrl}`);
       }
     }
 
@@ -1331,6 +1343,46 @@ export async function scrapeUrl(
           .sort((a, b) => (fieldResults[a.key]?.confidence ?? 0) - (fieldResults[b.key]?.confidence ?? 0))[0];
         if (weakestField) webSearchedFields.add(weakestField.key);
       }
+    }
+  }
+
+  // ── LINKEDIN ENRICHMENT (post-loop) ──────────────────────────────────────
+  // Only runs if APIFY_API_KEY is set and DM fields are still weak after the loop.
+  if (!isCancelled?.()) {
+    try {
+      const domain = (() => { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return url; } })();
+      const targetTitles = skillContext?.targetTitles ?? [];
+      const linkedInResult = await enrichWithLinkedIn(
+        domain,
+        companyName,
+        sections,
+        fieldResults,
+        companyLinkedinUrl,
+        targetTitles,
+      );
+      if (linkedInResult.bestMatch) {
+        const bm = linkedInResult.bestMatch;
+        // Merge best match into weak DM name/title/linkedin fields
+        for (const s of sections) {
+          const keyLower = s.key.toLowerCase();
+          const isDmField = /decision.?maker|dm\d|contact|person/.test(keyLower);
+          if (isDmField && /name/.test(keyLower) && !fieldResults[s.key]?.value) {
+            fieldResults[s.key] = { value: bm.name, confidence: 0.85, sourceUrl: bm.linkedinUrl || url };
+          } else if (isDmField && /title|role|position/.test(keyLower) && !fieldResults[s.key]?.value) {
+            fieldResults[s.key] = { value: bm.title, confidence: 0.85, sourceUrl: bm.linkedinUrl || url };
+          } else if (isDmField && /linkedin/.test(keyLower) && !fieldResults[s.key]?.value && bm.linkedinUrl) {
+            fieldResults[s.key] = { value: bm.linkedinUrl, confidence: 0.9, sourceUrl: bm.linkedinUrl };
+          }
+        }
+        // Store all candidates in extras for the Sources sheet
+        extras["__linkedInCandidates"] = linkedInResult.allCandidates;
+        extras["__linkedInCompanyUrl"] = linkedInResult.linkedInCompanyUrl;
+        console.log(`[agentScraper] LinkedIn enrichment merged: ${bm.name} (${bm.title})`);
+      } else if (linkedInResult.skippedReason) {
+        console.log(`[agentScraper] LinkedIn enrichment skipped: ${linkedInResult.skippedReason}`);
+      }
+    } catch (err) {
+      console.warn(`[agentScraper] LinkedIn enrichment failed (non-fatal):`, err);
     }
   }
 

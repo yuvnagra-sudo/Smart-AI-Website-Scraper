@@ -564,6 +564,35 @@ function getTier(title: string): number {
 }
 
 // ---------------------------------------------------------------------------
+// Extended export: preLLMExtractFull — returns fields + companyLinkedinUrl
+// ---------------------------------------------------------------------------
+
+export interface PreLLMFullResult {
+  /** All extracted field values keyed by section key. */
+  fields: FieldResultMap;
+  /** Company LinkedIn URL found deterministically from the page HTML (e.g. linkedin.com/company/acme).
+   *  Null if not found. Used to skip the web-search LinkedIn lookup step. */
+  companyLinkedinUrl: string | null;
+}
+
+/**
+ * Like preLLMExtract() but also returns the company LinkedIn URL found on the page.
+ * Use this when you need the LinkedIn URL for downstream enrichment (e.g. Apify).
+ */
+export function preLLMExtractFull(
+  html: string,
+  sections: AgentSection[],
+  sourceUrl?: string,
+): PreLLMFullResult {
+  const fields = preLLMExtract(html, sections, sourceUrl);
+  // Re-run deterministic signals to extract companyLinkedin
+  const signals = extractDeterministicSignals(html);
+  const companyLinkedinUrl =
+    signals.companyLinkedin.length > 0 ? signals.companyLinkedin[0] : null;
+  return { fields, companyLinkedinUrl };
+}
+
+// ---------------------------------------------------------------------------
 // Export structured entity types for use by map phase
 // ---------------------------------------------------------------------------
 
