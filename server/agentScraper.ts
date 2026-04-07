@@ -29,6 +29,7 @@ import { preLLMExtract, preLLMExtractFull, CONFIDENCE } from "./preLLMExtractor"
 import { enrichWithLinkedIn } from "./dataSources/apifyLinkedin";
 import { hunterDomainSearch } from "./dataSources/hunterApi";
 import { smtpVerifyGenericEmail, shouldRunSmtpFallback } from "./dataSources/smtpVerify";
+import { scrapeEmailsFromDomain, shouldRunDirectEmailScraper } from "./dataSources/directEmailScraper";
 import { mapUrlsHeuristic, mapUrlsWithLLM, generateTeamPageCandidates, type MappedUrl } from "./mapPhase";
 import { getProfile, getSection, getSubSection, type AgentProfile } from "./agentConfig";
 import { getCachedFetch, setCachedFetch } from "./fetchCache";
@@ -1421,7 +1422,9 @@ export async function scrapeUrl(
   // ── POST-LOOP ENRICHMENT CASCADE ─────────────────────────────────────────
   //
   //  Order (cheapest / highest-coverage first):
+  //    0. Direct HTML scraper — regex over 18 common paths via Jina ($0.00)
   //    1. Hunter Domain Search  — emails + names from Hunter's index (~$0.01/call)
+  //       └─ Skipped if Step 0 found a personal email
   //    2. Apify LinkedIn — DM name/title when Hunter had no coverage (~$0.008/profile)
   //    3. SMTP handshake — generic email fallback (free, last resort)
   //
@@ -1429,8 +1432,45 @@ export async function scrapeUrl(
 
   const _domain = (() => { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return url; } })();
 
+  // ── Step 0: Direct HTML Email Scraper ─────────────────────────────────────
+  // Zero-cost first pass — scrapes 18 common paths (/, /contact, /about, /team...)
+  // using the Jina reader. Finds emails via regex, filters noise, classifies
+  // personal vs generic. If a personal email is found here, Hunter is skipped.
+  let directScrapeFoundPersonal = false;
+  if (!isCancelled?.() && shouldRunDirectEmailScraper(sections, fieldResults, CONFIDENCE_THRESHOLD)) {
+    try {
+      const directResult = await scrapeEmailsFromDomain(_domain);
+      if (directResult.emails.length > 0) {
+        const sourceUrl = `https://${_domain}${directResult.bestPersonal?.sourcePath ?? directResult.bestGeneric?.sourcePath ?? ""}`;
+        const bestEmail = directResult.bestPersonal ?? directResult.bestGeneric;
+        if (bestEmail) {
+          // Merge into the first empty email field
+          for (const s of sections) {
+            if (/email/i.test(s.key) && !fieldResults[s.key]?.value) {
+              fieldResults[s.key] = {
+                value: bestEmail.email,
+                confidence: bestEmail.type === "personal" ? 0.78 : 0.65,
+                sourceUrl,
+              };
+              directScrapeFoundPersonal = bestEmail.type === "personal";
+              console.log(
+                `[agentScraper] Direct email scraper: found ${bestEmail.type} email <${bestEmail.email}> on ${bestEmail.sourcePath}`,
+              );
+              break;
+            }
+          }
+        }
+        // Store all found emails for downstream use
+        extras["__directEmails"] = directResult.emails;
+      }
+    } catch (err) {
+      console.warn(`[agentScraper] Direct email scraper failed (non-fatal):`, err);
+    }
+  }
+
   // ── Step 1: Hunter Domain Search ─────────────────────────────────────────
-  if (!isCancelled?.()) {
+  // Skip if direct scraper already found a personal email (saves $0.01/firm).
+  if (!isCancelled?.() && !directScrapeFoundPersonal) {
     try {
       const hunterResult = await hunterDomainSearch(_domain, sections, fieldResults);
       if (hunterResult.bestMatch) {
