@@ -27,13 +27,18 @@ function extractEmailsFromHTML(html: string, memberNames: string[]): Map<string,
   const emailMap = new Map<string, string>();
   const $ = cheerio.load(html);
   
-  // Extract all emails from mailto: links
+  // Generic inbox prefixes to filter out — these are not personal emails and
+  // won't match to a named team member anyway.
+  const GENERIC_PREFIXES = ['info@', 'contact@', 'hello@', 'support@', 'careers@', 'press@', 'media@'];
+  const isGeneric = (e: string) => GENERIC_PREFIXES.some(p => e.startsWith(p));
+
+  // Extract all emails from mailto: links (apply same generic filter as text emails)
   const allEmails: string[] = [];
   $('a[href^="mailto:"]').each((_, elem) => {
     const href = $(elem).attr('href');
     if (href) {
       const email = href.replace('mailto:', '').split('?')[0].trim().toLowerCase();
-      if (email.match(/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/)) {
+      if (email.match(/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/) && !isGeneric(email)) {
         allEmails.push(email);
       }
     }
@@ -45,16 +50,10 @@ function extractEmailsFromHTML(html: string, memberNames: string[]): Map<string,
   if (textEmailMatches) {
     for (const email of textEmailMatches) {
       const lowerEmail = email.toLowerCase();
-      // Filter out generic/false positive emails
+      // Filter out generic/false positive emails (same list as mailto: filter above)
       if (!lowerEmail.includes('example.com') && 
           !lowerEmail.includes('placeholder') &&
-          !lowerEmail.startsWith('info@') &&
-          !lowerEmail.startsWith('contact@') &&
-          !lowerEmail.startsWith('hello@') &&
-          !lowerEmail.startsWith('support@') &&
-          !lowerEmail.startsWith('careers@') &&
-          !lowerEmail.startsWith('press@') &&
-          !lowerEmail.startsWith('media@') &&
+          !isGeneric(lowerEmail) &&
           !allEmails.includes(lowerEmail)) {
         allEmails.push(lowerEmail);
       }

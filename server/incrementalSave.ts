@@ -105,7 +105,7 @@ export async function saveFirmImmediately(
       let includeMember = false;
       if (tierFilter === "tier1" && tierClassification.tier === "Tier 1") {
         includeMember = true;
-      } else if (tierFilter === "tier1-2" && (tierClassification.tier === "Tier 1" || tierClassification.tier === "Tier 2" || tierClassification.tier === "Tier 3")) {
+      } else if (tierFilter === "tier1-2" && (tierClassification.tier === "Tier 1" || tierClassification.tier === "Tier 2")) {
         includeMember = true;
       } else if (tierFilter === "all") {
         includeMember = true;

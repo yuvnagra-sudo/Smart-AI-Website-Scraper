@@ -72,7 +72,7 @@ export function mapUrlsHeuristic(
   const mapped: MappedUrl[] = [];
   const seen = new Set<string>();
   let baseDomain = "";
-  try { baseDomain = new URL(baseUrl).hostname; } catch { /* ignore */ }
+  try { baseDomain = new URL(baseUrl).hostname.replace(/^www\./, ""); } catch { /* ignore */ }
 
   // Determine what types of pages we need based on sections
   const needsPeople = sections.some(s =>
@@ -86,9 +86,10 @@ export function mapUrlsHeuristic(
     if (seen.has(link)) continue;
     seen.add(link);
 
-    // Only consider same-domain links (sub-pages of the company site)
+    // Accept same-domain links including www. prefix and subdomains (team.acme.com, about.acme.com)
     try {
-      if (new URL(link).hostname !== baseDomain) continue;
+      const linkHost = new URL(link).hostname.replace(/^www\./, "");
+      if (linkHost !== baseDomain && !linkHost.endsWith("." + baseDomain)) continue;
     } catch { continue; }
 
     const classification = classifyUrl(link);
@@ -110,6 +111,8 @@ export function mapUrlsHeuristic(
     for (const m of mapped) {
       if (m.category === "team") m.priority = 0; // Top priority
       if (m.category === "about") m.priority = Math.min(m.priority, 1);
+      // Contact pages often have owner/manager name + email for small businesses
+      if (m.category === "contact") m.priority = Math.min(m.priority, 1);
     }
   }
   if (needsServices) {
@@ -156,12 +159,15 @@ export async function mapUrlsWithLLM(
   // Filter to same-domain links not already classified
   const classifiedUrls = new Set(heuristicResults.map(r => r.url));
   let baseDomain = "";
-  try { baseDomain = new URL(baseUrl).hostname; } catch { /* ignore */ }
+  try { baseDomain = new URL(baseUrl).hostname.replace(/^www\./, ""); } catch { /* ignore */ }
 
   const unclassified = links.filter(l => {
     if (classifiedUrls.has(l)) return false;
-    try { return new URL(l).hostname === baseDomain; } catch { return false; }
-  }).slice(0, 15); // Limit to 15 to keep the prompt small
+    try {
+      const lHost = new URL(l).hostname.replace(/^www\./, "");
+      return lHost === baseDomain || lHost.endsWith("." + baseDomain);
+    } catch { return false; }
+  }).slice(0, 25); // Limit to 25 — cheap gpt-5-nano call; 15 was too few for SPA sites with 50+ routes
 
   if (unclassified.length === 0) return heuristicResults;
 

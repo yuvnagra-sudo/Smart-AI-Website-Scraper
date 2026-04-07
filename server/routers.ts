@@ -1275,10 +1275,12 @@ export async function processAgentJob(jobId: number) {
     let totalQueued = firms.length;
 
     // Concurrency auto-scales with LLM_RPM_LIMIT.
-    // Formula: floor(RPM / 7 LLM-calls-per-firm / 2) capped at 50
-    // At 800 RPM: floor(800 / 7 / 2) = 57 → capped at 50
+    // Formula: floor(RPM / 7 LLM-calls-per-firm / 2) capped at 200
+    // At 8000 RPM (OpenAI Tier 4 default): floor(8000 / 7 / 2) = 571 → capped at 200
+    // At 800 RPM: floor(800 / 7 / 2) = 57
     // At 300 RPM: floor(300 / 7 / 2) = 21
-    const RPM = parseInt(process.env.LLM_RPM_LIMIT ?? '800', 10);
+    // Default matches costEstimation.ts (8000) and llmQueue.ts (8000).
+    const RPM = parseInt(process.env.LLM_RPM_LIMIT ?? '8000', 10);
     // Tier 5 OpenAI allows 30,000 RPM. At 24,000 RPM (80% of limit), this formula
     // yields ~857 — capped at 200 to stay within Railway memory limits.
     const CONCURRENCY = Math.min(200, Math.max(5, Math.floor(RPM / 7 / 2)));
@@ -1330,6 +1332,10 @@ export async function processAgentJob(jobId: number) {
           .replace(/\{companyName\}/g, firm.companyName)
           .replace(/\{websiteUrl\}/g, firm.websiteUrl);
 
+        // Per-firm wall-clock timeout — prevents a stalled fetch or runaway
+        // agent loop from blocking the entire worker queue indefinitely.
+        // 5 minutes is generous: a 7-hop job with 45s Puppeteer fallbacks takes ~3.5 min max.
+        const FIRM_TIMEOUT_MS = 5 * 60 * 1000;
         try {
           // ── Scrape website for all sections ─────────────────────────────────
           let profileData: Record<string, string> = {};
@@ -1337,7 +1343,7 @@ export async function processAgentJob(jobId: number) {
           let stats: ScrapeStats = { fieldsTotal: sections.length, fieldsFilled: 0, emptyFields: [] };
           let isDirectoryResult = false;
 
-          const scrapeResult = await scrapeUrl(
+          const scrapePromise = scrapeUrl(
             firm.websiteUrl,
             rowObjective,
             sections,
@@ -1349,6 +1355,10 @@ export async function processAgentJob(jobId: number) {
             undefined, // initialFieldValues
             firm.companyName, // knownCompanyName — passed explicitly so web searches use the real name
           );
+          const timeoutPromise = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error(`FIRM_TIMEOUT: ${firm.websiteUrl} exceeded ${FIRM_TIMEOUT_MS / 1000}s`)), FIRM_TIMEOUT_MS)
+          );
+          const scrapeResult = await Promise.race([scrapePromise, timeoutPromise]);
 
           if (scrapeResult.type === "directory") {
             console.warn(`[processAgentJob] Unexpected directory result for ${firm.websiteUrl} — skipping`);
@@ -1415,10 +1425,11 @@ export async function processAgentJob(jobId: number) {
           totalOutputTokens: currentStats.totalOutputTokens - outputBaseline,
         });
 
-        // Cost safety cap: if actual spend exceeds 3x the original estimate, stop the job
-        // to prevent runaway costs. User can re-run with a higher budget if needed.
+        // Cost safety cap: if actual spend exceeds 5x the original estimate, stop the job.
+        // Raised from 3x — estimates have ±60% documented variance; complex sites legitimately
+        // run 4x the estimate (JS-heavy pages, many hops). 3x was killing valid jobs.
         const estimatedCost = typeof job.estimatedCostUSD === 'string' ? parseFloat(job.estimatedCostUSD) : (job.estimatedCostUSD ?? 0);
-        const costCap = Math.max(estimatedCost * 3, 10); // at least $10 cap
+        const costCap = Math.max(estimatedCost * 5, 10); // at least $10 cap
         if (liveCost > costCap) {
           console.warn(`[processAgentJob] 🛑 Cost cap hit: $${liveCost.toFixed(2)} > $${costCap.toFixed(2)} cap. Stopping job to prevent runaway spend.`);
           markJobCancelled(jobId);

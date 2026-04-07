@@ -261,6 +261,7 @@ Return ONLY valid JSON (no markdown):
   try {
     const response = await queuedLLMCall({
       model: profile.planningModel,
+      temperature: 0.5, // Moderate temperature for planning — allows creative URL/query choices
       messages: [{ role: "user", content: prompt }],
       response_format: {
         type: "json_schema",
@@ -502,6 +503,7 @@ Return ONLY valid JSON with these keys: ${sectionsForLLM.map((s) => s.key).join(
   try {
     const response = await queuedLLMCall({
       model: extractProfile.extractionModel,
+      temperature: 0.2, // Low randomness for structured extraction — consistent, deterministic output
       messages: [{ role: "user", content: userMsg }],
       response_format: {
         type: "json_schema",
@@ -550,7 +552,7 @@ Return ONLY valid JSON with these keys: ${sectionsForLLM.map((s) => s.key).join(
             if (normalizedContent.includes(normalizedQuote)) {
               citationValid = true;
             } else {
-              const quoteWords = normalizedQuote.split(/\s+/).filter((w: string) => w.length > 2);
+              const quoteWords = normalizedQuote.split(/\s+/).filter((w: string) => w.length >= 2);
               if (quoteWords.length > 0) {
                 const matchedWords = quoteWords.filter((w: string) => normalizedContent.includes(w));
                 citationValid = matchedWords.length / quoteWords.length >= 0.6;
@@ -614,7 +616,7 @@ Return ONLY valid JSON with these keys: ${sectionsForLLM.map((s) => s.key).join(
           citationValid = true;
         } else {
           // Fuzzy fallback: check if 60%+ of the quote's words appear near each other in content
-          const quoteWords = normalizedQuote.split(/\s+/).filter(w => w.length > 2);
+              const quoteWords = normalizedQuote.split(/\s+/).filter(w => w.length >= 2);
           if (quoteWords.length > 0) {
             const matchedWords = quoteWords.filter(w => normalizedContent.includes(w));
             citationValid = matchedWords.length / quoteWords.length >= 0.6;
@@ -622,7 +624,7 @@ Return ONLY valid JSON with these keys: ${sectionsForLLM.map((s) => s.key).join(
         }
       }
       // Also accept: if the extracted VALUE itself appears in the content, treat as cited
-      if (!citationValid && value.length >= 3) {
+      if (!citationValid && value.length >= 2) {
         const normalizedValue = value.toLowerCase().replace(/\s+/g, " ").trim();
         if (normalizedContent.includes(normalizedValue)) {
           citationValid = true;

@@ -26,7 +26,7 @@ export interface SearchResult {
 // Reuses the same JINA_API_KEY as jinaFetcher — no extra credentials needed.
 // ---------------------------------------------------------------------------
 
-async function searchViaJina(query: string, numResults = 5): Promise<SearchResult[]> {
+async function searchViaJina(query: string, numResults = 10): Promise<SearchResult[]> {
   const apiKey = process.env.JINA_API_KEY;
   if (!apiKey) throw new Error("JINA_API_KEY not set");
 
@@ -55,7 +55,7 @@ async function searchViaJina(query: string, numResults = 5): Promise<SearchResul
 // Serper API (secondary — fast, reliable, ~$0.001/query)
 // ---------------------------------------------------------------------------
 
-async function searchViaSerper(query: string, numResults = 5): Promise<SearchResult[]> {
+async function searchViaSerper(query: string, numResults = 10): Promise<SearchResult[]> {
   const apiKey = process.env.SERPER_API_KEY;
   if (!apiKey) throw new Error("SERPER_API_KEY not set");
 
@@ -84,7 +84,7 @@ async function searchViaSerper(query: string, numResults = 5): Promise<SearchRes
 // refused — no need to wait 12s for a failure that happens in <100ms.
 // ---------------------------------------------------------------------------
 
-async function searchViaDuckDuckGo(query: string, numResults = 5): Promise<SearchResult[]> {
+async function searchViaDuckDuckGo(query: string, numResults = 10): Promise<SearchResult[]> {
   const encoded = encodeURIComponent(query);
   const response = await axios.get(`https://html.duckduckgo.com/html/?q=${encoded}`, {
     headers: {
@@ -140,7 +140,7 @@ async function searchViaDuckDuckGo(query: string, numResults = 5): Promise<Searc
  *   2. Serper (if SERPER_API_KEY set) — fast Google results
  *   3. DuckDuckGo — free fallback (unreliable on Railway, 3s timeout)
  */
-export async function webSearch(query: string, numResults = 5): Promise<SearchResult[]> {
+export async function webSearch(query: string, numResults = 10): Promise<SearchResult[]> {
   // 1. Try Jina Search first (reliable on Railway, reuses existing JINA_API_KEY)
   if (process.env.JINA_API_KEY) {
     try {
@@ -224,20 +224,58 @@ export function searchQueryVariant(
   attempt: number,
 ): string {
   let domain = "";
-  try { domain = new URL(websiteUrl).hostname.replace(/^www\./, ""); } catch { /* ignore */ }
+  try { domain = new URL(websiteUrl).hostname.replace(/^www\./,""); } catch { /* ignore */ }
 
   const readable = fieldLabel
     .replace(/_/g, " ")
     .replace(/([a-z])([A-Z])/g, "$1 $2")
     .toLowerCase();
 
-  const variants = [
-    `${companyName} ${readable}`,                              // Broad: "Acme Corp CEO"
-    `${companyName} leadership team`,                          // People-focused
-    `site:${domain} ${readable}`,                              // Site-specific
-    `"${companyName}" "${readable}"`,                          // Exact match
-    `${companyName} ${domain} about team contact`,             // Multi-signal
-  ];
+  // Detect field type to avoid using people-specific templates for non-people fields
+  const isPeopleField = /ceo|founder|owner|director|manager|contact|team|staff|leadership|decision.?maker/i.test(fieldLabel);
+  const isFundingField = /fund|invest|rais|round|series|seed|capital/i.test(fieldLabel);
+  const isLocationField = /location|address|headquarter|hq|city|country/i.test(fieldLabel);
 
+  if (isPeopleField) {
+    const variants = [
+      `${companyName} ${readable}`,
+      `${companyName} leadership team`,
+      `site:${domain} ${readable}`,
+      `"${companyName}" "${readable}"`,
+      `${companyName} ${domain} about team contact`,
+    ];
+    return variants[attempt % variants.length];
+  }
+
+  if (isFundingField) {
+    const variants = [
+      `${companyName} ${readable}`,
+      `${companyName} funding round investment`,
+      `"${companyName}" raised funding`,
+      `site:${domain} ${readable}`,
+      `${companyName} crunchbase funding`,
+    ];
+    return variants[attempt % variants.length];
+  }
+
+  if (isLocationField) {
+    const variants = [
+      `${companyName} ${readable}`,
+      `${companyName} office location headquarters`,
+      `"${companyName}" based in`,
+      `site:${domain} ${readable}`,
+      `${companyName} ${domain} contact address`,
+    ];
+    return variants[attempt % variants.length];
+  }
+
+  // Generic fallback for all other field types
+  const variants = [
+    `${companyName} ${readable}`,
+    `${companyName} ${domain} ${readable}`,
+    `site:${domain} ${readable}`,
+    `"${companyName}" "${readable}"`,
+    `${companyName} about ${readable}`,
+  ];
   return variants[attempt % variants.length];
 }

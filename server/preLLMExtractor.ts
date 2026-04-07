@@ -16,6 +16,7 @@
 import * as cheerio from "cheerio";
 import type { AgentSection, FieldResult, FieldResultMap } from "./agentScraper";
 import { getProfile } from "./agentConfig";
+import { classifyDecisionMakerTier } from "./decisionMakerTiers";
 
 // ---------------------------------------------------------------------------
 // Confidence levels — sourced from active agent profile
@@ -226,7 +227,9 @@ function extractPeopleFromCSS(html: string): CSSPerson[] {
 
       for (const ns of NAME_SELECTORS) {
         const text = $(card).find(ns).first().text().trim();
-        if (text && text.length > 1 && text.length < 80 && /^[A-Z]/.test(text)) {
+        // Accept names starting with uppercase, lowercase prefix (van, de, etc.),
+        // apostrophe (O'Brien), hyphen (McKenzie-Smith), or any Unicode letter.
+        if (text && text.length > 1 && text.length < 80 && /^[\p{L}'\-]/u.test(text)) {
           name = text;
           break;
         }
@@ -258,7 +261,9 @@ function extractPeopleFromCSS(html: string): CSSPerson[] {
     $("h3, h4").each((_, heading) => {
       const nameText = $(heading).text().trim();
       if (!nameText || nameText.length < 3 || nameText.length > 60) return;
-      if (!/^[A-Z][a-z]/.test(nameText)) return;
+      // Accept names starting with uppercase, lowercase prefix (van, de, etc.),
+      // apostrophe (O'Brien), or any Unicode letter sequence.
+      if (!/^[\p{L}'\-]/u.test(nameText)) return;
 
       const sibling = $(heading).next("p, .title, .role, .position, span").first();
       const titleText = sibling.text().trim();
@@ -412,7 +417,21 @@ export function preLLMExtract(
     const combined = keyLower + " " + labelLower;
 
     // -- Organization fields from JSON-LD --
-    const org = orgEntities[0];
+    // Merge all org entities: later entities fill gaps left by the first.
+    // This handles pages that emit multiple Schema.org blocks (parent + subsidiary,
+    // directory pages, etc.) where the target company may not be the first entity.
+    const org = orgEntities.length > 0
+      ? orgEntities.reduce((merged, entity) => ({
+          description:       merged.description       || entity.description,
+          foundingDate:      merged.foundingDate       || entity.foundingDate,
+          numberOfEmployees: merged.numberOfEmployees  || entity.numberOfEmployees,
+          address:           merged.address            || entity.address,
+          telephone:         merged.telephone          || entity.telephone,
+          email:             merged.email              || entity.email,
+          name:              merged.name               || entity.name,
+          url:               merged.url                || entity.url,
+        }))
+      : null;
     if (org) {
       if (/description|tagline|about|overview|summary/i.test(combined) && org.description) {
         results[s.key] = { value: org.description, confidence: CONFIDENCE.JSON_LD, sourceUrl };
@@ -537,17 +556,14 @@ export function preLLMExtract(
 }
 
 // ---------------------------------------------------------------------------
-// Decision-maker tier ranking (deterministic)
+// Decision-maker tier ranking — delegates to decisionMakerTiers.ts
 // ---------------------------------------------------------------------------
 
-const TIER_PATTERNS: Array<{ tier: number; pattern: RegExp }> = [
-  { tier: 1, pattern: /\b(ceo|founder|co-?founder|owner|president|managing\s+director|managing\s+partner|principal|executive\s+director|chief\s+executive)\b/i },
-  { tier: 2, pattern: /\b(cto|chief\s+technology|vp\s+engineering|vp\s+technology|vp\s+digital|director\s+of\s+technology|head\s+of\s+technology|technical\s+director|vp\s+product|head\s+of\s+product)\b/i },
-  { tier: 3, pattern: /\b(coo|cfo|cmo|cpo|vp\s+operations|director\s+of\s+operations|general\s+manager|vp\s+client|director\s+of\s+client|account\s+director|vp\s+strategy|director\s+of\s+strategy)\b/i },
-  { tier: 4, pattern: /\b(creative\s+director|art\s+director|design\s+director|marketing\s+director|brand\s+director|content\s+director|head\s+of\s+creative)\b/i },
-  { tier: 5, pattern: /\b(designer|developer|project\s+manager|account\s+manager|coordinator|analyst|associate)\b/i },
-];
-
+/**
+ * Rank people by decision-maker priority using the canonical tier classifier
+ * from decisionMakerTiers.ts (which reads from base.md patterns).
+ * Replaces the old narrow TIER_PATTERNS array that only covered ~20 titles.
+ */
 function rankByDecisionMakerTier<T extends { title: string }>(people: T[]): T[] {
   return [...people].sort((a, b) => {
     const tierA = getTier(a.title);
@@ -557,10 +573,9 @@ function rankByDecisionMakerTier<T extends { title: string }>(people: T[]): T[] 
 }
 
 function getTier(title: string): number {
-  for (const { tier, pattern } of TIER_PATTERNS) {
-    if (pattern.test(title)) return tier;
-  }
-  return 6; // unranked
+  const result = classifyDecisionMakerTier(title);
+  // Map tier names to numeric priority for sorting (Exclude → 999)
+  return result.priority;
 }
 
 // ---------------------------------------------------------------------------

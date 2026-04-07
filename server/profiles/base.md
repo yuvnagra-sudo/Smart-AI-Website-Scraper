@@ -3,7 +3,7 @@
   "name": "base",
   "confidence_threshold": 0.7,
   "max_hops": 7,
-  "extraction_model": "gpt-5-nano",
+  "extraction_model": "gpt-5-mini",
   "planning_model": "gpt-5-nano",
 
   "confidence_levels": {
@@ -58,7 +58,9 @@
   ],
 
   "skip_domains": [
-    "linkedin.com/in/", "twitter.com", "instagram.com", "facebook.com"
+    "linkedin.com/in/", "twitter.com", "instagram.com", "facebook.com",
+    "github.com", "medium.com", "crunchbase.com", "angel.co",
+    "glassdoor.com", "indeed.com"
   ],
 
   "url_categories": {

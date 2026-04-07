@@ -415,14 +415,3 @@ export async function enrichWithLinkedIn(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Backward-compat shim for any code that still calls apifySearchLinkedInEmployees
-// ---------------------------------------------------------------------------
-export async function apifySearchLinkedInEmployees(
-  domain: string,
-  companyName: string,
-  maxResults = 25,
-): Promise<LinkedInSearchResult> {
-  const result = await enrichWithLinkedIn(domain, companyName, [], {});
-  return { people: result.allCandidates };
-}

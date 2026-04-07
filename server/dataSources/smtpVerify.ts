@@ -23,7 +23,7 @@
  *
  * Railway / hosting note:
  *   Many cloud providers block outbound port 25 to prevent spam abuse.
- *   The module automatically falls back to ports 587 and 465 before giving up.
+ *   The module automatically falls back to port 587 if port 25 is blocked.
  *   If all ports are blocked, it returns null gracefully (non-fatal).
  */
 
@@ -63,9 +63,12 @@ const GENERIC_PREFIXES = [
   "mail",
 ];
 
-/** Ports to try in order.  Port 25 is the standard SMTP port; 587 is
- *  submission (often open on cloud hosts); 465 is SMTPS. */
-const SMTP_PORTS = [25, 587, 465];
+/** Ports to try in order.
+ *  Port 25  = standard SMTP relay.
+ *  Port 587 = submission (open on most cloud hosts, uses STARTTLS over plain TCP).
+ *  Port 465 (SMTPS) is intentionally excluded: it requires TLS from the first byte
+ *  and cannot be probed with a plain TCP socket — it always times out or rejects. */
+const SMTP_PORTS = [25, 587];
 
 /** Total timeout per TCP connection attempt (ms). */
 const CONNECT_TIMEOUT_MS = 6_000;
