@@ -142,15 +142,9 @@ async function planNextAction(
   skillContext?: SkillContext | null,
   webSearchedFields?: Set<string>,
   failedDomains?: Map<string, number>,
+  /** Rolling context brief from the previous extraction hop (Layer 2 bridge). */
+  contextBrief?: string,
 ): Promise<AgentAction> {
-  // Build a summary of current state
-  const fieldSummary = sections.map(s => {
-    const r = fieldResults[s.key];
-    const conf = r ? r.confidence.toFixed(2) : "0.00";
-    const val = r?.value ? `"${r.value.slice(0, 60)}${r.value.length > 60 ? "..." : ""}"` : "(empty)";
-    return `  ${s.key} [conf=${conf}]: ${val}`;
-  }).join("\n");
-
   const weakFields = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) < CONFIDENCE_THRESHOLD);
   const allDone = weakFields.length === 0;
 
@@ -158,9 +152,20 @@ async function planNextAction(
     return { action: "done", reason: allDone ? "All fields have sufficient confidence" : "Max hops reached" };
   }
 
+  // ── LAYER 2: Compressed context brief replaces raw fieldResults JSON dump ──
+  // Instead of dumping all field values as raw JSON (~400 tokens), we build a
+  // compact natural-language summary (~80 tokens) that is more useful to the
+  // planner and enables OpenAI prompt caching on the static system message.
+  const foundFields = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD);
+  const foundBrief = foundFields.length > 0
+    ? foundFields.map(s => `${s.label}: "${(fieldResults[s.key]?.value ?? "").slice(0, 60)}"`).join(" | ")
+    : "(none yet)";
+  const missingBrief = weakFields.map(s => s.label).join(", ");
+
   const visitedList = [...visitedUrls].slice(-10).join("\n  ");
   const linkList = availableLinks.slice(0, 20).join("\n  ");
   const weakList = weakFields.map(s => `${s.key} (${s.label})`).join(", ");
+  const weakKeyList = weakFields.map(s => s.key).join(", ");
 
   // Build link hints from profile based on what fields are missing
   const profile = getProfile();
@@ -212,57 +217,56 @@ Skip if company shows: ${skillContext.exclusionSignals.join(", ")}
     .replace("{companyName}", companyName)
     .replace("{domain}", websiteUrl.replace(/https?:\/\//, "").split("/")[0]);
 
-  // Build a summary of already-found values so the LLM can craft context-aware queries
-  const foundValuesSummary = sections
-    .filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD)
-    .map(s => `  ${s.label}: "${(fieldResults[s.key]?.value ?? "").slice(0, 80)}"`)
-    .join("\n");
-
-  const prompt = `${agentPersona}
-
-Company: ${companyName}
-Website: ${websiteUrl}
-Objective: ${objective}${skillBlock ? "\n" + skillBlock : ""}
-
-Current extraction state (confidence 0.0=not found, 1.0=certain):
-${fieldSummary}
-
-Missing fields (need confidence >= ${CONFIDENCE_THRESHOLD}): ${weakList}
-
-Already found (use these to build precise search queries):
-${foundValuesSummary || "  (none yet)"}
-
-URLs already visited — DO NOT revisit these:
-  ${visitedList || "(none yet)"}
-
-Available links from last page:
-  ${linkList || "(none — use web_search)"}
-
-Fields already attempted via web_search — DO NOT search again for these:
-  ${searchedList}
-
-Hops used: ${hopsUsed} / ${maxHops}${urgency ? "\n" + urgency : ""}
-${failedDomains && failedDomains.size > 0 ? `\nDomains with repeated fetch failures (prefer web_search over fetch_url for these):\n  ${Array.from(failedDomains.entries()).filter(([, c]) => c >= 2).map(([d, c]) => `${d} (${c} failures)`).join(", ") || "(none)"}` : ""}
-
-${linkHints}
+  // ── LAYER 1: Static system message (cached by OpenAI after first call) ──────
+  // All content that never changes within a job goes into the system message.
+  // OpenAI caches the system message prefix automatically — we pay 50% on
+  // subsequent calls with the same model + same system message.
+  const systemMsg = `${agentPersona}
 
 ${decisionRules}
+
+${linkHints}
 
 WEB SEARCH QUERY GUIDANCE (apply when action is web_search):
 - Use specific, targeted queries that combine company name + the exact field you need
 - Incorporate already-found values to narrow results (e.g. if you know the CEO name, search for their email)
-- Prefer queries like: "${companyName}" CEO email, "${companyName}" founder LinkedIn, site:linkedin.com "${companyName}" CEO
-- Avoid generic queries like "${companyName} info" — be precise about what is missing
+- Prefer queries like: "COMPANY_NAME" CEO email, "COMPANY_NAME" founder LinkedIn, site:linkedin.com "COMPANY_NAME" CEO
+- Avoid generic queries like "COMPANY_NAME info" — be precise about what is missing
 - Use quotes around proper nouns for exact matching
 
 Return ONLY valid JSON (no markdown):
 {"action":"fetch_url"|"web_search"|"done","target":"full URL if fetch_url, else null","query":"precise search query if web_search, else null","reason":"one sentence explaining why this is the best next step"}`;
 
+  // ── LAYER 2: Dynamic user message (fresh each hop, ~200 tokens) ─────────────
+  // Uses compressed brief instead of raw JSON dump.
+  const userMsg = `Company: ${companyName}
+Website: ${websiteUrl}
+Objective: ${objective}${skillBlock ? "\n" + skillBlock : ""}
+
+Found so far: ${foundBrief}
+Still missing (need confidence >= ${CONFIDENCE_THRESHOLD}): ${missingBrief}
+${contextBrief ? `\nContext from last hop: ${contextBrief}` : ""}
+
+URLs already visited — DO NOT revisit:
+  ${visitedList || "(none yet)"}
+
+Available links:
+  ${linkList || "(none — use web_search)"}
+
+Fields already searched via web_search — DO NOT search again:
+  ${searchedList}
+
+Hops used: ${hopsUsed} / ${maxHops}${urgency ? "\n" + urgency : ""}
+${failedDomains && failedDomains.size > 0 ? `\nDomains with repeated fetch failures:\n  ${Array.from(failedDomains.entries()).filter(([, c]) => c >= 2).map(([d, c]) => `${d} (${c} failures)`).join(", ")}` : ""}`;
+
   try {
     const response = await queuedLLMCall({
       model: profile.planningModel,
       // temperature omitted — proxy only supports default (1)
-      messages: [{ role: "user", content: prompt }],
+      messages: [
+        { role: "system", content: systemMsg },
+        { role: "user", content: userMsg },
+      ],
       response_format: {
         type: "json_schema",
         json_schema: {
@@ -330,7 +334,9 @@ export async function extractProfileFields(
   skillContext?: SkillContext | null,
   /** Raw HTML for pre-LLM extraction (if available, separate from markdown content). */
   rawHtml?: string,
-): Promise<FieldResultMap> {
+  /** Layer 3 bridge: context note from the previous hop, prepended to this extraction. */
+  incomingContextNote?: string,
+): Promise<{ fields: FieldResultMap; contextNote: string }> {
   // ── PRE-LLM EXTRACTION PASS ──────────────────────────────────────────────
   // Run deterministic extraction before the LLM to harvest structured data
   // at high confidence without risking hallucination.
@@ -349,12 +355,23 @@ export async function extractProfileFields(
   // If pre-LLM extracted everything, skip the LLM call entirely
   if (sectionsForLLM.length === 0) {
     console.log(`[agentScraper] Pre-LLM extracted all ${sections.length} fields — skipping LLM call`);
-    return preLLMResults;
+    return { fields: preLLMResults, contextNote: "" };
   }
 
   // Separate scalar vs array sections for different schema handling
   const scalarSections = sectionsForLLM.filter(s => !s.arraySchema);
   const arraySections = sectionsForLLM.filter(s => s.arraySchema);
+
+  // ── LAYER 3: Add context_note to schema so model writes its own handoff brief ──
+  // The model outputs a 1-2 sentence note summarising what it found and what
+  // to look for next. This is stored and passed to the next hop's planner,
+  // replacing the need for the planner to re-infer context from scratch.
+  const topLevelProps: Record<string, Record<string, unknown>> = {
+    context_note: {
+      type: "string",
+      description: "1-2 sentence summary: what was found on this page, what is still missing, and where to look next. Be specific (e.g. name a page or section). Max 200 chars.",
+    },
+  };
 
   // Build per-section schema properties — now includes quote_source for grounding
   const props: Record<string, Record<string, unknown>> = {};
@@ -458,7 +475,10 @@ Exclusion signals — if these are prominent, deprioritize this company:
   // Build a structured field list so the LLM knows exactly what to look for
   const fieldList = sectionsForLLM.map(s => `  - ${s.key} ("${s.label}"): ${s.desc}`).join("\n");
 
-  const userMsg = `${systemPrompt}
+  // ── LAYER 1: Static system message for extraction (cached by OpenAI) ─────────
+  // Everything that is the same across all pages for this job goes here:
+  // system prompt, DM tiers, field hints, extraction rules, example format.
+  const extractSystemMsg = `${systemPrompt}
 
 ${pageTypeGuidance}
 
@@ -467,19 +487,11 @@ ${dmPriorityGuidance}${skillContextGuidance}
 ━━━ FIELD FORMAT HINTS ━━━
 Use these hints to recognize and correctly extract each field type:
 ${fieldTypeHints}
-${preLLMSkipNote}
 
 ━━━ CRITICAL EXTRACTION RULES ━━━
 ${extractionRules}
 
-━━━ FIELDS TO EXTRACT ━━━
-${fieldList}
-
-━━━ PAGE CONTENT (source: ${sourceUrl || 'unknown'}) ━━━
-${content.substring(0, 60000)}
-
 ━━━ EXTRACTION INSTRUCTIONS ━━━
-Before writing your JSON answer, reason through the page carefully for each field.
 For each field:
   1. SEARCH: Scan the page content for any text relevant to this field.
   2. EVALUATE: Is the text about the target company itself (not a client, reviewer, or partner)?
@@ -488,24 +500,33 @@ For each field:
   5. SCORE: Assign confidence (1.0=explicitly stated, 0.8=clearly implied, 0.6=inferred from context, 0.4=uncertain, 0.0=not found).
 
 If a field is not found anywhere on the page, return value="" confidence=0.0 quote_source="". NEVER guess or hallucinate.
-If the extracted value is in a language other than English, translate it to English before returning it in the "value" field. The "quote_source" field should still contain the original text from the page.
+If the extracted value is in a language other than English, translate it to English in the "value" field; keep original text in "quote_source".
 
-For each field, return:
-- "value": exact extracted text, or "" if not found
-- "confidence": 0.0-1.0
-- "quote_source": exact text snippet from the page (10-100 chars), or "" if not found
+Also return a "context_note" field: 1-2 sentences summarising what you found, what is still missing, and where to look next. Max 200 chars.
 
 Example output format:
-${exampleJson}
+${exampleJson}`;
 
-Return ONLY valid JSON with these keys: ${sectionsForLLM.map((s) => s.key).join(", ")}`;
+  // ── LAYER 2+3: Dynamic user message (fresh each hop) ────────────────────
+  // Contains only what changes: source URL, pre-LLM skip note, field list, and page content.
+  // The incoming context note from the previous hop is prepended here.
+  const extractUserMsg = `${incomingContextNote ? `Context from previous hop: ${incomingContextNote}\n\n` : ""}${preLLMSkipNote ? preLLMSkipNote + "\n\n" : ""}━━━ FIELDS TO EXTRACT ━━━
+${fieldList}
+
+━━━ PAGE CONTENT (source: ${sourceUrl || 'unknown'}) ━━━
+${content.substring(0, 60000)}
+
+Return ONLY valid JSON with these keys: context_note, ${sectionsForLLM.map((s) => s.key).join(", ")}`;
 
   try {
     const response = await queuedLLMCall({
       model: extractProfile.extractionModel,
       // temperature omitted — proxy only supports default (1); structured JSON schema output
       // constrains randomness sufficiently without a custom temperature setting
-      messages: [{ role: "user", content: userMsg }],
+      messages: [
+        { role: "system", content: extractSystemMsg },
+        { role: "user", content: extractUserMsg },
+      ],
       response_format: {
         type: "json_schema",
         json_schema: {
@@ -513,8 +534,8 @@ Return ONLY valid JSON with these keys: ${sectionsForLLM.map((s) => s.key).join(
           strict: true,
           schema: {
             type: "object",
-            properties: props,
-            required: sectionsForLLM.map((s) => s.key),
+            properties: { ...topLevelProps, ...props },
+            required: ["context_note", ...sectionsForLLM.map((s) => s.key)],
             additionalProperties: false,
           },
         },
@@ -675,7 +696,10 @@ Return ONLY valid JSON with these keys: ${sectionsForLLM.map((s) => s.key).join(
       }
     }
 
-    return result;
+    // Extract the context_note from the parsed response (Layer 3 bridge)
+    const contextNote = typeof parsed.context_note === "string" ? parsed.context_note.slice(0, 300) : "";
+
+    return { fields: result, contextNote };
   } catch (err) {
     console.error("[agentScraper] extractProfileFields error:", err instanceof Error ? err.message : String(err).slice(0, 200));
     // On error, return pre-LLM results (better than nothing)
@@ -683,7 +707,7 @@ Return ONLY valid JSON with these keys: ${sectionsForLLM.map((s) => s.key).join(
     for (const s of sections) {
       if (!fallback[s.key]) fallback[s.key] = { value: "", confidence: 0.0, sourceUrl };
     }
-    return fallback;
+    return { fields: fallback, contextNote: "" };
   }
 }
 
@@ -1102,6 +1126,8 @@ export async function scrapeUrl(
   let webSearchAttemptCount = 0; // For query diversification
   // LinkedIn URL found on the primary page (used for post-loop enrichment)
   let companyLinkedinUrl: string | null = null;
+  // Layer 3 bridge: rolling context note written by the extractor after each hop
+  let rollingContextNote = "";
 
   // ── STEP 0: Fetch the primary URL first (always) ──────────────────────────
   // Check cancellation before the first (potentially slow) fetch
@@ -1135,13 +1161,15 @@ export async function scrapeUrl(
     }
 
     if (!skipGenericForPrimary && sections.length > 0) {
-      const extracted = await extractProfileFields(
+      const { fields: extracted, contextNote } = await extractProfileFields(
         primary.content, sections, systemPrompt, url,
         isDirectoryUrl(url) ? "directory" : "company",
         skillContext,
         primary.rawHtml,
+        rollingContextNote,
       );
       fieldResults = mergeFieldResults(fieldResults, extracted);
+      rollingContextNote = contextNote;
       const filled = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD).length;
       console.log(`[agentScraper] Primary page: ${filled}/${sections.length} fields confident`);
     }
@@ -1244,6 +1272,7 @@ export async function scrapeUrl(
       skillContext,
       webSearchedFields,
       failedDomains,
+      rollingContextNote,
     );
 
     console.log(`[agentScraper] PLAN [hop ${hopsUsed}/${maxHops}]: ${plan.action} — ${plan.reason}`);
@@ -1286,7 +1315,10 @@ export async function scrapeUrl(
       if (!skipGenericForFetch) {
         if (isCancelled?.()) throw new Error("JOB_CANCELLED");
         const fetchPageType = isDirectoryUrl(plan.target) ? "directory" : "company";
-        const extracted = await extractProfileFields(fetched.content, sections, systemPrompt, plan.target, fetchPageType, skillContext, fetched.rawHtml);
+        const { fields: extracted, contextNote } = await extractProfileFields(
+          fetched.content, sections, systemPrompt, plan.target, fetchPageType, skillContext, fetched.rawHtml, rollingContextNote,
+        );
+        rollingContextNote = contextNote;
 
         // REFLECT — merge, keeping higher-confidence values
         fieldResults = mergeFieldResults(fieldResults, extracted);
@@ -1318,14 +1350,17 @@ export async function scrapeUrl(
           // Use snippet as fallback content for this result
           const snippetContent = `${result.title}\n${result.snippet}`;
           visitedUrls.add(result.url);
-          const extracted = await extractProfileFields(snippetContent, sections, systemPrompt, result.url, "search", skillContext);
+          const { fields: extracted } = await extractProfileFields(snippetContent, sections, systemPrompt, result.url, "search", skillContext, undefined, rollingContextNote);
           fieldResults = mergeFieldResults(fieldResults, extracted);
         } else {
           visitedUrls.add(result.url);
           availableLinks = [...new Set([...availableLinks, ...fetched.links])].filter(l => !visitedUrls.has(l));
           if (isCancelled?.()) throw new Error("JOB_CANCELLED");
           const searchPageType = isDirectoryUrl(result.url) ? "directory" : "company";
-          const extracted = await extractProfileFields(fetched.content, sections, systemPrompt, result.url, searchPageType, skillContext, fetched.rawHtml);
+          const { fields: extracted, contextNote } = await extractProfileFields(
+            fetched.content, sections, systemPrompt, result.url, searchPageType, skillContext, fetched.rawHtml, rollingContextNote,
+          );
+          rollingContextNote = contextNote;
           fieldResults = mergeFieldResults(fieldResults, extracted);
         }
         // Stop fetching more results if all target fields are now confident

@@ -422,6 +422,7 @@ export function preLLMExtract(
     // directory pages, etc.) where the target company may not be the first entity.
     const org = orgEntities.length > 0
       ? orgEntities.reduce((merged, entity) => ({
+          type:              merged.type              || entity.type,
           description:       merged.description       || entity.description,
           foundingDate:      merged.foundingDate       || entity.foundingDate,
           numberOfEmployees: merged.numberOfEmployees  || entity.numberOfEmployees,
