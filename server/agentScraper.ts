@@ -322,6 +322,61 @@ ${failedDomains && failedDomains.size > 0 ? `\nDomains with repeated fetch failu
 }
 
 // ---------------------------------------------------------------------------
+// 1b. GATE — nano pre-check before full extraction (Option B A/B test)
+// ---------------------------------------------------------------------------
+
+/**
+ * Extraction gating pre-check (Option B).
+ *
+ * Sends the first 1,500 chars of page content to gpt-5-nano with a single
+ * yes/no question: "Does this page plausibly contain any of the missing fields?"
+ *
+ * Cost: ~100 input + ~5 output tokens = ~$0.00003 per call (100x cheaper than
+ * the full gpt-5-mini extraction call it may save).
+ *
+ * Returns true if extraction should proceed, false if the page should be skipped.
+ * Defaults to true on any error so gating never blocks legitimate extraction.
+ */
+async function shouldExtract(
+  content: string,
+  missingFieldLabels: string[],
+): Promise<boolean> {
+  if (missingFieldLabels.length === 0) return false;
+
+  const snippet = content.slice(0, 1500);
+  const fieldList = missingFieldLabels.slice(0, 6).join(", ");
+
+  try {
+    const result = await queuedLLMCall({
+      model: "gpt-5-nano",
+      messages: [
+        {
+          role: "user",
+          content: `You are a relevance checker. Answer only "yes" or "no".
+
+Does the following page content plausibly contain any of these fields: ${fieldList}?
+
+Page content (first 1500 chars):
+${snippet}
+
+Answer:`,
+        },
+      ],
+    }, 10); // low priority — gating calls should not block extraction calls
+
+    const rawContent = result?.choices?.[0]?.message?.content ?? "";
+    const answer = (typeof rawContent === "string" ? rawContent : "").trim().toLowerCase();
+    const shouldSkip = answer.startsWith("no");
+    if (shouldSkip) {
+      console.log(`[agentScraper] 🚫 Extraction gate: skipping page (nano says no relevant content)`);
+    }
+    return !shouldSkip;
+  } catch {
+    return true; // Fail open — never block extraction on gate error
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 2. OBSERVE — extract fields from page content (with confidence + source)
 // ---------------------------------------------------------------------------
 
@@ -356,6 +411,18 @@ export async function extractProfileFields(
   if (sectionsForLLM.length === 0) {
     console.log(`[agentScraper] Pre-LLM extracted all ${sections.length} fields — skipping LLM call`);
     return { fields: preLLMResults, contextNote: "" };
+  }
+
+  // ── OPTION B EXTRACTION GATE (A/B branch) ──────────────────────────────
+  // Ask gpt-5-nano (very cheap) whether this page is worth full extraction.
+  // Only runs on non-search pages where pre-LLM didn't already fill everything.
+  if (pageType !== "search" && content.length > 200) {
+    const missingLabels = sectionsForLLM.map(s => s.label);
+    const gate = await shouldExtract(content, missingLabels);
+    if (!gate) {
+      // Gate says skip — return pre-LLM results only (no full extraction)
+      return { fields: preLLMResults, contextNote: "Page skipped by extraction gate (no relevant content detected)." };
+    }
   }
 
   // Separate scalar vs array sections for different schema handling
