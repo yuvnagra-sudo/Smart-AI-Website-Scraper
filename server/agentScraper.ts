@@ -27,6 +27,8 @@ import { webSearch, searchQueryForField, searchQueryVariant } from "./_core/webS
 import type { SkillContext } from "../shared/skillContext";
 import { preLLMExtract, preLLMExtractFull, CONFIDENCE } from "./preLLMExtractor";
 import { enrichWithLinkedIn } from "./dataSources/apifyLinkedin";
+import { hunterDomainSearch, hunterCompanyEnrichment } from "./dataSources/hunterApi";
+import { smtpVerifyGenericEmail, shouldRunSmtpFallback } from "./dataSources/smtpVerify";
 import { mapUrlsHeuristic, mapUrlsWithLLM, generateTeamPageCandidates, type MappedUrl } from "./mapPhase";
 import { getProfile, getSection, getSubSection, type AgentProfile } from "./agentConfig";
 import { getCachedFetch, setCachedFetch } from "./fetchCache";
@@ -1346,14 +1348,107 @@ export async function scrapeUrl(
     }
   }
 
-  // ── LINKEDIN ENRICHMENT (post-loop) ──────────────────────────────────────
-  // Only runs if APIFY_API_KEY is set and DM fields are still weak after the loop.
+  // ── POST-LOOP ENRICHMENT CASCADE ─────────────────────────────────────────
+  //
+  //  Order (cheapest / highest-coverage first):
+  //    1. Hunter Domain Search  — emails + names from Hunter's index (~$0.01/call)
+  //    2. Hunter Company Enrichment — industry, headcount, description (~$0.01/call)
+  //    3. Apify LinkedIn — DM name/title when Hunter had no coverage (~$0.008/profile)
+  //    4. SMTP handshake — generic email fallback (free, last resort)
+  //
+  //  Each step is independently gated and non-fatal.
+
+  const _domain = (() => { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return url; } })();
+
+  // ── Step 1: Hunter Domain Search ─────────────────────────────────────────
   if (!isCancelled?.()) {
     try {
-      const domain = (() => { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return url; } })();
+      const hunterResult = await hunterDomainSearch(_domain, sections, fieldResults);
+      if (hunterResult.bestMatch) {
+        const hm = hunterResult.bestMatch;
+        const sourceUrl = `https://hunter.io/domain-search?domain=${_domain}`;
+        // Merge name, title, email, linkedin into weak DM fields
+        for (const s of sections) {
+          const kl = s.key.toLowerCase();
+          const isDm = /decision.?maker|dm\d|contact|person/.test(kl);
+          if (isDm && /name/.test(kl) && !fieldResults[s.key]?.value && hm.firstName) {
+            fieldResults[s.key] = {
+              value: `${hm.firstName} ${hm.lastName}`.trim(),
+              confidence: 0.82,
+              sourceUrl,
+            };
+          } else if (isDm && /title|role|position/.test(kl) && !fieldResults[s.key]?.value && hm.position) {
+            fieldResults[s.key] = { value: hm.position, confidence: 0.82, sourceUrl };
+          } else if (/email/i.test(kl) && !fieldResults[s.key]?.value && hm.value) {
+            fieldResults[s.key] = {
+              value: hm.value,
+              confidence: Math.min(0.95, hm.confidence / 100),
+              sourceUrl,
+            };
+          } else if (isDm && /linkedin/.test(kl) && !fieldResults[s.key]?.value && hm.linkedinUrl) {
+            fieldResults[s.key] = { value: hm.linkedinUrl, confidence: 0.88, sourceUrl: hm.linkedinUrl };
+          }
+        }
+        extras["__hunterEmails"] = hunterResult.allEmails;
+        console.log(
+          `[agentScraper] Hunter Domain Search merged: ${hm.firstName} ${hm.lastName} <${hm.value}> (${hm.position || hm.seniority || "?"})`,
+        );
+      } else if (hunterResult.skippedReason) {
+        console.log(`[agentScraper] Hunter Domain Search skipped: ${hunterResult.skippedReason}`);
+      }
+    } catch (err) {
+      console.warn(`[agentScraper] Hunter Domain Search failed (non-fatal):`, err);
+    }
+  }
+
+  // ── Step 2: Hunter Company Enrichment ────────────────────────────────────
+  if (!isCancelled?.()) {
+    try {
+      const company = await hunterCompanyEnrichment(_domain, sections, fieldResults);
+      if (!company.skippedReason) {
+        const sourceUrl = `https://hunter.io/companies/${_domain}`;
+        // Map Hunter company fields → agent sections
+        const companyFieldMap: Array<{ regex: RegExp; value: string | number | null }> = [
+          { regex: /industry/i,                     value: company.industry },
+          { regex: /headcount|employee|staff|size/i, value: company.headcount != null ? String(company.headcount) : null },
+          { regex: /description|about|summary/i,    value: company.description },
+          { regex: /city/i,                          value: company.city },
+          { regex: /state|province|region/i,         value: company.state },
+          { regex: /country/i,                       value: company.country },
+          { regex: /linkedin.*company|company.*linkedin/i, value: company.linkedinUrl },
+          { regex: /twitter/i,                       value: company.twitterUrl },
+          { regex: /tech.?stack|technologies/i,      value: company.techStack.join(", ") || null },
+        ];
+        for (const s of sections) {
+          if (fieldResults[s.key]?.value) continue; // don't overwrite existing values
+          const kl = s.key.toLowerCase() + " " + s.label.toLowerCase();
+          for (const { regex, value } of companyFieldMap) {
+            if (regex.test(kl) && value) {
+              fieldResults[s.key] = { value: String(value), confidence: 0.80, sourceUrl };
+              break;
+            }
+          }
+        }
+        // Also update companyName if we got a better one from Hunter
+        if (company.name && !companyName) {
+          companyName = company.name;
+        }
+        console.log(`[agentScraper] Hunter Company Enrichment merged for ${_domain}`);
+      } else {
+        console.log(`[agentScraper] Hunter Company Enrichment skipped: ${company.skippedReason}`);
+      }
+    } catch (err) {
+      console.warn(`[agentScraper] Hunter Company Enrichment failed (non-fatal):`, err);
+    }
+  }
+
+  // ── Step 3: Apify LinkedIn ────────────────────────────────────────────────
+  // Only runs if Hunter had no DM name coverage (saves Apify credits).
+  if (!isCancelled?.()) {
+    try {
       const targetTitles = skillContext?.targetTitles ?? [];
       const linkedInResult = await enrichWithLinkedIn(
-        domain,
+        _domain,
         companyName,
         sections,
         fieldResults,
@@ -1383,6 +1478,36 @@ export async function scrapeUrl(
       }
     } catch (err) {
       console.warn(`[agentScraper] LinkedIn enrichment failed (non-fatal):`, err);
+    }
+  }
+
+  // ── Step 4: SMTP Generic Email Fallback ──────────────────────────────────
+  // Free last-resort: knock on the mail server to verify generic addresses.
+  // Only fires when ALL email fields are still empty after the above steps.
+  if (!isCancelled?.() && shouldRunSmtpFallback(sections, fieldResults)) {
+    try {
+      const smtpResult = await smtpVerifyGenericEmail(_domain);
+      if (smtpResult) {
+        const sourceUrl = `smtp://${smtpResult.mxHost}:${smtpResult.port}`;
+        for (const s of sections) {
+          if (/email/i.test(s.key + " " + s.label) && !fieldResults[s.key]?.value) {
+            fieldResults[s.key] = {
+              value: smtpResult.email,
+              // Catch-all addresses are less reliable — lower confidence
+              confidence: smtpResult.catchAll ? 0.55 : 0.75,
+              sourceUrl,
+            };
+          }
+        }
+        console.log(
+          `[agentScraper] SMTP fallback: ${smtpResult.email}` +
+          (smtpResult.catchAll ? " (catch-all domain)" : " (verified)"),
+        );
+      } else {
+        console.log(`[agentScraper] SMTP fallback: no generic email found for ${_domain}`);
+      }
+    } catch (err) {
+      console.warn(`[agentScraper] SMTP fallback failed (non-fatal):`, err);
     }
   }
 
