@@ -136,12 +136,28 @@ async function searchViaDuckDuckGo(query: string, numResults = 10): Promise<Sear
  * Search the web for `query` and return up to `numResults` results.
  *
  * Provider priority:
- *   1. Jina Search (if JINA_API_KEY set) — reliable on Railway
- *   2. Serper (if SERPER_API_KEY set) — fast Google results
+ *   1. Serper (if SERPER_API_KEY set) — Google results, no rate-limit issues at scale
+ *   2. Jina Search (if JINA_API_KEY set) — reliable but 100 RPM cap triggers under concurrency
  *   3. DuckDuckGo — free fallback (unreliable on Railway, 3s timeout)
  */
 export async function webSearch(query: string, numResults = 10): Promise<SearchResult[]> {
-  // 1. Try Jina Search first (reliable on Railway, reuses existing JINA_API_KEY)
+  // 1. Try Serper first (Google results, reliable at scale, no RPM issues under concurrency)
+  if (process.env.SERPER_API_KEY) {
+    try {
+      const results = await searchViaSerper(query, numResults);
+      if (results.length > 0) {
+        console.log(`[webSearch] Serper: ${results.length} results for "${query}"`);
+        return results;
+      }
+      console.warn(`[webSearch] Serper returned 0 results — trying next provider`);
+    } catch (err) {
+      console.warn(
+        `[webSearch] Serper failed: ${err instanceof Error ? err.message : String(err).slice(0, 100)} — trying next provider`,
+      );
+    }
+  }
+
+  // 2. Try Jina Search (reliable but 100 RPM cap can trigger under high concurrency)
   if (process.env.JINA_API_KEY) {
     try {
       const results = await searchViaJina(query, numResults);
@@ -153,21 +169,6 @@ export async function webSearch(query: string, numResults = 10): Promise<SearchR
     } catch (err) {
       console.warn(
         `[webSearch] Jina failed: ${err instanceof Error ? err.message : String(err).slice(0, 100)} — trying next provider`,
-      );
-    }
-  }
-
-  // 2. Try Serper
-  if (process.env.SERPER_API_KEY) {
-    try {
-      const results = await searchViaSerper(query, numResults);
-      if (results.length > 0) {
-        console.log(`[webSearch] Serper: ${results.length} results for "${query}"`);
-        return results;
-      }
-    } catch (err) {
-      console.warn(
-        `[webSearch] Serper failed: ${err instanceof Error ? err.message : String(err).slice(0, 100)} — falling back to DuckDuckGo`,
       );
     }
   }

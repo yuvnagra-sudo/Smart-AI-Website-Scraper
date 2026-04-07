@@ -1334,8 +1334,17 @@ export async function processAgentJob(jobId: number) {
 
         // Per-firm wall-clock timeout — prevents a stalled fetch or runaway
         // agent loop from blocking the entire worker queue indefinitely.
-        // 5 minutes is generous: a 7-hop job with 45s Puppeteer fallbacks takes ~3.5 min max.
-        const FIRM_TIMEOUT_MS = 5 * 60 * 1000;
+        // 10 minutes: concurrent mode starts all firms simultaneously, so all timers
+        // run in parallel. A 7-hop job with Puppeteer fallbacks + enrichment can take
+        // up to ~8 min on a slow site. 5 min was too aggressive for concurrent mode.
+        const FIRM_TIMEOUT_MS = 10 * 60 * 1000;
+        // Shared mutable ref so the timeout catch block can save whatever partial
+        // data the scraper had collected before the timeout fired.
+        const partialRef: { data: Record<string, string>; fieldResults: FieldResultMap | undefined; stats: ScrapeStats } = {
+          data: {},
+          fieldResults: undefined,
+          stats: { fieldsTotal: sections.length, fieldsFilled: 0, emptyFields: [] },
+        };
         try {
           // ── Scrape website for all sections ─────────────────────────────────
           let profileData: Record<string, string> = {};
@@ -1368,6 +1377,10 @@ export async function processAgentJob(jobId: number) {
             profileData = scrapeResult.data;
             fieldResultsForRow = scrapeResult.fieldResults;
             stats = scrapeResult.stats;
+            // Keep partialRef in sync so timeout catch can save what we have
+            partialRef.data = profileData;
+            partialRef.fieldResults = fieldResultsForRow;
+            partialRef.stats = stats;
           }
 
           if (!isDirectoryResult) {
@@ -1400,10 +1413,18 @@ export async function processAgentJob(jobId: number) {
             errorDetail: err instanceof Error ? err.message.slice(0, 500) : String(err).slice(0, 500),
             durationMs: Date.now() - startMs,
           }).catch(() => {});
-          // Add empty row on error so we don't lose the firm from the output
+          // On timeout/error: save whatever partial data was collected before the failure.
+          // If the scraper found 6/9 fields before timing out, preserve those rather
+          // than writing a completely empty row.
+          const isFirmTimeout = err instanceof Error && err.message.startsWith("FIRM_TIMEOUT");
+          const savedData = isFirmTimeout && Object.values(partialRef.data).some(v => v) ? partialRef.data : {};
           const emptyRow: Record<string, string> = {};
           for (const s of sections) emptyRow[s.key] = "";
-          profileResults.push({ ...emptyRow, ...firm.originalRow });
+          profileResults.push({ ...emptyRow, ...savedData, ...firm.originalRow, __inputIndex: String(firmIndexMap.get(firm.websiteUrl) ?? 999999) });
+          // Also save partial fieldResults for the Sources sheet if we have them
+          if (isFirmTimeout && partialRef.fieldResults) {
+            fieldResultsMapArr.push({ companyName: firm.companyName, websiteUrl: firm.websiteUrl, fieldResults: partialRef.fieldResults });
+          }
         }
 
         processed++;
