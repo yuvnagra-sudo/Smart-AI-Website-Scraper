@@ -1254,6 +1254,23 @@ export async function scrapeUrl(
   }
 
   // ── AGENT LOOP ─────────────────────────────────────────────────────────────
+  // Fix 3: Adaptive maxHops — if all high-priority (people) fields are already
+  // confident after the primary page, cap remaining hops at 3 instead of burning
+  // the full budget on lower-priority fields.
+  const scrapeProfile2 = getProfile();
+  const peoplePat2 = new RegExp(scrapeProfile2.peopleFieldPattern, "i");
+  const highPriorityFields = sections.filter(s => peoplePat2.test(s.key + " " + s.label));
+  if (highPriorityFields.length > 0 &&
+      highPriorityFields.every(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD) &&
+      maxHops > 3) {
+    console.log(`[agentScraper] 🎯 Adaptive maxHops: all high-priority fields confident — capping at 3 remaining hops`);
+    maxHops = hopsUsed + 3;
+  }
+
+  // Fix 9: Diminishing returns tracking — stop early if no field improved in last 2 hops
+  let lastHopFilledCount = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD).length;
+  let hopsWithNoImprovement = 0;
+
   while (hopsUsed < maxHops) {
     // Check cancellation at the top of every loop iteration
     if (isCancelled?.()) throw new Error("JOB_CANCELLED");
@@ -1384,6 +1401,21 @@ export async function scrapeUrl(
         if (weakestField) webSearchedFields.add(weakestField.key);
       }
     }
+
+    // Fix 9: Diminishing returns early-stop
+    // If no new field became confident in this hop, increment the stall counter.
+    // After 2 consecutive stalled hops, stop early — remaining hops are unlikely to help.
+    const currentFilledCount = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD).length;
+    if (currentFilledCount > lastHopFilledCount) {
+      hopsWithNoImprovement = 0; // Progress made — reset counter
+    } else {
+      hopsWithNoImprovement++;
+      if (hopsWithNoImprovement >= 2) {
+        console.log(`[agentScraper] 📉 Diminishing returns: no new fields in last 2 hops — stopping early at hop ${hopsUsed}/${maxHops}`);
+        break;
+      }
+    }
+    lastHopFilledCount = currentFilledCount;
   }
 
   // ── POST-LOOP ENRICHMENT CASCADE ─────────────────────────────────────────
