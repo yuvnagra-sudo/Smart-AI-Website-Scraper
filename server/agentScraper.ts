@@ -261,7 +261,7 @@ Return ONLY valid JSON (no markdown):
   try {
     const response = await queuedLLMCall({
       model: profile.planningModel,
-      temperature: 0.5, // Moderate temperature for planning — allows creative URL/query choices
+      // temperature omitted — proxy only supports default (1)
       messages: [{ role: "user", content: prompt }],
       response_format: {
         type: "json_schema",
@@ -503,7 +503,8 @@ Return ONLY valid JSON with these keys: ${sectionsForLLM.map((s) => s.key).join(
   try {
     const response = await queuedLLMCall({
       model: extractProfile.extractionModel,
-      temperature: 0.2, // Low randomness for structured extraction — consistent, deterministic output
+      // temperature omitted — proxy only supports default (1); structured JSON schema output
+      // constrains randomness sufficiently without a custom temperature setting
       messages: [{ role: "user", content: userMsg }],
       response_format: {
         type: "json_schema",
