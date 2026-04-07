@@ -1,28 +1,20 @@
 /**
- * Hunter.io API Integration
+ * Hunter.io API Integration — Domain Search
  *
- * Two endpoints used in the enrichment cascade:
- *
- *   1. Domain Search  — returns all known emails for a domain, each with
- *      first name, last name, position, and seniority.  Used as the
- *      first-pass decision-maker finder (cheaper than Apify LinkedIn).
- *
- *   2. Company Enrichment — returns company-level data: industry, headcount,
- *      description, location, tech stack, social profiles.
+ * Finds all known emails for a domain, each with first name, last name,
+ * position, and seniority.  Used as the first-pass decision-maker finder
+ * (cheaper than Apify LinkedIn, returns both name + email in one call).
  *
  * Cascade position:
  *   Website scrape → Hunter Domain Search → Apify LinkedIn → SMTP fallback
  *
- * Smart gating logic (shouldRunHunter):
- *   - Skip if ALL email + DM name/title fields are already high-confidence
+ * Smart gating:
+ *   - Skip if ALL DM name/title/email fields are already high-confidence
  *   - Skip if HUNTER_API_KEY is not set
- *   - Always run Company Enrichment when company-level fields are weak,
- *     regardless of DM confidence (it's the same credit cost)
  *
  * Pricing (Growth plan, $104/mo):
  *   - 10,000 credits/month  →  $0.0104 per credit
  *   - Domain Search: 1 credit per call (regardless of results returned)
- *   - Company Enrichment: 1 credit per call
  *
  * Docs: https://hunter.io/api-documentation/v2
  *
@@ -57,22 +49,6 @@ export interface HunterDomainSearchResult {
   allEmails: HunterEmail[];
   /** Total number of emails Hunter knows about for this domain (may exceed returned count). */
   totalEmails: number;
-  /** Reason the call was skipped (if skipped). */
-  skippedReason?: string;
-}
-
-export interface HunterCompanyData {
-  name: string | null;
-  description: string | null;
-  industry: string | null;
-  headcount: number | null;
-  country: string | null;
-  city: string | null;
-  state: string | null;
-  linkedinUrl: string | null;
-  twitterUrl: string | null;
-  facebookUrl: string | null;
-  techStack: string[];
   /** Reason the call was skipped (if skipped). */
   skippedReason?: string;
 }
@@ -199,46 +175,6 @@ export function shouldRunHunterDomainSearch(
   return { run: true, reason: "" };
 }
 
-/**
- * Should we call Hunter Company Enrichment?
- *
- * Skip when:
- *   - No HUNTER_API_KEY set
- *   - All company-level fields (industry, headcount, description, location)
- *     are already high-confidence
- */
-export function shouldRunHunterCompanyEnrichment(
-  sections: AgentSection[],
-  fieldResults: FieldResultMap,
-): { run: boolean; reason: string } {
-  if (!getApiKey()) {
-    return { run: false, reason: "HUNTER_API_KEY not set" };
-  }
-
-  const companySections = sections.filter(s =>
-    /industry|headcount|employee|description|location|city|country|state|tech.?stack/i.test(
-      s.key + " " + s.label,
-    ),
-  );
-
-  if (companySections.length === 0) {
-    return { run: false, reason: "No company-level sections defined" };
-  }
-
-  const allHighConfidence = companySections.every(
-    s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD,
-  );
-
-  if (allHighConfidence) {
-    return {
-      run: false,
-      reason: "All company fields already extracted at high confidence — skipping Hunter",
-    };
-  }
-
-  return { run: true, reason: "" };
-}
-
 // ---------------------------------------------------------------------------
 // Domain Search
 // ---------------------------------------------------------------------------
@@ -249,8 +185,8 @@ export function shouldRunHunterCompanyEnrichment(
  * Returns the best-matched decision maker plus the full list.
  * "Best match" is ranked by seniority → Hunter confidence → not generic.
  *
- * @param domain  - e.g. "acme.com" (bare domain, no protocol)
- * @param sections - Agent sections (used for gating check)
+ * @param domain       - e.g. "acme.com" (bare domain, no protocol)
+ * @param sections     - Agent sections (used for gating check)
  * @param fieldResults - Current field results (used for gating check)
  */
 export async function hunterDomainSearch(
@@ -323,148 +259,5 @@ export async function hunterDomainSearch(
   } catch (err) {
     console.warn(`[hunterApi] Domain Search failed for ${d}:`, err);
     return { bestMatch: null, allEmails: [], totalEmails: 0, skippedReason: String(err) };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Company Enrichment
-// ---------------------------------------------------------------------------
-
-/**
- * Hunter Company Enrichment — fetch company-level metadata for a domain.
- *
- * Returns industry, headcount, description, location, tech stack, and
- * social profile URLs.
- *
- * @param domain  - e.g. "acme.com" (bare domain, no protocol)
- * @param sections - Agent sections (used for gating check)
- * @param fieldResults - Current field results (used for gating check)
- */
-export async function hunterCompanyEnrichment(
-  domain: string,
-  sections: AgentSection[],
-  fieldResults: FieldResultMap,
-): Promise<HunterCompanyData> {
-  const { run, reason } = shouldRunHunterCompanyEnrichment(sections, fieldResults);
-  if (!run) {
-    return {
-      name: null, description: null, industry: null, headcount: null,
-      country: null, city: null, state: null,
-      linkedinUrl: null, twitterUrl: null, facebookUrl: null,
-      techStack: [],
-      skippedReason: reason,
-    };
-  }
-
-  const d = cleanDomain(domain);
-  if (!d) {
-    return {
-      name: null, description: null, industry: null, headcount: null,
-      country: null, city: null, state: null,
-      linkedinUrl: null, twitterUrl: null, facebookUrl: null,
-      techStack: [],
-      skippedReason: "Invalid domain",
-    };
-  }
-
-  const url =
-    `${HUNTER_BASE_URL}/companies/find` +
-    `?domain=${encodeURIComponent(d)}` +
-    `&api_key=${getApiKey()}`;
-
-  try {
-    console.log(`[hunterApi] Company Enrichment for: ${d}`);
-    const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
-
-    if (res.status === 404) {
-      // Hunter doesn't have this company — not an error
-      console.log(`[hunterApi] Company not found in Hunter for ${d}`);
-      return {
-        name: null, description: null, industry: null, headcount: null,
-        country: null, city: null, state: null,
-        linkedinUrl: null, twitterUrl: null, facebookUrl: null,
-        techStack: [],
-        skippedReason: "Company not found in Hunter",
-      };
-    }
-    if (res.status === 429) {
-      console.warn(`[hunterApi] Rate limited (429) for company enrichment ${d}`);
-      return {
-        name: null, description: null, industry: null, headcount: null,
-        country: null, city: null, state: null,
-        linkedinUrl: null, twitterUrl: null, facebookUrl: null,
-        techStack: [],
-        skippedReason: "Rate limited",
-      };
-    }
-    if (!res.ok) {
-      console.warn(`[hunterApi] Company Enrichment HTTP ${res.status} for ${d}`);
-      return {
-        name: null, description: null, industry: null, headcount: null,
-        country: null, city: null, state: null,
-        linkedinUrl: null, twitterUrl: null, facebookUrl: null,
-        techStack: [],
-        skippedReason: `HTTP ${res.status}`,
-      };
-    }
-
-    const json = (await res.json()) as {
-      data?: Record<string, unknown>;
-      errors?: Array<{ id: string; details: string }>;
-    };
-
-    if (json.errors?.length) {
-      const msg = json.errors[0].details;
-      console.warn(`[hunterApi] Company Enrichment API error for ${d}: ${msg}`);
-      return {
-        name: null, description: null, industry: null, headcount: null,
-        country: null, city: null, state: null,
-        linkedinUrl: null, twitterUrl: null, facebookUrl: null,
-        techStack: [],
-        skippedReason: msg,
-      };
-    }
-
-    const c = json.data ?? {};
-
-    // Extract social profiles from the `socials` array if present
-    const socials = (c.socials as Array<{ type: string; url: string }>) ?? [];
-    const socialMap: Record<string, string> = {};
-    for (const s of socials) {
-      if (s.type && s.url) socialMap[s.type.toLowerCase()] = s.url;
-    }
-
-    // Tech stack: Hunter returns an array of technology names
-    const techStack = ((c.technologies as string[]) ?? []).slice(0, 20);
-
-    const result: HunterCompanyData = {
-      name: (c.name as string | null) ?? null,
-      description: (c.description as string | null) ?? null,
-      industry: (c.industry as string | null) ?? null,
-      headcount: (c.size as number | null) ?? null,
-      country: (c.country as string | null) ?? null,
-      city: (c.city as string | null) ?? null,
-      state: (c.state as string | null) ?? null,
-      linkedinUrl: (c.linkedin_url as string | null) ?? socialMap["linkedin"] ?? null,
-      twitterUrl: (c.twitter_url as string | null) ?? socialMap["twitter"] ?? null,
-      facebookUrl: (c.facebook_url as string | null) ?? socialMap["facebook"] ?? null,
-      techStack,
-    };
-
-    console.log(
-      `[hunterApi] ✅ Company Enrichment for ${d}: ` +
-      `${result.name ?? "?"}, ${result.industry ?? "?"}, ${result.headcount ?? "?"} employees`,
-    );
-
-    return result;
-  } catch (err) {
-    console.warn(`[hunterApi] Company Enrichment failed for ${d}:`, err);
-    return {
-      name: null, description: null, industry: null, headcount: null,
-      country: null, city: null, state: null,
-      linkedinUrl: null, twitterUrl: null, facebookUrl: null,
-      techStack: [],
-      skippedReason: String(err),
-    };
   }
 }

@@ -27,7 +27,7 @@ import { webSearch, searchQueryForField, searchQueryVariant } from "./_core/webS
 import type { SkillContext } from "../shared/skillContext";
 import { preLLMExtract, preLLMExtractFull, CONFIDENCE } from "./preLLMExtractor";
 import { enrichWithLinkedIn } from "./dataSources/apifyLinkedin";
-import { hunterDomainSearch, hunterCompanyEnrichment } from "./dataSources/hunterApi";
+import { hunterDomainSearch } from "./dataSources/hunterApi";
 import { smtpVerifyGenericEmail, shouldRunSmtpFallback } from "./dataSources/smtpVerify";
 import { mapUrlsHeuristic, mapUrlsWithLLM, generateTeamPageCandidates, type MappedUrl } from "./mapPhase";
 import { getProfile, getSection, getSubSection, type AgentProfile } from "./agentConfig";
@@ -1352,9 +1352,8 @@ export async function scrapeUrl(
   //
   //  Order (cheapest / highest-coverage first):
   //    1. Hunter Domain Search  — emails + names from Hunter's index (~$0.01/call)
-  //    2. Hunter Company Enrichment — industry, headcount, description (~$0.01/call)
-  //    3. Apify LinkedIn — DM name/title when Hunter had no coverage (~$0.008/profile)
-  //    4. SMTP handshake — generic email fallback (free, last resort)
+  //    2. Apify LinkedIn — DM name/title when Hunter had no coverage (~$0.008/profile)
+  //    3. SMTP handshake — generic email fallback (free, last resort)
   //
   //  Each step is independently gated and non-fatal.
 
@@ -1401,48 +1400,7 @@ export async function scrapeUrl(
     }
   }
 
-  // ── Step 2: Hunter Company Enrichment ────────────────────────────────────
-  if (!isCancelled?.()) {
-    try {
-      const company = await hunterCompanyEnrichment(_domain, sections, fieldResults);
-      if (!company.skippedReason) {
-        const sourceUrl = `https://hunter.io/companies/${_domain}`;
-        // Map Hunter company fields → agent sections
-        const companyFieldMap: Array<{ regex: RegExp; value: string | number | null }> = [
-          { regex: /industry/i,                     value: company.industry },
-          { regex: /headcount|employee|staff|size/i, value: company.headcount != null ? String(company.headcount) : null },
-          { regex: /description|about|summary/i,    value: company.description },
-          { regex: /city/i,                          value: company.city },
-          { regex: /state|province|region/i,         value: company.state },
-          { regex: /country/i,                       value: company.country },
-          { regex: /linkedin.*company|company.*linkedin/i, value: company.linkedinUrl },
-          { regex: /twitter/i,                       value: company.twitterUrl },
-          { regex: /tech.?stack|technologies/i,      value: company.techStack.join(", ") || null },
-        ];
-        for (const s of sections) {
-          if (fieldResults[s.key]?.value) continue; // don't overwrite existing values
-          const kl = s.key.toLowerCase() + " " + s.label.toLowerCase();
-          for (const { regex, value } of companyFieldMap) {
-            if (regex.test(kl) && value) {
-              fieldResults[s.key] = { value: String(value), confidence: 0.80, sourceUrl };
-              break;
-            }
-          }
-        }
-        // Also update companyName if we got a better one from Hunter
-        if (company.name && !companyName) {
-          companyName = company.name;
-        }
-        console.log(`[agentScraper] Hunter Company Enrichment merged for ${_domain}`);
-      } else {
-        console.log(`[agentScraper] Hunter Company Enrichment skipped: ${company.skippedReason}`);
-      }
-    } catch (err) {
-      console.warn(`[agentScraper] Hunter Company Enrichment failed (non-fatal):`, err);
-    }
-  }
-
-  // ── Step 3: Apify LinkedIn ────────────────────────────────────────────────
+  // ── Step 2: Apify LinkedIn ──────────────────────────────────────────────
   // Only runs if Hunter had no DM name coverage (saves Apify credits).
   if (!isCancelled?.()) {
     try {
@@ -1481,7 +1439,7 @@ export async function scrapeUrl(
     }
   }
 
-  // ── Step 4: SMTP Generic Email Fallback ──────────────────────────────────
+  // ── Step 3: SMTP Generic Email Fallback ──────────────────────────────────
   // Free last-resort: knock on the mail server to verify generic addresses.
   // Only fires when ALL email fields are still empty after the above steps.
   if (!isCancelled?.() && shouldRunSmtpFallback(sections, fieldResults)) {
