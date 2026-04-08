@@ -33,6 +33,10 @@ export interface ScrapeStats {
   fieldsTotal: number;
   fieldsFilled: number;
   emptyFields: string[];
+  // Scraper-app-style counters for the stats grid
+  emailCount?: number;   // Number of distinct email addresses found
+  personCount?: number;  // Number of named people/contacts found
+  hasData?: boolean;     // True if at least one field was filled
 }
 
 export type AgentScrapeResult =

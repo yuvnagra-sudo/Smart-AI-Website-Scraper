@@ -914,6 +914,10 @@ export async function processAgentJob(jobId: number) {
     const profileResults: Array<Record<string, string>> = [];
     const collectedUrls: AgentDirectoryEntry[] = [];
     let processed = 0;
+    // Running totals for the stats grid (updated after each firm)
+    let totalEmailsFound = 0;
+    let totalPeopleFound = 0;
+    let totalDomainsWithData = 0;
 
     const CONCURRENCY = 50;
     const firmQueue = [...firms];
@@ -965,6 +969,10 @@ export async function processAgentJob(jobId: number) {
               ...result.data,
             });
             const stats: ScrapeStats = result.stats;
+            // Accumulate stats-grid counters
+            totalEmailsFound += stats.emailCount ?? 0;
+            totalPeopleFound += stats.personCount ?? 0;
+            if (stats.hasData) totalDomainsWithData++;
             const logStatus = stats.fieldsFilled === 0 ? "failed" : stats.fieldsFilled < stats.fieldsTotal ? "partial" : "success";
             insertJobLog({
               jobId,
@@ -1002,6 +1010,9 @@ export async function processAgentJob(jobId: number) {
         await updateJobProgressSafely(jobId, {
           currentFirmName: firm.companyName,
           activeFirmsJson: null,
+          emailsFound: totalEmailsFound,
+          peopleFound: totalPeopleFound,
+          domainsWithData: totalDomainsWithData,
         });
       }
     };

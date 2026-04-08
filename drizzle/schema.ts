@@ -56,6 +56,10 @@ export const enrichmentJobs = mysqlTable("enrichmentJobs", {
   objective:    text("objective"),      // Plain-text user objective
   columnMappingJson: text("columnMappingJson"), // JSON: {companyNameColumn, websiteUrlColumn, descriptionColumn?}
   errorMessage: text("errorMessage"),
+  // Scraper stats counters (updated incrementally as each firm is processed)
+  emailsFound:     int("emailsFound").default(0),     // Total email addresses found across all firms
+  peopleFound:     int("peopleFound").default(0),     // Total named people/contacts found
+  domainsWithData: int("domainsWithData").default(0), // Firms where at least one field was filled
   // Worker tracking fields
   workerPid: int("workerPid"), // Process ID of worker processing this job
   heartbeatAt: timestamp("heartbeatAt"), // Last heartbeat from worker

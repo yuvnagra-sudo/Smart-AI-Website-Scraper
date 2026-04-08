@@ -4,6 +4,7 @@
  */
 
 import { updateEnrichmentJob, getEnrichmentJob, incrementJobProcessedCount } from "./enrichmentDb";
+import type { EnrichmentJob } from "../drizzle/schema";
 
 export interface BatchConfig {
   batchSize: number;
@@ -169,12 +170,15 @@ export async function updateJobProgressSafely(
     totalCostUSD?: number | null;
     totalInputTokens?: number | null;
     totalOutputTokens?: number | null;
+    emailsFound?: number | null;
+    peopleFound?: number | null;
+    domainsWithData?: number | null;
   },
   maxRetries: number = 3
 ): Promise<boolean> {
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      await updateEnrichmentJob(jobId, updates);
+      await updateEnrichmentJob(jobId, updates as Partial<EnrichmentJob>);
       return true;
     } catch (error: any) {
       console.error(`[DB Update] Attempt ${attempt}/${maxRetries} failed:`, error.message);

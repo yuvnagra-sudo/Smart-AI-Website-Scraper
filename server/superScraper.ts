@@ -906,16 +906,45 @@ export async function scrapeUrlSuper(
   // ── BUILD FINAL RESULT ─────────────────────────────────────────────────────
 
   const emptyFields = sections.map(s => s.key).filter(k => !data[k] || data[k].trim() === "");
+
+  // ── Count emails across all gathered page content + extracted data fields ──
+  const emailRegexFinal = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
+  const allGatheredContent = allPages.map(p => p.content).join(" ") + " " + Object.values(data).join(" ");
+  const allEmailMatches = allGatheredContent.match(emailRegexFinal) ?? [];
+  const uniqueEmails = new Set(allEmailMatches.map(e => e.toLowerCase()));
+
+  // ── Count named people from team/contact/about pages ──────────────────────
+  const namePattern = /\b([A-Z][a-z]{1,20}(?:\s[A-Z][a-z]{1,20}){1,3})\b/g;
+  const teamPageContent = allPages
+    .filter(p => /\/(team|people|staff|leadership|about|contact|founders|partners)/i.test(p.url))
+    .map(p => p.content)
+    .join(" ");
+  const NON_NAMES = new Set([
+    "New York", "San Francisco", "Los Angeles", "United States", "North America",
+    "South America", "United Kingdom", "Real Estate", "Private Equity", "Venture Capital",
+    "Series A", "Series B", "Series C", "Angel Investor", "Managing Director",
+    "Chief Executive", "Chief Financial", "Chief Operating", "Vice President", "General Partner",
+    "Read More", "Learn More", "Get Started", "Sign Up", "Log In", "Contact Us",
+  ]);
+  const nameMatches = teamPageContent.match(namePattern) ?? [];
+  const uniquePeople = new Set(
+    nameMatches.filter(n => n.split(" ").length >= 2 && !NON_NAMES.has(n))
+  );
+
   const stats: ScrapeStats = {
     fieldsTotal: sections.length,
     fieldsFilled: sections.length - emptyFields.length,
     emptyFields,
+    emailCount: uniqueEmails.size,
+    personCount: uniquePeople.size,
+    hasData: sections.length - emptyFields.length > 0,
   };
 
   const durationSec = ((Date.now() - startMs) / 1000).toFixed(1);
   console.log(
     `[superScraper] ✅ Done: ${allPages.length} pages, ` +
-    `${stats.fieldsFilled}/${sections.length} filled, ${durationSec}s`,
+    `${stats.fieldsFilled}/${sections.length} filled, ` +
+    `${stats.emailCount} emails, ${stats.personCount} people, ${durationSec}s`,
   );
 
   return { type: "profile", data, stats };
