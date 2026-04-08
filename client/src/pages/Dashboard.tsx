@@ -1257,19 +1257,29 @@ export default function Dashboard() {
                               </>
                             )}
                             {job.status === "failed" && (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => resumeMutation.mutate({ jobId: job.id })}
-                                disabled={resumeMutation.isPending}
-                              >
-                                {resumeMutation.isPending ? (
-                                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                ) : (
-                                  <Clock className="h-4 w-4 mr-2" />
+                              <>
+                                {/* Show partial download if the job wrote results before crashing */}
+                                {(job as any).outputFileKey && (
+                                  <DownloadResultsButton
+                                    jobId={job.id}
+                                    outputFileUrl={job.outputFileUrl}
+                                    label="Download Partial Results"
+                                  />
                                 )}
-                                Resume
-                              </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => resumeMutation.mutate({ jobId: job.id })}
+                                  disabled={resumeMutation.isPending}
+                                >
+                                  {resumeMutation.isPending ? (
+                                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                  ) : (
+                                    <Clock className="h-4 w-4 mr-2" />
+                                  )}
+                                  Resume
+                                </Button>
+                              </>
                             )}
                           </div>
                         </div>
@@ -1425,7 +1435,7 @@ function AddSectionRow({ onAdd }: { onAdd: (s: AgentSection) => void }) {
   );
 }
 
-function DownloadResultsButton({ jobId }: { jobId: number; outputFileUrl?: string | null }) {
+function DownloadResultsButton({ jobId, label }: { jobId: number; outputFileUrl?: string | null; label?: string }) {
   const [isGenerating, setIsGenerating] = useState(false);
   const generateMutation = trpc.enrichment.generateResults.useMutation({
     onSuccess: (data) => {
@@ -1463,7 +1473,7 @@ function DownloadResultsButton({ jobId }: { jobId: number; outputFileUrl?: strin
       {isGenerating || generateMutation.isPending ? (
         <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Generating...</>
       ) : (
-        <><Download className="h-4 w-4 mr-2" />Download Results</>
+        <><Download className="h-4 w-4 mr-2" />{label ?? "Download Results"}</>
       )}
     </Button>
   );

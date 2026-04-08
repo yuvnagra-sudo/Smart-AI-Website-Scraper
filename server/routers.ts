@@ -422,7 +422,8 @@ Return ONLY valid JSON (no markdown, no code fences):
           });
         }
 
-        // Agent jobs (AI Custom extraction): results are stored in S3, not in enrichedFirms
+        // Agent jobs (AI Custom extraction): results are stored in S3, not in enrichedFirms.
+        // Also serve partial results for failed jobs that wrote a file before crashing.
         if (job.sectionsJson && job.outputFileKey) {
           const { url } = await storageGet(job.outputFileKey);
           const response = await fetch(url);
@@ -430,10 +431,11 @@ Return ONLY valid JSON (no markdown, no code fences):
             throw new TRPCError({ code: "INTERNAL_SERVER_ERROR", message: "Results file not available in storage" });
           }
           const buffer = Buffer.from(await response.arrayBuffer());
+          const label = job.status === "failed" ? `agent-partial-results-${input.jobId}.xlsx` : `agent-results-${input.jobId}.xlsx`;
           return {
             success: true,
             fileData: buffer.toString("base64"),
-            fileName: `agent-results-${input.jobId}.xlsx`,
+            fileName: label,
             firmCount: job.processedCount ?? 0,
             teamMemberCount: 0,
           };

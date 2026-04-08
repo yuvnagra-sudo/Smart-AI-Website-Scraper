@@ -138,53 +138,66 @@ async function fetchPage(
 ): Promise<FetchedPage | null> {
   if (isCancelled?.()) return null;
 
-  let rawHtmlFromPuppeteer: string | null = null;
+  try {
+    let rawHtmlFromPuppeteer: string | null = null;
 
-  const result = await fetchWebsiteContentHybrid(url, async () => {
-    try {
-      const { scrapeWebsite } = await import("./scraper");
-      const r = await scrapeWebsite({ url, cache: true, cacheTTL: 7 * 24 * 60 * 60, timeout: 45000 });
-      if (r.success) {
-        rawHtmlFromPuppeteer = r.html || null;
-        return r.text || r.html || null;
-      }
-      return null;
-    } catch { return null; }
-  });
+    const result = await fetchWebsiteContentHybrid(url, async () => {
+      try {
+        const { scrapeWebsite } = await import("./scraper");
+        const r = await scrapeWebsite({ url, cache: true, cacheTTL: 7 * 24 * 60 * 60, timeout: 45000 });
+        if (r.success) {
+          rawHtmlFromPuppeteer = r.html || null;
+          return r.text || r.html || null;
+        }
+        return null;
+      } catch { return null; }
+    });
 
-  if (!result?.success || !result.content) return null;
+    if (!result?.success || !result.content) return null;
 
-  // Extract links from markdown content
-  const links: string[] = [];
-  const seen = new Set<string>();
-  const mdPattern = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
-  const barePattern = /https?:\/\/[^\s"'<>)\]]+/g;
-  let m: RegExpExecArray | null;
-  while ((m = mdPattern.exec(result.content)) !== null) {
-    const u = m[2].replace(/[.,;)>\]"']+$/, "");
-    if (!seen.has(u)) { seen.add(u); links.push(u); }
+    // Extract links from markdown content
+    const links: string[] = [];
+    const seen = new Set<string>();
+    const mdPattern = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g;
+    const barePattern = /https?:\/\/[^\s"'<>)\]]+/g;
+    let m: RegExpExecArray | null;
+    while ((m = mdPattern.exec(result.content)) !== null) {
+      const u = m[2].replace(/[.,;)>\]"']+$/, "");
+      if (!seen.has(u)) { seen.add(u); links.push(u); }
+    }
+    while ((m = barePattern.exec(result.content)) !== null) {
+      const u = m[0].replace(/[.,;)>\]"']+$/, "");
+      if (!seen.has(u)) { seen.add(u); links.push(u); }
+    }
+
+    // Get raw HTML for JSON-LD/cheerio extraction if Jina was used
+    let rawHtml: string | undefined = rawHtmlFromPuppeteer ?? undefined;
+    if (!rawHtml && result.source === "jina") {
+      try {
+        const resp = await fetch(url, {
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; SuperScraper/1.0)" },
+          signal: AbortSignal.timeout(8000),
+        });
+        if (resp.ok) {
+          const html = await resp.text();
+          if (html.length > 500) rawHtml = html;
+        }
+      } catch { /* non-fatal */ }
+    }
+
+    return { url, content: result.content, rawHtml, links };
+  } catch (err: unknown) {
+    // Swallow 404s, network errors, and Axios ERR_BAD_REQUEST — return null so the
+    // caller skips this URL without crashing the entire phase-1 parallel sweep.
+    const msg = err instanceof Error ? err.message : String(err);
+    const code = (err as any)?.code ?? "";
+    const status = (err as any)?.response?.status ?? (err as any)?.status ?? 0;
+    if (status === 404 || status === 403 || status === 410 || code === "ERR_BAD_REQUEST" || code === "ECONNREFUSED" || code === "ENOTFOUND") {
+      return null; // expected — page simply doesn't exist
+    }
+    console.warn(`[superScraper] fetchPage non-fatal error for ${url}: ${msg}`);
+    return null;
   }
-  while ((m = barePattern.exec(result.content)) !== null) {
-    const u = m[0].replace(/[.,;)>\]"']+$/, "");
-    if (!seen.has(u)) { seen.add(u); links.push(u); }
-  }
-
-  // Get raw HTML for JSON-LD/cheerio extraction if Jina was used
-  let rawHtml: string | undefined = rawHtmlFromPuppeteer ?? undefined;
-  if (!rawHtml && result.source === "jina") {
-    try {
-      const resp = await fetch(url, {
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; SuperScraper/1.0)" },
-        signal: AbortSignal.timeout(8000),
-      });
-      if (resp.ok) {
-        const html = await resp.text();
-        if (html.length > 500) rawHtml = html;
-      }
-    } catch { /* non-fatal */ }
-  }
-
-  return { url, content: result.content, rawHtml, links };
 }
 
 // ---------------------------------------------------------------------------
