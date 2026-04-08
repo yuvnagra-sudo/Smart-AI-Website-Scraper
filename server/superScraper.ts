@@ -194,6 +194,12 @@ async function fetchPage(
 
     if (!result?.success || !result.content) return null;
 
+    // Filter out soft-404s and error pages (HTTP 200 but error content)
+    if (isErrorPageContent(result.content)) {
+      console.log(`[superScraper] Soft-404 detected, skipping: ${url}`);
+      return null;
+    }
+
     // Extract links from markdown content
     const links: string[] = [];
     const seen = new Set<string>();
@@ -356,30 +362,26 @@ function deterministicExtract(
     const ll = s.label.toLowerCase();
     const combined = kl + " " + ll;
 
-    // Email fields: match "email", "contact_info", "contact_location", "key_contact"
+    // Email / contact detail fields — gets emails + phone
     if (/email|contact.?info|contact.?location|contact.?detail/i.test(combined)) {
-      if (uniqueEmails.length > 0) {
-        const emailStr = uniqueEmails.length === 1
-          ? uniqueEmails[0]
-          : uniqueEmails.slice(0, 3).join("; ");
-        result[s.key] = { value: emailStr, confidence: 0.82, sourceUrl: pages[0]?.url };
+      const contactParts: string[] = [];
+      if (uniqueEmails.length > 0) contactParts.push(...uniqueEmails.slice(0, 3));
+      if (uniquePhones.length > 0) contactParts.push(uniquePhones[0]);
+      if (contactParts.length > 0) {
+        result[s.key] = { value: contactParts.join("; "), confidence: 0.82, sourceUrl: pages[0]?.url };
       }
     }
-    // Decision maker / key contact fields: inject email + name + title if available
+    // Decision maker fields — ONLY gets name + title from JSON-LD, never raw emails
     else if (/decision.?maker|key.?contact|primary.?contact|dm\d/i.test(combined)) {
-      const parts: string[] = [];
       if (allJsonLd.length > 0) {
         const person = allJsonLd.find(j => j.name);
-        if (person?.name) parts.push(person.name);
-        if (person?.jobTitle) parts.push(person.jobTitle);
-        if (person?.email) parts.push(person.email);
+        if (person?.name) {
+          const parts = [person.name];
+          if (person.jobTitle) parts.push(person.jobTitle);
+          result[s.key] = { value: parts.join(", "), confidence: 0.80, sourceUrl: pages[0]?.url };
+        }
       }
-      if (parts.length === 0 && uniqueEmails.length > 0) {
-        parts.push(uniqueEmails[0]);
-      }
-      if (parts.length > 0) {
-        result[s.key] = { value: parts.join(" — "), confidence: 0.78, sourceUrl: pages[0]?.url };
-      }
+      // Don't fall back to email here — let the LLM handle this field
     }
     // LinkedIn fields
     else if (/linkedin/.test(combined)) {
@@ -413,16 +415,8 @@ function deterministicExtract(
         result[s.key] = { value: person.jobTitle, confidence: 0.85, sourceUrl: pages[0]?.url };
       }
     }
-    // Location / hours fields
-    else if (/location|address|hours/i.test(combined) && uniquePhones.length > 0) {
-      // Phone is often co-located with address — inject it as a signal
-      if (uniqueEmails.length > 0 || uniquePhones.length > 0) {
-        const contactBits: string[] = [];
-        if (uniquePhones.length > 0) contactBits.push(uniquePhones[0]);
-        if (uniqueEmails.length > 0) contactBits.push(uniqueEmails[0]);
-        // Don't overwrite — this is just a hint for partial data
-      }
-    }
+    // Qualification / notes / fit fields — leave for LLM (no deterministic extraction)
+    // Location, hours, services, etc. — also leave for LLM
   }
 
   return result;
@@ -498,20 +492,52 @@ async function llmExtractFields(
   );
   const combinedContent = contextChunks.join("\n\n");
 
+  // Skip LLM if pages don't have usable content
+  const usablePages = pages.filter(p => hasUsableContent(p.content));
+  if (usablePages.length === 0) {
+    console.log("[superScraper] No pages with usable content — skipping LLM extraction");
+    return existingData;
+  }
+
   const alreadyFoundBrief = Object.entries(existingData)
     .filter(([, v]) => v?.trim())
     .map(([k, v]) => `${k}: "${v.slice(0, 60)}"`)
     .join(" | ");
 
+  // Build field guide with descriptions so the LLM knows what each field expects
+  const fieldGuide = missingSections.map((s, i) =>
+    `${i + 1}. ${s.key} (${s.label}): ${s.desc}`
+  ).join("\n");
+
+  // Build example output
+  const exampleObj: Record<string, string> = {};
+  for (const s of missingSections.slice(0, 2)) {
+    exampleObj[s.key] = `[extracted ${s.label.toLowerCase()} from page]`;
+  }
+  const exampleJson = JSON.stringify(exampleObj, null, 2);
+
   const userMsg = `${systemPrompt}
+
+FIELDS TO EXTRACT (read each description carefully):
+${fieldGuide}
+
+FORMATTING RULES:
+- Return plain text values only. Do NOT use markdown links like [text](url).
+- Do NOT include HTML tags, URL encoding (%C3%A9), or HTML entities (&amp;).
+- For person/name fields: return the person's full name and title (e.g. "Jane Doe, CEO"). Do NOT put email addresses in name fields.
+- For contact/email fields: return email addresses and phone numbers as plain text (e.g. "jane@company.com; +1 555-1234").
+- If a field cannot be determined from the content, return an empty string "". Do NOT guess or hallucinate.
+- Be specific and concrete — use actual data from the page, not vague summaries.
+- Ignore navigation menus, cookie banners, footer boilerplate, and third-party content.
 
 Already found: ${alreadyFoundBrief || "(nothing yet)"}
 
 Page content:
 ${combinedContent}
 
-Extract ONLY these missing fields: ${missingSections.map(s => `${s.key} (${s.label})`).join(", ")}
-For fields that cannot be determined from the content, return an empty string "".
+Example output format:
+${exampleJson}
+
 Return ONLY valid JSON with keys: ${missingKeys.join(", ")}`;
 
   try {
@@ -538,7 +564,7 @@ Return ONLY valid JSON with keys: ${missingKeys.join(", ")}`;
     const parsed = JSON.parse(typeof raw === "string" ? raw : "{}");
     const result = { ...existingData };
     for (const s of missingSections) {
-      const val = String(parsed[s.key] ?? "").trim();
+      const val = cleanFieldValue(String(parsed[s.key] ?? "").trim());
       if (val) result[s.key] = val;
     }
     return result;
@@ -817,6 +843,66 @@ Return ONLY a JSON array of the page numbers (1-indexed) you'd pick, ranked by p
 // ---------------------------------------------------------------------------
 // Content preprocessing — strip boilerplate for denser LLM context
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Content quality gate — skip LLM on empty/error pages
+// ---------------------------------------------------------------------------
+
+/** Check if page content has enough meaningful text to justify an LLM call. */
+function hasUsableContent(content: string): boolean {
+  const words = content.split(/\s+/).filter(w => w.length > 2);
+  return words.length >= 20;
+}
+
+/** Detect soft-404s and error pages that returned HTTP 200 but have error content. */
+function isErrorPageContent(content: string): boolean {
+  const lower = content.toLowerCase();
+  const signals = [
+    "page not found", "404 not found", "this page doesn't exist",
+    "does not exist", "no longer available", "page has been removed",
+    "we couldn't find", "the page you requested",
+    "parked domain", "this domain is for sale", "buy this domain",
+    "coming soon", "under construction", "website expired", "account suspended",
+  ];
+  // Short content + error signal = likely error page
+  if (content.length < 500) {
+    return signals.some(s => lower.includes(s));
+  }
+  // Longer content but title/first paragraph is an error
+  const firstChunk = lower.slice(0, 300);
+  return signals.some(s => firstChunk.includes(s));
+}
+
+// ---------------------------------------------------------------------------
+// Post-processing cleanup — strip markdown/HTML artifacts from LLM output
+// ---------------------------------------------------------------------------
+
+/** Clean a single field value: strip markdown links, URL encoding, HTML entities. */
+function cleanFieldValue(value: string): string {
+  if (!value) return value;
+  let v = value;
+  // Strip markdown links: [text](url) → text
+  v = v.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+  // Decode URL encoding: %C3%A9 → é
+  try { v = decodeURIComponent(v); } catch { /* invalid encoding, leave as-is */ }
+  // Strip residual HTML tags
+  v = v.replace(/<[^>]+>/g, "");
+  // Decode common HTML entities
+  v = v.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+       .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ");
+  // Normalize whitespace
+  v = v.replace(/\s+/g, " ").trim();
+  return v;
+}
+
+/** Clean all values in an extraction result. */
+function cleanExtractedData(data: Record<string, string>): Record<string, string> {
+  const cleaned: Record<string, string> = {};
+  for (const [k, v] of Object.entries(data)) {
+    cleaned[k] = cleanFieldValue(v);
+  }
+  return cleaned;
+}
 
 /** Strip nav, footer, cookie banners, and repeated boilerplate from markdown content. */
 function preprocessContent(content: string): string {

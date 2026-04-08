@@ -1006,6 +1006,12 @@ function classifyAgentError(err: unknown): string {
 export async function processAgentJob(jobId: number) {
   const keepAlive = new ConnectionKeepAlive();
 
+  // Hoist LLM cost baselines so catch/finally can access them
+  const _statsBaseline = getOpenAIStats();
+  let costBaseline = _statsBaseline.totalCost;
+  let inputBaseline = _statsBaseline.totalInputTokens;
+  let outputBaseline = _statsBaseline.totalOutputTokens;
+
   try {
     const job = await getEnrichmentJob(jobId);
     if (!job) throw new Error(`Job ${jobId} not found`);
@@ -1027,6 +1033,12 @@ export async function processAgentJob(jobId: number) {
     let totalEmailsFound = 0;
     let totalPeopleFound = 0;
     let totalDomainsWithData = 0;
+
+    // Re-snapshot baselines right before processing starts (after job setup completes)
+    const statsNow = getOpenAIStats();
+    costBaseline = statsNow.totalCost;
+    inputBaseline = statsNow.totalInputTokens;
+    outputBaseline = statsNow.totalOutputTokens;
 
     const CONCURRENCY = 50;
     const firmQueue = [...firms];
@@ -1151,16 +1163,28 @@ export async function processAgentJob(jobId: number) {
       console.log(`[processAgentJob] Saved partial results: ${profileResults.length} profiles`);
     };
 
-    // If paused or cancelled, save partial results and exit without marking completed
+    // If paused or cancelled, save partial results + cost and exit
     if (isJobPaused(jobId)) {
       console.log(`[processAgentJob] ⏸️ Job ${jobId} paused after ${profileResults.length} profiles. Saving partial results...`);
       await savePartialResults();
+      const pauseStats = getOpenAIStats();
+      await updateEnrichmentJob(jobId, {
+        totalCostUSD: String(Math.round((pauseStats.totalCost - costBaseline) * 10000) / 10000),
+        totalInputTokens: pauseStats.totalInputTokens - inputBaseline,
+        totalOutputTokens: pauseStats.totalOutputTokens - outputBaseline,
+      });
       return;
     }
 
     if (isJobCancelled(jobId)) {
       console.log(`[processAgentJob] 🛑 Job ${jobId} cancelled after ${profileResults.length} profiles. Saving partial results...`);
       await savePartialResults();
+      const cancelStats = getOpenAIStats();
+      await updateEnrichmentJob(jobId, {
+        totalCostUSD: String(Math.round((cancelStats.totalCost - costBaseline) * 10000) / 10000),
+        totalInputTokens: cancelStats.totalInputTokens - inputBaseline,
+        totalOutputTokens: cancelStats.totalOutputTokens - outputBaseline,
+      });
       return;
     }
 
@@ -1173,22 +1197,36 @@ export async function processAgentJob(jobId: number) {
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     );
 
+    // Compute job-specific LLM cost
+    const finalStats = getOpenAIStats();
+    const jobCost = Math.round((finalStats.totalCost - costBaseline) * 10000) / 10000;
+    console.log(`[processAgentJob] LLM cost for job ${jobId}: $${jobCost}`);
+
     await updateEnrichmentJob(jobId, {
       status: "completed",
       outputFileUrl: outputUrl,
       outputFileKey: outputKey,
       processedCount: processed,
       completedAt: new Date(),
+      totalCostUSD: String(jobCost),
+      totalInputTokens: finalStats.totalInputTokens - inputBaseline,
+      totalOutputTokens: finalStats.totalOutputTokens - outputBaseline,
     });
 
     console.log(
-      `[processAgentJob] ✅ Job ${jobId} complete. ${profileResults.length} profiles + ${collectedUrls.length} directory entries.`,
+      `[processAgentJob] ✅ Job ${jobId} complete. ${profileResults.length} profiles + ${collectedUrls.length} directory entries. Cost: $${jobCost}`,
     );
   } catch (error) {
     console.error(`[processAgentJob] Job ${jobId} failed:`, error);
+    // Still save cost even on failure
+    const failStats = getOpenAIStats();
+    const failCost = Math.round((failStats.totalCost - costBaseline) * 10000) / 10000;
     await updateEnrichmentJob(jobId, {
       status: "failed",
       errorMessage: error instanceof Error ? error.message : String(error),
+      totalCostUSD: String(failCost),
+      totalInputTokens: failStats.totalInputTokens - inputBaseline,
+      totalOutputTokens: failStats.totalOutputTokens - outputBaseline,
     });
   } finally {
     keepAlive.stop();
