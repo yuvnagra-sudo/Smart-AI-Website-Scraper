@@ -249,6 +249,71 @@ export const appRouter = router({
         return { jobId, firmCount: input.firmCount };
       }),
 
+    // Quick Scrape: paste a newline-separated list of domains — no file upload needed.
+    // Creates a standard enrichmentJob that the worker processes with the super scraper.
+    quickScrape: protectedProcedure
+      .input(
+        z.object({
+          domains: z.string().min(1),  // newline or comma-separated domain list
+          objective: z.string().optional(),
+          systemPrompt: z.string().optional(),
+          sectionsJson: z.string().optional(),
+        }),
+      )
+      .mutation(async ({ ctx, input }) => {
+        // Parse and normalise the domain list
+        const rawLines = input.domains.split(/[\n,;]+/).map((l: string) => l.trim()).filter(Boolean);
+        const domains: string[] = [];
+        for (const line of rawLines) {
+          const clean = line.replace(/^https?:\/\//i, "").replace(/\/.*$/, "").trim();
+          if (clean && clean.includes(".")) domains.push(clean);
+        }
+        if (domains.length === 0) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "No valid domains found in input" });
+        }
+
+        // Build a minimal CSV that the worker's parseInputExcel can read
+        const csvHeader = "Company Name,Website URL";
+        const csvRows = domains.map((d: string) => `"${d}","https://${d}"`).join("\n");
+        const csv = `${csvHeader}\n${csvRows}\n`;
+
+        // Upload the CSV to S3 so the worker can read it
+        const fileKey = `enrichment/${ctx.user.id}/${nanoid()}-quick-scrape.csv`;
+        const stored = await storagePut(fileKey, Buffer.from(csv, "utf-8"), "text/csv");
+        const costEstimate = estimateEnrichmentCost(domains.length, 200);
+
+        // Default sections for quick scrape (decision maker extraction)
+        const defaultSections = JSON.stringify([
+          { key: "decision_maker_name",  label: "Decision Maker Name",  desc: "Full name of the primary decision maker, CEO, founder, or owner." },
+          { key: "decision_maker_title", label: "Title / Role",         desc: "Job title or role of the decision maker." },
+          { key: "decision_maker_email", label: "Email",                desc: "Direct email address of the decision maker." },
+          { key: "linkedin_url",         label: "LinkedIn URL",         desc: "LinkedIn profile URL of the decision maker." },
+          { key: "company_phone",        label: "Phone",                desc: "Main company or direct phone number." },
+        ]);
+        const defaultSystemPrompt = `You are a business intelligence researcher. For each company, find the primary decision maker (CEO, founder, owner, or equivalent). Extract their full name, job title, direct email address, LinkedIn profile URL, and the company phone number. Focus on the team page, about page, and contact page. Return only verified information found on the website.`;
+        const defaultObjective = "Find the primary decision maker for each company: name, title, email, LinkedIn, and phone.";
+
+        const jobId = await createEnrichmentJob({
+          userId: ctx.user.id,
+          status: "pending",
+          inputFileUrl: stored.url,
+          inputFileKey: stored.key,
+          firmCount: domains.length,
+          tierFilter: "all",
+          deepTeamProfileScraping: true,
+          maxTeamProfiles: 10,
+          template: "agent",
+          estimatedCostUSD: String(costEstimate.totalCost),
+          sectionsJson: input.sectionsJson ?? defaultSections,
+          systemPrompt: input.systemPrompt ?? defaultSystemPrompt,
+          objective: input.objective ?? defaultObjective,
+          columnMappingJson: JSON.stringify({ companyNameColumn: "Company Name", websiteUrlColumn: "Website URL" }),
+        });
+
+        console.log(`[quickScrape] Job ${jobId} queued with ${domains.length} domains — worker will pick up within 5s`);
+        return { jobId, firmCount: domains.length, estimatedCost: costEstimate.totalCost };
+      }),
+
     // Generate AI extraction plan from user description
     generateExtractionPlan: protectedProcedure
       .input(z.object({ description: z.string().min(10) }))

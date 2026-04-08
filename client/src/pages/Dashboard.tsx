@@ -178,11 +178,13 @@ export default function Dashboard() {
   // Track whether the current uploadMutation call is a manual re-submit with explicit mapping
   const isManualMappingRef = useRef(false);
 
-  // Upload mode: file upload, paste URLs, or crawl a directory
-  const [uploadMode, setUploadMode] = useState<"file" | "paste" | "crawl">("file");
+  // Upload mode: file upload, paste URLs, crawl a directory, or quick-scrape domains
+  const [uploadMode, setUploadMode] = useState<"file" | "paste" | "crawl" | "quick">("file");
   const [manualUrls, setManualUrls] = useState("");
   const [crawlUrl, setCrawlUrl] = useState("");
   const [crawlMaxPages, setCrawlMaxPages] = useState(5);
+  // Quick Scrape state
+  const [quickDomains, setQuickDomains] = useState("");
 
   const { data: jobs, isLoading: jobsLoading, refetch } = trpc.enrichment.listJobs.useQuery(undefined, {
     enabled: !!user,
@@ -408,6 +410,19 @@ export default function Dashboard() {
     uploadMutation.mutate({ fileData: base64, fileName: "manual-urls.csv" });
   };
 
+  const quickScrapeMutation = trpc.enrichment.quickScrape.useMutation({
+    onSuccess: (data: { jobId: number; firmCount: number; estimatedCost: number }) => {
+      setUploading(false);
+      setQuickDomains("");
+      toast.success(`⚡ Quick Scrape job #${data.jobId} started — ${data.firmCount} domain${data.firmCount !== 1 ? "s" : ""} queued!`);
+      refetch();
+    },
+    onError: (error: { message: string }) => {
+      toast.error(`Quick Scrape failed: ${error.message}`);
+      setUploading(false);
+    },
+  });
+
   const discoverMutation = trpc.enrichment.discoverFromUrl.useMutation({
     onSuccess: (data: DiscoverResult) => {
       setPendingFileUrl(data.fileUrl);
@@ -527,6 +542,16 @@ export default function Dashboard() {
                 <Search className="h-4 w-4 mr-2" />
                 Crawl Directory
               </Button>
+              <Button
+                variant={uploadMode === "quick" ? "default" : "outline"}
+                size="sm"
+                disabled={uploading || wizardStep !== "idle"}
+                onClick={() => setUploadMode("quick")}
+                className={uploadMode === "quick" ? "bg-green-600 hover:bg-green-700 text-white border-green-600" : "border-green-600 text-green-700 hover:bg-green-50"}
+              >
+                <Bot className="h-4 w-4 mr-2" />
+                Quick Scrape
+              </Button>
             </div>
 
             {uploadMode === "paste" && (
@@ -596,6 +621,44 @@ export default function Dashboard() {
                   </Button>
                   {uploading && (
                     <span className="text-xs text-muted-foreground">This may take 20–60 seconds...</span>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {uploadMode === "quick" && (
+              <div className="space-y-3">
+                <div className="rounded-lg border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-800">
+                  <strong>Quick Scrape</strong> — paste a list of domains and hit go. No file upload, no configuration.
+                  The AI will find the decision maker (name, title, email, LinkedIn, phone) for each domain automatically.
+                </div>
+                <Textarea
+                  placeholder={"Paste one domain per line (or comma-separated):\nagegardien.ca\nnoovelia.com\nhttps://example.com"}
+                  value={quickDomains}
+                  onChange={(e: { target: HTMLTextAreaElement }) => setQuickDomains(e.target.value)}
+                  disabled={uploading || wizardStep !== "idle"}
+                  rows={6}
+                  className="font-mono text-sm"
+                />
+                <div className="flex items-center gap-3">
+                  <Button
+                    disabled={uploading || wizardStep !== "idle" || !quickDomains.trim()}
+                    className="bg-green-600 hover:bg-green-700 text-white"
+                    onClick={() => {
+                      setUploading(true);
+                      quickScrapeMutation.mutate({ domains: quickDomains });
+                    }}
+                  >
+                    {uploading ? (
+                      <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Starting...</>
+                    ) : (
+                      <><Bot className="h-4 w-4 mr-2" />Start Quick Scrape</>
+                    )}
+                  </Button>
+                  {quickDomains.trim() && (
+                    <span className="text-xs text-muted-foreground">
+                      {quickDomains.split(/[\n,;]+/).map((l: string) => l.trim()).filter((l: string) => l && l.includes(".")).length} domain{quickDomains.split(/[\n,;]+/).map((l: string) => l.trim()).filter((l: string) => l && l.includes(".")).length !== 1 ? "s" : ""} detected
+                    </span>
                   )}
                 </div>
               </div>
