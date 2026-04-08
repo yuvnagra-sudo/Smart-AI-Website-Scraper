@@ -1,30 +1,24 @@
 /**
- * LLM Implementation — OpenAI or Gemini (OpenAI-compatible)
+ * LLM Implementation — OpenAI only (gpt-4.1-mini / gpt-4.1-nano)
  *
- * Provider is selected at runtime:
- *   - If GEMINI_API_KEY is set → uses Gemini 2.5 Flash (50% cheaper, faster)
- *   - Otherwise → uses OpenAI (model via OPENAI_MODEL env var, default: gpt-4o-mini)
+ * Model selection (override via Railway env var OPENAI_MODEL):
+ *   - gpt-4.1-mini  → capable, low cost (default)
+ *   - gpt-4.1-nano  → fastest, cheapest (set OPENAI_MODEL=gpt-4.1-nano)
  *
- * Gemini 2.5 Flash uses Google's OpenAI-compatible endpoint so the code change is minimal.
- * To switch providers in Railway: add/remove the GEMINI_API_KEY env var.
+ * Gemini has been removed. Only OpenAI is used.
  */
 
 import { type InvokeParams, type InvokeResult } from "./llm";
 import { ENV } from "./env";
 
-const USE_GEMINI = !!process.env.GEMINI_API_KEY;
-const LLM_BASE_URL = USE_GEMINI
-  ? "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-  : "https://api.openai.com/v1/chat/completions";
-const LLM_MODEL = USE_GEMINI
-  ? (process.env.GEMINI_MODEL ?? "gemini-2.5-flash")
-  : (process.env.OPENAI_MODEL ?? "gpt-4o-mini");
-const LLM_API_KEY = USE_GEMINI
-  ? (process.env.GEMINI_API_KEY ?? "")
-  : ENV.openAiApiKey;
-// Pricing per 1M tokens for cost tracking
-const INPUT_COST_PER_1M  = USE_GEMINI ? 0.075 : 0.15;
-const OUTPUT_COST_PER_1M = USE_GEMINI ? 0.30  : 0.60;
+// Active model — default gpt-4.1-mini, override via OPENAI_MODEL env var
+const LLM_MODEL = process.env.OPENAI_MODEL ?? "gpt-4.1-mini";
+const LLM_BASE_URL = "https://api.openai.com/v1/chat/completions";
+
+// gpt-4.1-mini: $0.40 input / $1.60 output per 1M tokens
+// gpt-4.1-nano: $0.10 input / $0.40 output per 1M tokens
+const INPUT_COST_PER_1M  = LLM_MODEL.includes("nano") ? 0.10 : 0.40;
+const OUTPUT_COST_PER_1M = LLM_MODEL.includes("nano") ? 0.40 : 1.60;
 
 // Statistics
 let totalCalls = 0;
@@ -37,8 +31,8 @@ let totalOutputTokens = 0;
  * Invoke OpenAI API directly
  */
 export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
-  if (!LLM_API_KEY) {
-    throw new Error(USE_GEMINI ? "Gemini API key not configured" : "OpenAI API key not configured");
+  if (!ENV.openAiApiKey) {
+    throw new Error("OpenAI API key not configured");
   }
 
   const { messages, tools, response_format, temperature } = params;
@@ -65,11 +59,10 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
   }
 
   try {
-    // Call LLM API (OpenAI or Gemini OpenAI-compatible endpoint)
     const response = await fetch(LLM_BASE_URL, {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${LLM_API_KEY}`,
+        "Authorization": `Bearer ${ENV.openAiApiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),
@@ -82,7 +75,7 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
 
     const data = await response.json();
 
-    // Track cost using active provider pricing
+    // Track cost
     const inputTokens = data.usage?.prompt_tokens || 0;
     const outputTokens = data.usage?.completion_tokens || 0;
     const cost = (inputTokens * INPUT_COST_PER_1M + outputTokens * OUTPUT_COST_PER_1M) / 1_000_000;
@@ -122,9 +115,10 @@ export function getOpenAIStats() {
     totalCalls,
     totalCost,
     totalErrors,
-    errorRate: totalCalls > 0 ? (totalErrors / totalCalls * 100).toFixed(2) + '%' : '0%',
+    errorRate: totalCalls > 0 ? (totalErrors / totalCalls * 100).toFixed(2) + "%" : "0%",
     totalInputTokens,
     totalOutputTokens,
+    activeModel: LLM_MODEL,
   };
 }
 

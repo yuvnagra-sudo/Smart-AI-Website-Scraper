@@ -281,7 +281,7 @@ export async function invokeLLM(params: InvokeParams, retries = 3): Promise<Invo
   } = params;
 
   const payload: Record<string, unknown> = {
-    model: "gemini-2.5-flash",
+    model: process.env.OPENAI_MODEL ?? "gpt-4.1-mini",
     messages: messages.map(normalizeMessage),
   };
 

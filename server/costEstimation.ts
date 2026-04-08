@@ -39,14 +39,14 @@ const TOKEN_ESTIMATES = {
 };
 
 /**
- * Pricing — dynamic based on active provider.
- * Gemini 2.5 Flash (when GEMINI_API_KEY is set): $0.075 input / $0.30 output per 1M tokens
- * gpt-4o-mini (default):                         $0.15  input / $0.60 output per 1M tokens
+ * Pricing — based on active OpenAI model.
+ * gpt-4.1-mini (default): $0.40 input / $1.60 output per 1M tokens
+ * gpt-4.1-nano:           $0.10 input / $0.40 output per 1M tokens
  */
-const USE_GEMINI = !!process.env.GEMINI_API_KEY;
+const ACTIVE_MODEL = process.env.OPENAI_MODEL ?? "gpt-4.1-mini";
 const PRICING = {
-  inputPer1M:  USE_GEMINI ? 0.075 : 0.15,
-  outputPer1M: USE_GEMINI ? 0.30  : 0.60,
+  inputPer1M:  ACTIVE_MODEL.includes("nano") ? 0.10 : 0.40,
+  outputPer1M: ACTIVE_MODEL.includes("nano") ? 0.40 : 1.60,
 };
 
 /**
@@ -147,11 +147,11 @@ export function estimateEnrichmentCost(
     scaledPortfolioOutput +
     TOKEN_ESTIMATES.waterfallRetry.output * 2 * 0.3;
 
-  // Duration estimate — 50 concurrent workers at 1,000 RPM Gemini Tier 2
-  // LLM bottleneck: (firmCount × 6 calls) / (1000 RPM / 60) seconds
+  // Duration estimate — 50 concurrent workers at 10,000 RPM (OpenAI gpt-4.1-mini/nano)
+  // LLM bottleneck: (firmCount × 6 calls) / (10000 RPM / 60) seconds
   // Scraping bottleneck: ceil(firmCount / 50) × 25s per batch
   // Wall-clock = max of the two (they run in parallel)
-  const llmSeconds      = (firmCount * 6) / (1000 / 60);
+  const llmSeconds      = (firmCount * 6) / (10000 / 60);
   const scrapingSeconds = Math.ceil(firmCount / 50) * 25;
   const totalSeconds    = Math.max(llmSeconds, scrapingSeconds);
   const hours = Math.floor(totalSeconds / 3600);
