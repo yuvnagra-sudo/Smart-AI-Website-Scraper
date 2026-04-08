@@ -1415,30 +1415,39 @@ export async function scrapeUrlSuper(
   // Merge — field emails take priority, page emails supplement
   const uniqueEmailsFinal = new Set([...fieldEmails, ...pageEmails]);
 
-  // ── Count named people from team/contact/about pages ──────────────────────
-  const namePattern = /\b([A-Z][a-z]{1,20}(?:\s[A-Z][a-z]{1,20}){1,3})\b/g;
-  const teamPageContent = contactPages.map(p => p.content).join(" ");
-  const NON_NAMES = new Set([
-    "New York", "San Francisco", "Los Angeles", "United States", "North America",
-    "South America", "United Kingdom", "Real Estate", "Private Equity", "Venture Capital",
-    "Series A", "Series B", "Series C", "Angel Investor", "Managing Director",
-    "Chief Executive", "Chief Financial", "Chief Operating", "Vice President", "General Partner",
-    "Read More", "Learn More", "Get Started", "Sign Up", "Log In", "Contact Us",
-    "Privacy Policy", "Terms Of", "All Rights", "View More", "Load More", "Show More",
-    "Google Maps", "Web Design", "Social Media", "Customer Service", "About Us",
-    "Our Team", "Meet The", "Get In", "Follow Us", "Join Us", "Work With",
-  ]);
-  const nameMatches = teamPageContent.match(namePattern) ?? [];
-  const uniquePeople = new Set(
-    nameMatches.filter(n => n.split(" ").length >= 2 && !NON_NAMES.has(n))
-  );
+  // ── Count people actually extracted into data fields ──────────────────────
+  // Don't regex-guess names from page content (too many false positives like
+  // "Real Estate", "San Francisco", "Our Services"). Instead, count people
+  // that the LLM or deterministic extractor actually placed into fields.
+  const peopleFieldPatterns = /decision.?maker|key.?contact|contact.?info|team|people|person|name|founder|ceo|partner|staff|agent/i;
+  let extractedPersonCount = 0;
+  for (const s of sections) {
+    const combined = s.key + " " + s.label;
+    if (peopleFieldPatterns.test(combined) && data[s.key]?.trim()) {
+      // Count semicolons/commas as separators for multi-person fields
+      const val = data[s.key];
+      // Check if the value contains actual name-like content (not just titles or descriptions)
+      const nameishPattern = /[A-Z][a-z]+\s[A-Z][a-z]+/g;
+      const names = val.match(nameishPattern) ?? [];
+      extractedPersonCount += Math.max(names.length, val.trim() ? 1 : 0);
+    }
+  }
+  // Also count LinkedIn profile URLs as people (each profile = one person)
+  for (const s of sections) {
+    if (/linkedin/i.test(s.key + " " + s.label) && data[s.key]?.trim()) {
+      const profileUrls = data[s.key].match(/linkedin\.com\/in\//gi) ?? [];
+      if (profileUrls.length > 0 && extractedPersonCount === 0) {
+        extractedPersonCount = profileUrls.length;
+      }
+    }
+  }
 
   const stats: ScrapeStats = {
     fieldsTotal: sections.length,
     fieldsFilled: sections.length - emptyFields.length,
     emptyFields,
     emailCount: uniqueEmailsFinal.size,
-    personCount: uniquePeople.size,
+    personCount: extractedPersonCount,
     hasData: sections.length - emptyFields.length > 0,
   };
 
