@@ -40,13 +40,13 @@ const TOKEN_ESTIMATES = {
 
 /**
  * Pricing — based on active OpenAI model.
- * gpt-4.1-mini (default): $0.40 input / $1.60 output per 1M tokens
- * gpt-4.1-nano:           $0.10 input / $0.40 output per 1M tokens
+ * gpt-5.4-mini (default): $0.75 input / $3.00 output per 1M tokens
+ * gpt-5.4-nano:           $0.20 input / $0.80 output per 1M tokens
  */
-const ACTIVE_MODEL = process.env.OPENAI_MODEL ?? "gpt-4.1-mini";
+const ACTIVE_MODEL = process.env.OPENAI_MODEL ?? "gpt-5.4-mini";
 const PRICING = {
-  inputPer1M:  ACTIVE_MODEL.includes("nano") ? 0.10 : 0.40,
-  outputPer1M: ACTIVE_MODEL.includes("nano") ? 0.40 : 1.60,
+  inputPer1M:  ACTIVE_MODEL.includes("nano") ? 0.20 : 0.75,
+  outputPer1M: ACTIVE_MODEL.includes("nano") ? 0.80 : 3.00,
 };
 
 /**
@@ -147,7 +147,7 @@ export function estimateEnrichmentCost(
     scaledPortfolioOutput +
     TOKEN_ESTIMATES.waterfallRetry.output * 2 * 0.3;
 
-  // Duration estimate — 50 concurrent workers at 10,000 RPM (OpenAI gpt-4.1-mini/nano)
+  // Duration estimate — 50 concurrent workers at 10,000 RPM (OpenAI gpt-5.4-mini/nano)
   // LLM bottleneck: (firmCount × 6 calls) / (10000 RPM / 60) seconds
   // Scraping bottleneck: ceil(firmCount / 50) × 25s per batch
   // Wall-clock = max of the two (they run in parallel)

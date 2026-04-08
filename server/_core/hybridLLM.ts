@@ -1,9 +1,9 @@
 /**
- * Hybrid LLM System — OpenAI only (gpt-4.1-mini / gpt-4.1-nano)
+ * Hybrid LLM System — OpenAI only (gpt-5.4-mini / gpt-5.4-nano)
  *
  * Manus Forge and Gemini have been removed.
  * All LLM calls route through OpenAI.
- * Set OPENAI_MODEL=gpt-4.1-nano in Railway for cheapest/fastest mode.
+ * Set OPENAI_MODEL=gpt-5.4-nano in Railway for cheapest/fastest mode.
  */
 import { type InvokeParams, type InvokeResult } from "./llm";
 import { ENV } from "./env";
@@ -11,8 +11,8 @@ import { ENV } from "./env";
 // Re-export types for consumers
 export type { InvokeParams, InvokeResult };
 
-// Use gpt-4.1-mini by default; set OPENAI_MODEL=gpt-4.1-nano for cheapest/fastest
-const OPENAI_MODEL = process.env.OPENAI_MODEL ?? "gpt-4.1-mini";
+// Use gpt-5.4-mini by default; set OPENAI_MODEL=gpt-5.4-nano for cheapest/fastest
+const OPENAI_MODEL = process.env.OPENAI_MODEL ?? "gpt-5.4-mini";
 
 // Statistics
 let openaiCallCount = 0;
@@ -62,9 +62,9 @@ async function invokeOpenAI(params: InvokeParams): Promise<InvokeResult> {
 
   const data = await response.json();
 
-  // gpt-4.1-mini: $0.40/$1.60 per 1M; gpt-4.1-nano: $0.10/$0.40 per 1M
-  const inputCostPer1M  = OPENAI_MODEL.includes("nano") ? 0.10 : 0.40;
-  const outputCostPer1M = OPENAI_MODEL.includes("nano") ? 0.40 : 1.60;
+  // gpt-5.4-mini: $0.75/$3.00 per 1M; gpt-5.4-nano: $0.20/$0.80 per 1M
+  const inputCostPer1M  = OPENAI_MODEL.includes("nano") ? 0.20 : 0.75;
+  const outputCostPer1M = OPENAI_MODEL.includes("nano") ? 0.80 : 3.00;
   const inputTokens = data.usage?.prompt_tokens || 0;
   const outputTokens = data.usage?.completion_tokens || 0;
   const cost = (inputTokens * inputCostPer1M + outputTokens * outputCostPer1M) / 1_000_000;

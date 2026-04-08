@@ -281,7 +281,7 @@ export async function invokeLLM(params: InvokeParams, retries = 3): Promise<Invo
   } = params;
 
   const payload: Record<string, unknown> = {
-    model: process.env.OPENAI_MODEL ?? "gpt-4.1-mini",
+    model: process.env.OPENAI_MODEL ?? "gpt-5.4-mini",
     messages: messages.map(normalizeMessage),
   };
 

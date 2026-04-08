@@ -1,9 +1,9 @@
 /**
- * LLM Implementation — OpenAI only (gpt-4.1-mini / gpt-4.1-nano)
+ * LLM Implementation — OpenAI only (gpt-5.4-mini / gpt-5.4-nano)
  *
  * Model selection (override via Railway env var OPENAI_MODEL):
- *   - gpt-4.1-mini  → capable, low cost (default)
- *   - gpt-4.1-nano  → fastest, cheapest (set OPENAI_MODEL=gpt-4.1-nano)
+ *   - gpt-5.4-mini  → capable, low cost (default)
+ *   - gpt-5.4-nano  → fastest, cheapest (set OPENAI_MODEL=gpt-5.4-nano)
  *
  * Gemini has been removed. Only OpenAI is used.
  */
@@ -11,14 +11,14 @@
 import { type InvokeParams, type InvokeResult } from "./llm";
 import { ENV } from "./env";
 
-// Active model — default gpt-4.1-mini, override via OPENAI_MODEL env var
-const LLM_MODEL = process.env.OPENAI_MODEL ?? "gpt-4.1-mini";
+// Active model — default gpt-5.4-mini, override via OPENAI_MODEL env var
+const LLM_MODEL = process.env.OPENAI_MODEL ?? "gpt-5.4-mini";
 const LLM_BASE_URL = "https://api.openai.com/v1/chat/completions";
 
-// gpt-4.1-mini: $0.40 input / $1.60 output per 1M tokens
-// gpt-4.1-nano: $0.10 input / $0.40 output per 1M tokens
-const INPUT_COST_PER_1M  = LLM_MODEL.includes("nano") ? 0.10 : 0.40;
-const OUTPUT_COST_PER_1M = LLM_MODEL.includes("nano") ? 0.40 : 1.60;
+// gpt-5.4-mini: $0.75 input / $3.00 output per 1M tokens
+// gpt-5.4-nano: $0.20 input / $0.80 output per 1M tokens
+const INPUT_COST_PER_1M  = LLM_MODEL.includes("nano") ? 0.20 : 0.75;
+const OUTPUT_COST_PER_1M = LLM_MODEL.includes("nano") ? 0.80 : 3.00;
 
 // Statistics
 let totalCalls = 0;
