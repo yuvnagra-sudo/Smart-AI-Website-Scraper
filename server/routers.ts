@@ -12,6 +12,29 @@ import { enrichedFirms, teamMembers, portfolioCompanies, investmentThesis } from
 import { eq, and, like, count } from "drizzle-orm";
 import { parseInputExcel, parseInputHeaders, createOutputExcel, createAgentOutputExcel, type EnrichedVCData, type TeamMemberData, type PortfolioCompanyData, type ProcessingSummaryData, type FileHeaders, type InputQualityReport } from "./excelProcessor";
 import { scrapeUrl, scrapeUrlAsDirectory, type AgentSection, type DirectoryEntry as AgentDirectoryEntry, type ScrapeStats, type FieldResultMap } from "./agentScraper";
+import { scrapeUrlLightweight } from "./lightweightScraper";
+
+/**
+ * Feature flag: set USE_LIGHTWEIGHT_SCRAPER=true in Railway env to use the
+ * new lightweight scraper instead of the multi-hop LLM agent loop.
+ *
+ * The lightweight scraper replaces 7 LLM calls/firm with 0–1 calls,
+ * reducing cost from ~$0.018–0.022/firm to ~$0.000–0.003/firm.
+ * It uses the same enrichment cascade (Hunter, SMTP, Apify) and the
+ * same output format — fully backward compatible.
+ */
+const USE_LIGHTWEIGHT_SCRAPER = process.env.USE_LIGHTWEIGHT_SCRAPER === "true";
+
+/** Unified scraper selector — picks lightweight or agent based on env flag. */
+const activeScraper: typeof scrapeUrl = USE_LIGHTWEIGHT_SCRAPER
+  ? (scrapeUrlLightweight as typeof scrapeUrl)
+  : scrapeUrl;
+
+if (USE_LIGHTWEIGHT_SCRAPER) {
+  console.log("[routers] 🚀 Using LIGHTWEIGHT scraper (USE_LIGHTWEIGHT_SCRAPER=true)");
+} else {
+  console.log("[routers] 🤖 Using AGENT scraper (USE_LIGHTWEIGHT_SCRAPER not set)");
+}
 import type { SkillContext } from "../shared/skillContext";
 import { generateInvestmentThesisSummaries } from "./investmentThesisAnalyzer";
 import { generateResultsFile } from "./generateResultsService";
@@ -1352,7 +1375,7 @@ export async function processAgentJob(jobId: number) {
           let stats: ScrapeStats = { fieldsTotal: sections.length, fieldsFilled: 0, emptyFields: [] };
           let isDirectoryResult = false;
 
-          const scrapePromise = scrapeUrl(
+          const scrapePromise = activeScraper(
             firm.websiteUrl,
             rowObjective,
             sections,
