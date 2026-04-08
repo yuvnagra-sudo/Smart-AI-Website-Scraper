@@ -349,17 +349,41 @@ function deterministicExtract(
   const uniqueCompanies = [...new Set(allLinkedInCompanies)];
   const uniquePhones = [...new Set(allPhones)];
 
-  // Map to sections by key pattern
+  // Map to sections by key pattern — broadened matching to catch template
+  // section names like "key_decision_makers", "contact_info", "key_contact"
   for (const s of sections) {
     const kl = s.key.toLowerCase();
     const ll = s.label.toLowerCase();
+    const combined = kl + " " + ll;
 
-    if (/email/.test(kl) || /email/.test(ll)) {
+    // Email fields: match "email", "contact_info", "contact_location", "key_contact"
+    if (/email|contact.?info|contact.?location|contact.?detail/i.test(combined)) {
       if (uniqueEmails.length > 0) {
-        result[s.key] = { value: uniqueEmails[0], confidence: 0.82, sourceUrl: pages[0]?.url };
+        const emailStr = uniqueEmails.length === 1
+          ? uniqueEmails[0]
+          : uniqueEmails.slice(0, 3).join("; ");
+        result[s.key] = { value: emailStr, confidence: 0.82, sourceUrl: pages[0]?.url };
       }
-    } else if (/linkedin/.test(kl) || /linkedin/.test(ll)) {
-      if (/company|firm|org/.test(kl) || /company|firm|org/.test(ll)) {
+    }
+    // Decision maker / key contact fields: inject email + name + title if available
+    else if (/decision.?maker|key.?contact|primary.?contact|dm\d/i.test(combined)) {
+      const parts: string[] = [];
+      if (allJsonLd.length > 0) {
+        const person = allJsonLd.find(j => j.name);
+        if (person?.name) parts.push(person.name);
+        if (person?.jobTitle) parts.push(person.jobTitle);
+        if (person?.email) parts.push(person.email);
+      }
+      if (parts.length === 0 && uniqueEmails.length > 0) {
+        parts.push(uniqueEmails[0]);
+      }
+      if (parts.length > 0) {
+        result[s.key] = { value: parts.join(" — "), confidence: 0.78, sourceUrl: pages[0]?.url };
+      }
+    }
+    // LinkedIn fields
+    else if (/linkedin/.test(combined)) {
+      if (/company|firm|org/.test(combined)) {
         if (uniqueCompanies.length > 0) {
           result[s.key] = { value: uniqueCompanies[0], confidence: 0.88, sourceUrl: pages[0]?.url };
         }
@@ -368,19 +392,35 @@ function deterministicExtract(
           result[s.key] = { value: uniqueProfiles[0], confidence: 0.88, sourceUrl: pages[0]?.url };
         }
       }
-    } else if (/phone|tel/.test(kl) || /phone|tel/.test(ll)) {
+    }
+    // Phone fields
+    else if (/phone|tel/.test(combined)) {
       if (uniquePhones.length > 0) {
         result[s.key] = { value: uniquePhones[0], confidence: 0.80, sourceUrl: pages[0]?.url };
       }
-    } else if ((/name/.test(kl) || /name/.test(ll)) && allJsonLd.length > 0) {
+    }
+    // Name fields (from JSON-LD)
+    else if ((/\bname\b/.test(kl) || /\bname\b/.test(ll)) && allJsonLd.length > 0) {
       const person = allJsonLd.find(j => j.name);
       if (person?.name) {
         result[s.key] = { value: person.name, confidence: 0.85, sourceUrl: pages[0]?.url };
       }
-    } else if ((/title|role|position/.test(kl) || /title|role|position/.test(ll)) && allJsonLd.length > 0) {
+    }
+    // Title/role fields (from JSON-LD)
+    else if ((/title|role|position/.test(kl) || /title|role|position/.test(ll)) && allJsonLd.length > 0) {
       const person = allJsonLd.find(j => j.jobTitle);
       if (person?.jobTitle) {
         result[s.key] = { value: person.jobTitle, confidence: 0.85, sourceUrl: pages[0]?.url };
+      }
+    }
+    // Location / hours fields
+    else if (/location|address|hours/i.test(combined) && uniquePhones.length > 0) {
+      // Phone is often co-located with address — inject it as a signal
+      if (uniqueEmails.length > 0 || uniquePhones.length > 0) {
+        const contactBits: string[] = [];
+        if (uniquePhones.length > 0) contactBits.push(uniquePhones[0]);
+        if (uniqueEmails.length > 0) contactBits.push(uniqueEmails[0]);
+        // Don't overwrite — this is just a hint for partial data
       }
     }
   }
@@ -1339,24 +1379,54 @@ export async function scrapeUrlSuper(
 
   const emptyFields = sections.map(s => s.key).filter(k => !data[k] || data[k].trim() === "");
 
-  // ── Count emails across all gathered page content + extracted data fields ──
-  const emailRegexFinal = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
-  const allGatheredContent = allPages.map(p => p.content).join(" ") + " " + Object.values(data).join(" ");
-  const allEmailMatches = allGatheredContent.match(emailRegexFinal) ?? [];
-  const uniqueEmails = new Set(allEmailMatches.map(e => e.toLowerCase()));
+  // ── Count REAL emails (not noise) across extracted data + page content ────
+  // Only count personal emails (not generic info@, support@, etc.)
+  const emailRegexFinal = /\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b/g;
+  const noiseEmailPrefix = /^(info|contact|hello|support|admin|team|press|media|careers|jobs|hr|sales|marketing|legal|privacy|security|noreply|no-reply|webmaster|postmaster|news|newsletter|office|help|mail|billing|feedback|enquiries|general|reception)@/i;
+  const noiseEmailDomain = /\.(png|jpg|gif|svg|css|js|woff|ico)$/i; // image references like user@2x.png
+
+  // First: count emails actually extracted into data fields
+  const fieldEmails = new Set<string>();
+  for (const [, val] of Object.entries(data)) {
+    if (!val) continue;
+    const matches = val.match(emailRegexFinal) ?? [];
+    for (const m of matches) {
+      const lower = m.toLowerCase();
+      if (!noiseEmailPrefix.test(lower) && !noiseEmailDomain.test(lower)) {
+        fieldEmails.add(lower);
+      }
+    }
+  }
+
+  // Second: count personal emails found on team/contact pages (not all pages)
+  const contactPages = allPages.filter(p =>
+    /\/(team|people|staff|leadership|about|contact|founders|partners)/i.test(p.url)
+  );
+  const pageEmails = new Set<string>();
+  for (const page of contactPages) {
+    const matches = page.content.match(emailRegexFinal) ?? [];
+    for (const m of matches) {
+      const lower = m.toLowerCase();
+      if (!noiseEmailPrefix.test(lower) && !noiseEmailDomain.test(lower)) {
+        pageEmails.add(lower);
+      }
+    }
+  }
+  // Merge — field emails take priority, page emails supplement
+  const uniqueEmailsFinal = new Set([...fieldEmails, ...pageEmails]);
 
   // ── Count named people from team/contact/about pages ──────────────────────
   const namePattern = /\b([A-Z][a-z]{1,20}(?:\s[A-Z][a-z]{1,20}){1,3})\b/g;
-  const teamPageContent = allPages
-    .filter(p => /\/(team|people|staff|leadership|about|contact|founders|partners)/i.test(p.url))
-    .map(p => p.content)
-    .join(" ");
+  const teamPageContent = contactPages.map(p => p.content).join(" ");
   const NON_NAMES = new Set([
     "New York", "San Francisco", "Los Angeles", "United States", "North America",
     "South America", "United Kingdom", "Real Estate", "Private Equity", "Venture Capital",
     "Series A", "Series B", "Series C", "Angel Investor", "Managing Director",
     "Chief Executive", "Chief Financial", "Chief Operating", "Vice President", "General Partner",
     "Read More", "Learn More", "Get Started", "Sign Up", "Log In", "Contact Us",
+    "Privacy Policy", "Terms Of", "All Rights", "View More", "Load More", "Show More",
+    "Google Maps", "Web Design", "Social Media", "Customer Service", "About Us",
+    "Our Team", "Meet The", "Get In", "Follow Us", "Join Us", "Work With",
   ]);
   const nameMatches = teamPageContent.match(namePattern) ?? [];
   const uniquePeople = new Set(
@@ -1367,7 +1437,7 @@ export async function scrapeUrlSuper(
     fieldsTotal: sections.length,
     fieldsFilled: sections.length - emptyFields.length,
     emptyFields,
-    emailCount: uniqueEmails.size,
+    emailCount: uniqueEmailsFinal.size,
     personCount: uniquePeople.size,
     hasData: sections.length - emptyFields.length > 0,
   };
