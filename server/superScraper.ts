@@ -625,6 +625,14 @@ async function fetchSitemapUrls(baseUrl: string, limit = 30): Promise<string[]> 
  * Falls back gracefully at every phase — a failure in Phase 4 never
  * prevents Phase 5 from running.
  */
+/** Ensure a URL has a protocol prefix so new URL() never throws on bare domains. */
+function normaliseUrl(raw: string): string {
+  if (!raw) return raw;
+  const trimmed = raw.trim();
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return `https://${trimmed}`;
+}
+
 export async function scrapeUrlSuper(
   url: string,
   objective: string,
@@ -633,6 +641,8 @@ export async function scrapeUrlSuper(
   _maxHops = 5, // Ignored — super scraper uses its own phase-based hop budget
   isCancelled?: () => boolean,
 ): Promise<AgentScrapeResult> {
+  // Normalise URL — bare domains like "acme.ca" become "https://acme.ca"
+  url = normaliseUrl(url);
   const startMs = Date.now();
   const companyName = (() => { try { return new URL(url).hostname.replace(/^www\./, "").split(".")[0]; } catch { return url; } })();
 
