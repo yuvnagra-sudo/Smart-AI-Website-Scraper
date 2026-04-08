@@ -1187,95 +1187,103 @@ export default function Dashboard() {
                   const colors = TEMPLATE_COLORS[jobTemplate] ?? TEMPLATE_COLORS.vc;
                   const isAgentJob = !!(job as any).sectionsJson;
 
+                  // ── scraper-app-inspired status badge colours ──
+                  const statusBadgeClass =
+                    job.status === "completed"  ? "bg-green-900/30 text-green-400 border border-green-700/50" :
+                    job.status === "failed"     ? "bg-red-900/30 text-red-400 border border-red-700/50" :
+                    job.status === "processing" ? "bg-blue-900/30 text-blue-400 border border-blue-700/50" :
+                                                  "bg-amber-900/30 text-amber-400 border border-amber-700/50";
+
+                  // ── stats derived from job fields ──
+                  const jobLogs: any[] = []; // populated live via JobLogFeed; use processedCount for now
+                  const emailsFound  = (job as any).emailsFound  ?? 0;
+                  const peopleFound  = (job as any).peopleFound  ?? 0;
+                  const domainsWithData = (job as any).domainsWithData ?? job.processedCount ?? 0;
+
                   return (
-                    <Card key={job.id} className="border-2">
-                      <CardContent className="pt-6">
-                        <div className="flex items-start justify-between mb-3">
-                          <div className="flex-1">
-                            <div className="flex items-center gap-2 mb-1">
-                              {job.status === "completed"  && <CheckCircle className="h-5 w-5 text-green-600" />}
-                              {job.status === "failed"     && <XCircle className="h-5 w-5 text-red-600" />}
-                              {job.status === "processing" && <Loader2 className="h-5 w-5 animate-spin text-blue-600" />}
-                              {job.status === "pending"    && <Clock className="h-5 w-5 text-gray-600" />}
-                              <span className="font-semibold capitalize">{job.status}</span>
+                    <Card key={job.id} className="border bg-[#111113] text-[#e4e4e7] shadow-sm">
+                      <CardContent className="pt-5 pb-4">
+
+                        {/* ── Top row: status badge + template badge + actions ── */}
+                        <div className="flex items-start justify-between mb-4">
+                          <div className="flex flex-col gap-1.5">
+                            {/* Status badge (scraper-app style) */}
+                            <div className="flex items-center gap-2">
+                              <span className={`inline-flex items-center gap-1.5 font-mono text-[11px] font-bold uppercase tracking-widest px-2.5 py-1 rounded ${statusBadgeClass}`}>
+                                {job.status === "processing" && <Loader2 className="h-3 w-3 animate-spin" />}
+                                {job.status === "pending"    && <Clock className="h-3 w-3" />}
+                                {job.status === "completed"  && <CheckCircle className="h-3 w-3" />}
+                                {job.status === "failed"     && <XCircle className="h-3 w-3" />}
+                                {job.status}
+                              </span>
                               {isAgentJob ? (
-                                <Badge variant="outline" className="text-xs text-violet-700">
+                                <Badge variant="outline" className="text-xs text-violet-400 border-violet-700/50 bg-violet-900/20">
                                   <Sparkles className="h-3 w-3 mr-1" />
                                   AI Custom
                                 </Badge>
                               ) : (
-                                <Badge variant="outline" className={`text-xs ${colors.text}`}>
+                                <Badge variant="outline" className={`text-xs ${colors.text} border-opacity-40`}>
                                   {tpl.name}
                                 </Badge>
                               )}
                             </div>
-                            <p className="text-sm text-muted-foreground">
+
+                            {/* Meta line */}
+                            <p className="text-xs text-[#71717a] font-mono">
                               {isAdmin && jobsTab === "all" && (
-                                <span className="mr-1 font-medium text-violet-600">User #{job.userId} ·</span>
+                                <span className="mr-1 font-medium text-violet-400">user#{job.userId} · </span>
                               )}
-                              {job.firmCount} entries · {new Date(job.createdAt).toLocaleDateString()}
+                              job#{job.id} · {job.firmCount} entries · {new Date(job.createdAt).toLocaleDateString()}
                             </p>
 
-                            {/* Live cost counter (processing) */}
-                            {isProcessing && (job as any).totalCostUSD != null && (
-                              <div className="flex items-center gap-1 text-sm text-muted-foreground mt-1">
-                                <DollarSign className="h-3.5 w-3.5" />
-                                <span className="font-mono font-medium">${Number((job as any).totalCostUSD).toFixed(4)}</span>
+                            {/* Cost line */}
+                            {(isProcessing || job.status === "completed") && (job as any).totalCostUSD != null && (
+                              <div className="flex items-center gap-1 text-xs text-[#71717a] font-mono">
+                                <DollarSign className="h-3 w-3" />
+                                <span className="font-semibold text-[#e4e4e7]">${Number((job as any).totalCostUSD).toFixed(4)}</span>
                                 {(job as any).estimatedCostUSD && (
-                                  <span className="text-xs opacity-70 ml-1">
-                                    / est. ${Number((job as any).estimatedCostUSD).toFixed(2)}
-                                  </span>
-                                )}
-                              </div>
-                            )}
-
-                            {/* Actual vs estimated cost (completed) */}
-                            {job.status === "completed" && (job as any).totalCostUSD && (
-                              <div className="text-sm text-muted-foreground mt-1">
-                                Cost: <span className="font-mono font-medium">${Number((job as any).totalCostUSD).toFixed(4)}</span>
-                                {(job as any).estimatedCostUSD && (
-                                  <span className="text-xs opacity-60 ml-1">
-                                    (est. ${Number((job as any).estimatedCostUSD).toFixed(2)})
-                                  </span>
+                                  <span className="opacity-60 ml-0.5">/ est. ${Number((job as any).estimatedCostUSD).toFixed(2)}</span>
                                 )}
                               </div>
                             )}
                           </div>
 
-                          <div className="flex gap-2">
+                          {/* Action buttons */}
+                          <div className="flex gap-2 flex-shrink-0 ml-4">
                             {job.status === "completed" && (
                               <>
                                 <Button
                                   size="sm"
                                   variant="outline"
+                                  className="border-[#2a2a2e] bg-[#18181b] text-[#e4e4e7] hover:bg-[#27272a] text-xs"
                                   onClick={() => setViewResultsJob({ id: job.id, template: jobTemplate, sectionsJson: (job as any).sectionsJson ?? undefined })}
                                 >
-                                  <Table2 className="h-4 w-4 mr-2" />
-                                  View Results
+                                  <Table2 className="h-3.5 w-3.5 mr-1.5" />
+                                  View
                                 </Button>
                                 <DownloadResultsButton jobId={job.id} outputFileUrl={job.outputFileUrl} />
                               </>
                             )}
                             {job.status === "failed" && (
                               <>
-                                {/* Show partial download if the job wrote results before crashing */}
                                 {(job as any).outputFileKey && (
                                   <DownloadResultsButton
                                     jobId={job.id}
                                     outputFileUrl={job.outputFileUrl}
-                                    label="Download Partial Results"
+                                    label="Partial Results"
                                   />
                                 )}
                                 <Button
                                   size="sm"
                                   variant="outline"
+                                  className="border-[#2a2a2e] bg-[#18181b] text-[#e4e4e7] hover:bg-[#27272a] text-xs"
                                   onClick={() => resumeMutation.mutate({ jobId: job.id })}
                                   disabled={resumeMutation.isPending}
                                 >
                                   {resumeMutation.isPending ? (
-                                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                    <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
                                   ) : (
-                                    <Clock className="h-4 w-4 mr-2" />
+                                    <Clock className="h-3.5 w-3.5 mr-1.5" />
                                   )}
                                   Resume
                                 </Button>
@@ -1284,27 +1292,49 @@ export default function Dashboard() {
                           </div>
                         </div>
 
+                        {/* ── Stats grid (scraper-app style) ── */}
+                        {(isProcessing || job.status === "completed" || job.status === "failed") && (
+                          <div className="grid grid-cols-4 gap-2 mb-4">
+                            {[
+                              { label: "Scanned",    value: job.processedCount ?? 0 },
+                              { label: "Emails",     value: emailsFound },
+                              { label: "People",     value: peopleFound },
+                              { label: "w/ Data",    value: domainsWithData },
+                            ].map(({ label, value }) => (
+                              <div key={label} className="bg-[#18181b] border border-[#2a2a2e] rounded-md px-3 py-2">
+                                <p className="font-mono text-lg font-bold text-[#e4e4e7] leading-none">{value}</p>
+                                <p className="text-[10px] uppercase tracking-wider text-[#71717a] mt-1">{label}</p>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* ── Progress bar (processing only) ── */}
                         {isProcessing && (
                           <div className="space-y-2">
-                            <div className="flex items-center justify-between text-sm">
-                              <span className="text-muted-foreground">
-                                {job.processedCount || 0} / {job.firmCount} processed
-                              </span>
-                              <span className="font-semibold">{progress}%</span>
+                            <div className="flex items-center justify-between text-xs font-mono">
+                              <span className="text-[#71717a]">{job.processedCount || 0} / {job.firmCount}</span>
+                              <span className="text-[#4ade80] font-bold">{progress}%</span>
                             </div>
-                            <Progress value={progress} className="h-2" />
+                            <div className="w-full h-1.5 bg-[#27272a] rounded-full overflow-hidden">
+                              <div
+                                className="h-full bg-[#4ade80] rounded-full transition-all duration-300"
+                                style={{ width: `${progress}%`, boxShadow: "0 0 8px rgba(74,222,128,0.4)" }}
+                              />
+                            </div>
+                            {/* Active firm chips */}
                             {job.activeFirmsJson && (() => {
                               const active: string[] = (() => { try { return JSON.parse(job.activeFirmsJson!); } catch { return []; } })();
                               return active.length > 0 ? (
-                                <div className="flex flex-wrap gap-1 mt-2">
+                                <div className="flex flex-wrap gap-1 mt-1.5">
                                   {active.slice(0, 5).map((name) => (
-                                    <span key={name} className="inline-flex items-center gap-1 text-xs bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded-full">
-                                      <Loader2 className="h-2.5 w-2.5 animate-spin" />
+                                    <span key={name} className="inline-flex items-center gap-1 text-[10px] bg-blue-950/60 text-blue-300 border border-blue-800/50 px-2 py-0.5 rounded-full font-mono">
+                                      <Loader2 className="h-2 w-2 animate-spin" />
                                       {name}
                                     </span>
                                   ))}
                                   {active.length > 5 && (
-                                    <span className="text-xs text-muted-foreground px-2 py-0.5">+{active.length - 5} more</span>
+                                    <span className="text-[10px] text-[#71717a] px-2 py-0.5">+{active.length - 5} more</span>
                                   )}
                                 </div>
                               ) : null;
@@ -1312,12 +1342,14 @@ export default function Dashboard() {
                           </div>
                         )}
 
+                        {/* ── Live log feed (processing agent jobs) ── */}
                         {isProcessing && job.sectionsJson && (
                           <JobLogFeed jobId={job.id} />
                         )}
 
+                        {/* ── Error message ── */}
                         {job.status === "failed" && job.errorMessage && (
-                          <p className="text-sm text-red-600 mt-2">{job.errorMessage}</p>
+                          <p className="text-xs text-red-400 font-mono mt-2 bg-red-950/30 border border-red-900/40 rounded px-3 py-2">{job.errorMessage}</p>
                         )}
                       </CardContent>
                     </Card>
