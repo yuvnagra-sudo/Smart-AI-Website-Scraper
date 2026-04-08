@@ -67,6 +67,8 @@ export type InvokeParams = {
   output_schema?: OutputSchema;
   responseFormat?: ResponseFormat;
   response_format?: ResponseFormat;
+  /** Override the default model for this call (e.g. "gpt-5.4-nano" for cheap calls). */
+  model?: string;
 };
 
 export type ToolCall = {
@@ -278,10 +280,11 @@ export async function invokeLLM(params: InvokeParams, retries = 3): Promise<Invo
     output_schema,
     responseFormat,
     response_format,
+    model: modelOverride,
   } = params;
 
   const payload: Record<string, unknown> = {
-    model: process.env.OPENAI_MODEL ?? "gpt-5.4-mini",
+    model: modelOverride ?? process.env.OPENAI_MODEL ?? "gpt-5.4-mini",
     messages: messages.map(normalizeMessage),
   };
 

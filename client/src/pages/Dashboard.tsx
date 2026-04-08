@@ -16,6 +16,7 @@ import {
   Bot, Download, Upload, Clock, CheckCircle, XCircle, Loader2, LogOut,
   FileSpreadsheet, Table2, DollarSign, TrendingUp, Building2, Users,
   HeartPulse, ShoppingCart, Home, MapPin, Info, Sparkles, X, Plus, List, Search,
+  PauseCircle, PlayCircle,
 } from "lucide-react";
 import { useState, useRef } from "react";
 import { toast } from "sonner";
@@ -294,6 +295,26 @@ export default function Dashboard() {
     },
     onError: (error) => {
       toast.error(`Failed to resume job: ${error.message}`);
+    },
+  });
+
+  const cancelMutation = trpc.enrichment.cancelJob.useMutation({
+    onSuccess: () => {
+      toast.success("Job cancellation requested — will stop within 5 seconds.");
+      refetch();
+    },
+    onError: (error) => {
+      toast.error(`Failed to cancel job: ${error.message}`);
+    },
+  });
+
+  const pauseMutation = trpc.enrichment.pauseJob.useMutation({
+    onSuccess: () => {
+      toast.success("Job paused — partial results will be available for download shortly.");
+      refetch();
+    },
+    onError: (error) => {
+      toast.error(`Failed to pause job: ${error.message}`);
     },
   });
 
@@ -1254,6 +1275,8 @@ export default function Dashboard() {
                   const statusBadgeClass =
                     job.status === "completed"  ? "bg-green-900/30 text-green-400 border border-green-700/50" :
                     job.status === "failed"     ? "bg-red-900/30 text-red-400 border border-red-700/50" :
+                    job.status === "cancelled"  ? "bg-orange-900/30 text-orange-400 border border-orange-700/50" :
+                    (job.status as string) === "paused" ? "bg-amber-900/30 text-amber-400 border border-amber-700/50" :
                     job.status === "processing" ? "bg-blue-900/30 text-blue-400 border border-blue-700/50" :
                                                   "bg-amber-900/30 text-amber-400 border border-amber-700/50";
 
@@ -1277,6 +1300,8 @@ export default function Dashboard() {
                                 {job.status === "pending"    && <Clock className="h-3 w-3" />}
                                 {job.status === "completed"  && <CheckCircle className="h-3 w-3" />}
                                 {job.status === "failed"     && <XCircle className="h-3 w-3" />}
+                                {job.status === "cancelled"  && <XCircle className="h-3 w-3" />}
+                                {(job.status as string) === "paused" && <PauseCircle className="h-3 w-3" />}
                                 {job.status}
                               </span>
                               {isAgentJob ? (
@@ -1327,7 +1352,45 @@ export default function Dashboard() {
                                 <DownloadResultsButton jobId={job.id} outputFileUrl={job.outputFileUrl} />
                               </>
                             )}
-                            {job.status === "failed" && (
+                            {/* Cancel/Pause buttons for processing/pending jobs */}
+                            {(isProcessing || job.status === "pending") && (
+                              <>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="text-amber-400 border-amber-700/50 bg-amber-900/10 hover:bg-amber-900/30 text-xs"
+                                  onClick={() => pauseMutation.mutate({ jobId: job.id })}
+                                  disabled={pauseMutation.isPending}
+                                >
+                                  {pauseMutation.isPending ? (
+                                    <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                                  ) : (
+                                    <PauseCircle className="h-3.5 w-3.5 mr-1.5" />
+                                  )}
+                                  Pause
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="text-red-400 border-red-700/50 bg-red-900/10 hover:bg-red-900/30 text-xs"
+                                  onClick={() => {
+                                    if (confirm("Cancel this job? Processing will stop within a few seconds. URLs already processed remain downloadable.")) {
+                                      cancelMutation.mutate({ jobId: job.id });
+                                    }
+                                  }}
+                                  disabled={cancelMutation.isPending}
+                                >
+                                  {cancelMutation.isPending ? (
+                                    <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                                  ) : (
+                                    <XCircle className="h-3.5 w-3.5 mr-1.5" />
+                                  )}
+                                  Cancel
+                                </Button>
+                              </>
+                            )}
+                            {/* Resume button for failed/paused/cancelled jobs */}
+                            {(job.status === "failed" || (job.status as string) === "paused" || job.status === "cancelled") && (
                               <>
                                 {(job as any).outputFileKey && (
                                   <DownloadResultsButton
@@ -1346,7 +1409,7 @@ export default function Dashboard() {
                                   {resumeMutation.isPending ? (
                                     <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
                                   ) : (
-                                    <Clock className="h-3.5 w-3.5 mr-1.5" />
+                                    <PlayCircle className="h-3.5 w-3.5 mr-1.5" />
                                   )}
                                   Resume
                                 </Button>
@@ -1356,7 +1419,7 @@ export default function Dashboard() {
                         </div>
 
                         {/* ── Stats grid (scraper-app style) ── */}
-                        {(isProcessing || job.status === "completed" || job.status === "failed") && (
+                        {(isProcessing || job.status === "completed" || job.status === "failed" || job.status === "cancelled" || (job.status as string) === "paused") && (
                           <div className="grid grid-cols-4 gap-2 mb-4">
                             {[
                               { label: "Scanned",    value: job.processedCount ?? 0 },

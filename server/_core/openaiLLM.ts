@@ -11,14 +11,15 @@
 import { type InvokeParams, type InvokeResult } from "./llm";
 import { ENV } from "./env";
 
-// Active model — default gpt-5.4-mini, override via OPENAI_MODEL env var
-const LLM_MODEL = process.env.OPENAI_MODEL ?? "gpt-5.4-mini";
+// Default model — override globally via OPENAI_MODEL env var, or per-call via params.model
+const LLM_MODEL_DEFAULT = process.env.OPENAI_MODEL ?? "gpt-5.4-mini";
 const LLM_BASE_URL = "https://api.openai.com/v1/chat/completions";
 
-// gpt-5.4-mini: $0.75 input / $3.00 output per 1M tokens
-// gpt-5.4-nano: $0.20 input / $0.80 output per 1M tokens
-const INPUT_COST_PER_1M  = LLM_MODEL.includes("nano") ? 0.20 : 0.75;
-const OUTPUT_COST_PER_1M = LLM_MODEL.includes("nano") ? 0.80 : 3.00;
+// Pricing per 1M tokens by model family
+function costFor(model: string): { input: number; output: number } {
+  if (model.includes("nano")) return { input: 0.20, output: 0.80 };
+  return { input: 0.75, output: 3.00 }; // mini (default)
+}
 
 // Statistics
 let totalCalls = 0;
@@ -35,11 +36,12 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
     throw new Error("OpenAI API key not configured");
   }
 
-  const { messages, tools, response_format, temperature } = params;
+  const { messages, tools, response_format, temperature, model: modelOverride } = params;
+  const activeModel = modelOverride ?? LLM_MODEL_DEFAULT;
 
   // Build request payload
   const payload: Record<string, unknown> = {
-    model: LLM_MODEL,
+    model: activeModel,
     messages: messages.map(msg => ({
       role: msg.role,
       content: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content),
@@ -75,10 +77,11 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
 
     const data = await response.json();
 
-    // Track cost
+    // Track cost using per-call model pricing
     const inputTokens = data.usage?.prompt_tokens || 0;
     const outputTokens = data.usage?.completion_tokens || 0;
-    const cost = (inputTokens * INPUT_COST_PER_1M + outputTokens * OUTPUT_COST_PER_1M) / 1_000_000;
+    const pricing = costFor(activeModel);
+    const cost = (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000;
 
     totalCalls++;
     totalCost += cost;
@@ -118,7 +121,7 @@ export function getOpenAIStats() {
     errorRate: totalCalls > 0 ? (totalErrors / totalCalls * 100).toFixed(2) + "%" : "0%",
     totalInputTokens,
     totalOutputTokens,
-    activeModel: LLM_MODEL,
+    activeModel: LLM_MODEL_DEFAULT,
   };
 }
 

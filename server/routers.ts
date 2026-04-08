@@ -26,6 +26,7 @@ import { canResumeJob, prepareJobForResume, getResumeProgress } from "./resumeJo
 import { extractDirectory } from "./directoryExtractor";
 import { nanoid } from "nanoid";
 import { saveFirmImmediately, getProcessedFirms } from "./incrementalSave";
+import { isJobCancelled, isJobPaused } from "./_core/jobCancellation";
 
 // Feature flag: set USE_SUPER_SCRAPER=true in Railway env to activate the 5-phase super scraper.
 // Falls back to the original agent loop when unset or false.
@@ -441,6 +442,49 @@ Return ONLY valid JSON (no markdown, no code fences):
       }),
 
     // Resume a failed job
+    cancelJob: protectedProcedure
+      .input(z.object({ jobId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        const job = await getEnrichmentJob(input.jobId);
+        if (!job || job.userId !== ctx.user.id) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
+        }
+        if (job.status === "completed" || job.status === "cancelled") {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: `Job is already ${job.status}`,
+          });
+        }
+        // Write cancelled status to DB. The worker's cancellation poller (every 5s)
+        // will detect this and call markJobCancelled(jobId), which causes
+        // processAgentJob / scrapeUrl to throw JOB_CANCELLED and stop cleanly.
+        await updateEnrichmentJob(input.jobId, {
+          status: "cancelled",
+          completedAt: new Date(),
+          errorMessage: "Cancelled by user",
+        });
+        console.log(`[cancelJob] Job ${input.jobId} marked as cancelled in DB`);
+        return { message: "Job cancellation requested — worker will stop within 5 seconds" };
+      }),
+
+    pauseJob: protectedProcedure
+      .input(z.object({ jobId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        const job = await getEnrichmentJob(input.jobId);
+        if (!job || job.userId !== ctx.user.id) {
+          throw new TRPCError({ code: "NOT_FOUND", message: "Job not found" });
+        }
+        if (job.status !== "processing" && job.status !== "pending") {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: `Cannot pause a job with status "${job.status}"`,
+          });
+        }
+        await updateEnrichmentJob(input.jobId, { status: "paused" });
+        console.log(`[pauseJob] Job ${input.jobId} marked as paused in DB`);
+        return { message: "Job pause requested — worker will stop within 5 seconds" };
+      }),
+
     resumeJob: protectedProcedure
       .input(z.object({ jobId: z.number() }))
       .mutation(async ({ ctx, input }) => {
@@ -989,6 +1033,9 @@ export async function processAgentJob(jobId: number) {
 
     const runWorker = async () => {
       while (firmQueue.length > 0) {
+        // Check pause/cancel at the top of every iteration
+        if (isJobPaused(jobId) || isJobCancelled(jobId)) break;
+
         const firm = firmQueue.shift();
         if (!firm) break;
 
@@ -1008,6 +1055,7 @@ export async function processAgentJob(jobId: number) {
             sections,
             resolvedPrompt,
             5,
+            () => isJobCancelled(jobId),
           );
 
           if (result.type === "directory") {
@@ -1085,6 +1133,36 @@ export async function processAgentJob(jobId: number) {
     await Promise.allSettled(
       Array.from({ length: Math.min(CONCURRENCY, firms.length) }, runWorker),
     );
+
+    // Save partial results helper (used by both cancel and pause paths)
+    const savePartialResults = async () => {
+      const excelBuffer = createAgentOutputExcel(sections, profileResults, collectedUrls);
+      const outputKey = `enrichment/${job.userId}/${jobId}-partial-results.xlsx`;
+      const { url: outputUrl } = await storagePut(
+        outputKey,
+        excelBuffer,
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      );
+      await updateEnrichmentJob(jobId, {
+        outputFileUrl: outputUrl,
+        outputFileKey: outputKey,
+        processedCount: processed,
+      });
+      console.log(`[processAgentJob] Saved partial results: ${profileResults.length} profiles`);
+    };
+
+    // If paused or cancelled, save partial results and exit without marking completed
+    if (isJobPaused(jobId)) {
+      console.log(`[processAgentJob] ⏸️ Job ${jobId} paused after ${profileResults.length} profiles. Saving partial results...`);
+      await savePartialResults();
+      return;
+    }
+
+    if (isJobCancelled(jobId)) {
+      console.log(`[processAgentJob] 🛑 Job ${jobId} cancelled after ${profileResults.length} profiles. Saving partial results...`);
+      await savePartialResults();
+      return;
+    }
 
     // Generate output Excel and upload to S3
     const excelBuffer = createAgentOutputExcel(sections, profileResults, collectedUrls);
