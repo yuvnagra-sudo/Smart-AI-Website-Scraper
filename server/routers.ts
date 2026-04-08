@@ -12,6 +12,7 @@ import { enrichedFirms, teamMembers, portfolioCompanies, investmentThesis } from
 import { eq, and, like, count } from "drizzle-orm";
 import { parseInputExcel, parseInputHeaders, createOutputExcel, createAgentOutputExcel, type EnrichedVCData, type TeamMemberData, type PortfolioCompanyData, type ProcessingSummaryData, type FileHeaders } from "./excelProcessor";
 import { scrapeUrl, type AgentSection, type DirectoryEntry as AgentDirectoryEntry, type ScrapeStats } from "./agentScraper";
+import { scrapeUrlSuper } from "./superScraper";
 import { generateInvestmentThesisSummaries } from "./investmentThesisAnalyzer";
 import { generateResultsFile } from "./generateResultsService";
 import { createCSVExport } from "./csvExporter";
@@ -25,6 +26,11 @@ import { canResumeJob, prepareJobForResume, getResumeProgress } from "./resumeJo
 import { extractDirectory } from "./directoryExtractor";
 import { nanoid } from "nanoid";
 import { saveFirmImmediately, getProcessedFirms } from "./incrementalSave";
+
+// Feature flag: set USE_SUPER_SCRAPER=true in Railway env to activate the 5-phase super scraper.
+// Falls back to the original agent loop when unset or false.
+const USE_SUPER_SCRAPER = process.env.USE_SUPER_SCRAPER === "true";
+const activeScraper = USE_SUPER_SCRAPER ? scrapeUrlSuper : scrapeUrl;
 
 export const appRouter = router({
     // if you need to use socket.io, read and register route in server/_core/index.ts, all api should start with '/api/' so that the gateway can route correctly
@@ -925,7 +931,7 @@ export async function processAgentJob(jobId: number) {
           .replace(/\{websiteUrl\}/g, firm.websiteUrl);
 
         try {
-          const result = await scrapeUrl(
+          const result = await activeScraper(
             firm.websiteUrl,
             rowObjective,
             sections,
