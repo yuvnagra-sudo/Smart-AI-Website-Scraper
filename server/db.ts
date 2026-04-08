@@ -107,6 +107,10 @@ export async function runMigrations(): Promise<void> {
     { name: "systemPrompt",       sql: "ALTER TABLE enrichmentJobs ADD COLUMN systemPrompt TEXT" },
     { name: "objective",          sql: "ALTER TABLE enrichmentJobs ADD COLUMN objective TEXT" },
     { name: "columnMappingJson", sql: "ALTER TABLE enrichmentJobs ADD COLUMN columnMappingJson TEXT" },
+    // Scraper stats counters for the Dashboard stats grid
+    { name: "emailsFound",     sql: "ALTER TABLE enrichmentJobs ADD COLUMN emailsFound INT DEFAULT 0" },
+    { name: "peopleFound",     sql: "ALTER TABLE enrichmentJobs ADD COLUMN peopleFound INT DEFAULT 0" },
+    { name: "domainsWithData", sql: "ALTER TABLE enrichmentJobs ADD COLUMN domainsWithData INT DEFAULT 0" },
     // Per-URL workflow tracking table
     { name: "jobLogs_table", sql: `CREATE TABLE IF NOT EXISTS jobLogs (
       id INT AUTO_INCREMENT PRIMARY KEY,
