@@ -1,21 +1,30 @@
 /**
- * Cost Estimation for VC Enrichment
- * Calculates estimated API costs based on firm count and enrichment depth
+ * Cost Estimation for Super Scraper v2
+ *
+ * The super scraper uses a 6-phase escalation model with model tiering:
+ *   - Phase 1: LLM URL picker (nano)              ~$0.0003/firm
+ *   - Phase 2: Deterministic extraction            $0.00
+ *   - Phase 3: Targeted LLM extraction (nano)      ~$0.0015/firm (80% of firms)
+ *   - Phase 4: Agentic escalation (mini+nano)      ~$0.01/firm (20% of firms)
+ *   - Phase 5: Validation + consolidation (nano)   ~$0.0005/firm
+ *   - Phase 6: Hunter.io + SMTP                    ~$0.01/firm (if HUNTER_API_KEY set)
+ *
+ * All estimates are inflated 2.5x to account for real-world variance
+ * (retries, large pages, complex sites, multiple search queries).
  */
 
 export interface CostEstimate {
   totalCost: number;
-  totalCostLow: number;   // low end of range (lean sites)
-  totalCostHigh: number;  // high end of range (data-rich sites)
+  totalCostLow: number;
+  totalCostHigh: number;
   perFirmCost: number;
   breakdown: {
-    websiteVerification: number;
-    investorTypeExtraction: number;
-    investmentStagesExtraction: number;
-    nichesExtraction: number;
-    teamMemberExtraction: number;
-    portfolioExtraction: number;
-    waterfallEnrichment: number;
+    urlDiscovery: number;         // Phase 1 LLM URL picker
+    llmExtraction: number;        // Phase 3 targeted extraction
+    agenticEscalation: number;    // Phase 4 (20% of firms)
+    validationConsolidation: number; // Phase 5a+5b
+    hunterEnrichment: number;     // Phase 6 Hunter.io
+    smtpVerification: number;     // Phase 6 SMTP (free)
   };
   estimatedTokens: {
     input: number;
@@ -25,134 +34,123 @@ export interface CostEstimate {
 }
 
 /**
- * Token estimates per operation (based on observed averages)
- * Updated to reflect new portfolio extraction with HTML parsing + LLM enrichment
+ * Per-firm cost components for Super Scraper v2.
+ *
+ * Model pricing:
+ *   gpt-5.4-nano: $0.20 input / $0.80 output per 1M tokens
+ *   gpt-5.4-mini: $0.75 input / $3.00 output per 1M tokens
+ *
+ * All token estimates are averages from observed runs, then multiplied
+ * by a 2.5x safety factor so the user is never surprised by the bill.
  */
-const TOKEN_ESTIMATES = {
-  websiteVerification: { input: 500, output: 50 },
-  investorType: { input: 1500, output: 100 },
-  investmentStages: { input: 1500, output: 100 },
-  niches: { input: 2000, output: 100 },
-  teamMembers: { input: 3000, output: 800 }, // Increased: now scans entire page + footer
-  portfolioCompanies: { input: 8000, output: 1500 }, // Significantly increased: HTML parsing + enrichment of ALL companies
-  waterfallRetry: { input: 3000, output: 150 }, // Per retry attempt
-};
+const SAFETY_MULTIPLIER = 2.5;
 
-/**
- * Pricing — based on active OpenAI model.
- * gpt-5.4-mini (default): $0.75 input / $3.00 output per 1M tokens
- * gpt-5.4-nano:           $0.20 input / $0.80 output per 1M tokens
- */
-const ACTIVE_MODEL = process.env.OPENAI_MODEL ?? "gpt-5.4-mini";
-const PRICING = {
-  inputPer1M:  ACTIVE_MODEL.includes("nano") ? 0.20 : 0.75,
-  outputPer1M: ACTIVE_MODEL.includes("nano") ? 0.80 : 3.00,
-};
+const NANO_PRICING  = { inputPer1M: 0.20, outputPer1M: 0.80 };
+const MINI_PRICING  = { inputPer1M: 0.75, outputPer1M: 3.00 };
 
-/**
- * Calculate cost for a single operation
- */
-function calculateOperationCost(inputTokens: number, outputTokens: number): number {
-  const inputCost = (inputTokens / 1_000_000) * PRICING.inputPer1M;
-  const outputCost = (outputTokens / 1_000_000) * PRICING.outputPer1M;
-  return inputCost + outputCost;
+function llmCost(
+  inputTokens: number,
+  outputTokens: number,
+  pricing: { inputPer1M: number; outputPer1M: number },
+): number {
+  return (inputTokens / 1_000_000) * pricing.inputPer1M
+       + (outputTokens / 1_000_000) * pricing.outputPer1M;
 }
+
+// Hunter.io costs $0.01 per domain search (1 credit on Growth plan)
+const HUNTER_COST_PER_CALL = 0.01;
+const HUNTER_ENABLED = !!process.env.HUNTER_API_KEY;
 
 /**
  * Estimate enrichment cost for a given number of firms.
  *
  * @param firmCount - Number of firms to process
- * @param avgDescriptionLength - Average character length of descriptions in the uploaded file.
- *   Longer descriptions signal content-rich sites (more pages, more team members, more portfolio data)
- *   and so predict higher actual token usage. Defaults to 200 chars (neutral baseline).
+ * @param avgDescriptionLength - Average description length (unused in super scraper but kept for API compat)
  */
 export function estimateEnrichmentCost(
   firmCount: number,
   avgDescriptionLength = 200,
 ): CostEstimate {
-  // Content scale: richer descriptions → more scraped content → more tokens.
-  // Clamped to [0.7, 2.5] so we don't over-penalise bare-bones or extremely long descriptions.
-  const contentScale = Math.min(2.5, Math.max(0.7, avgDescriptionLength / 200));
+  // ── Phase 1: LLM URL picker (nano, 1 call per firm) ──
+  // ~1000 input tokens (URL list), ~100 output tokens (picks)
+  const phase1CostPerFirm = llmCost(1000, 100, NANO_PRICING);
 
-  // Scale the most variable operations (team + portfolio vary most with content depth)
-  const scaledTeamInput      = TOKEN_ESTIMATES.teamMembers.input      * contentScale;
-  const scaledTeamOutput     = TOKEN_ESTIMATES.teamMembers.output     * contentScale;
-  const scaledPortfolioInput = TOKEN_ESTIMATES.portfolioCompanies.input  * contentScale;
-  const scaledPortfolioOutput= TOKEN_ESTIMATES.portfolioCompanies.output * contentScale;
+  // ── Phase 3: Targeted extraction (nano, 80% of firms need this) ──
+  // ~5000 input tokens (5 preprocessed pages), ~500 output tokens (structured JSON)
+  const phase3CostPerFirm = llmCost(5000, 500, NANO_PRICING) * 0.8;
 
-  // Base operations (always performed, not content-scaled)
-  const verificationCost = calculateOperationCost(
-    TOKEN_ESTIMATES.websiteVerification.input,
-    TOKEN_ESTIMATES.websiteVerification.output,
-  );
+  // ── Phase 4: Agentic escalation (50% of firms, avg 4 LLM calls per hop, 3 hops avg) ──
+  // Many real-world sites are sparse — assume half escalate to the agent loop.
+  // Per hop: 1 planning call (mini) + 1 extraction call (nano)
+  // Average 3 hops × (planning + extraction) = 6 LLM calls
+  const phase4PlanningCost = llmCost(800, 200, MINI_PRICING) * 3;   // 3 planning calls
+  const phase4ExtractionCost = llmCost(3000, 400, NANO_PRICING) * 3; // 3 extraction calls
+  const phase4CostPerFirm = (phase4PlanningCost + phase4ExtractionCost) * 0.5;
 
-  const investorTypeCost = calculateOperationCost(
-    TOKEN_ESTIMATES.investorType.input,
-    TOKEN_ESTIMATES.investorType.output,
-  );
+  // ── Phase 5a: Validation (nano, 1 call per firm) ──
+  // ~300 input tokens (just extracted fields), ~100 output tokens
+  const phase5aCostPerFirm = llmCost(300, 100, NANO_PRICING);
 
-  const investmentStagesCost = calculateOperationCost(
-    TOKEN_ESTIMATES.investmentStages.input,
-    TOKEN_ESTIMATES.investmentStages.output,
-  );
+  // ── Phase 5b: Final consolidation (nano, ~50% of firms still have gaps) ──
+  // ~5000 input tokens, ~500 output tokens
+  const phase5bCostPerFirm = llmCost(5000, 500, NANO_PRICING) * 0.5;
 
-  const nichesCost = calculateOperationCost(
-    TOKEN_ESTIMATES.niches.input,
-    TOKEN_ESTIMATES.niches.output,
-  );
+  // ── Phase 6: Hunter.io (if enabled, ~60% of firms need email lookup) ──
+  const hunterCostPerFirm = HUNTER_ENABLED ? HUNTER_COST_PER_CALL * 0.6 : 0;
 
-  const teamMembersCost  = calculateOperationCost(scaledTeamInput, scaledTeamOutput);
-  const portfolioCost    = calculateOperationCost(scaledPortfolioInput, scaledPortfolioOutput);
+  // ── Phase 6: SMTP (free) ──
+  const smtpCostPerFirm = 0;
 
-  // Waterfall enrichment (assume 30% of firms need it, with 2 retries average)
-  const waterfallCost = calculateOperationCost(
-    TOKEN_ESTIMATES.waterfallRetry.input,
-    TOKEN_ESTIMATES.waterfallRetry.output,
-  ) * 2 * 0.3; // 2 retries * 30% of firms
+  // ── Raw per-firm cost ──
+  const rawPerFirmCost =
+    phase1CostPerFirm +
+    phase3CostPerFirm +
+    phase4CostPerFirm +
+    phase5aCostPerFirm +
+    phase5bCostPerFirm +
+    hunterCostPerFirm +
+    smtpCostPerFirm;
 
-  // Per-firm cost (midpoint)
-  const perFirmCost =
-    verificationCost +
-    investorTypeCost +
-    investmentStagesCost +
-    nichesCost +
-    teamMembersCost +
-    portfolioCost +
-    waterfallCost;
+  // Apply 2.5x safety multiplier to LLM costs (not Hunter — that's a fixed API price)
+  const llmPerFirmCost = (
+    phase1CostPerFirm +
+    phase3CostPerFirm +
+    phase4CostPerFirm +
+    phase5aCostPerFirm +
+    phase5bCostPerFirm
+  ) * SAFETY_MULTIPLIER;
 
-  // Total cost (midpoint)
+  const perFirmCost = llmPerFirmCost + hunterCostPerFirm + smtpCostPerFirm;
   const totalCost = perFirmCost * firmCount;
 
-  // Cost range — team + portfolio are the most variable operations (±45%)
-  const varianceMultiplier = 0.45;
-  const totalCostLow  = Math.round(totalCost * (1 - varianceMultiplier) * 100) / 100;
-  const totalCostHigh = Math.round(totalCost * (1 + varianceMultiplier) * 100) / 100;
+  // Cost range — ±40% (easy sites are much cheaper, hard sites hit Phase 4 heavily)
+  const totalCostLow  = Math.round(totalCost * 0.6 * 100) / 100;
+  const totalCostHigh = Math.round(totalCost * 1.4 * 100) / 100;
 
-  // Token estimates
-  const inputTokensPerFirm =
-    TOKEN_ESTIMATES.websiteVerification.input +
-    TOKEN_ESTIMATES.investorType.input +
-    TOKEN_ESTIMATES.investmentStages.input +
-    TOKEN_ESTIMATES.niches.input +
-    scaledTeamInput +
-    scaledPortfolioInput +
-    TOKEN_ESTIMATES.waterfallRetry.input * 2 * 0.3;
+  // ── Token estimates (with safety multiplier) ──
+  const inputTokensPerFirm = (
+    1000 +           // Phase 1
+    5000 * 0.8 +     // Phase 3
+    (800 * 3 + 3000 * 3) * 0.5 + // Phase 4 (3 hops × planning + extraction, 50% of firms)
+    300 +            // Phase 5a
+    5000 * 0.5       // Phase 5b
+  ) * SAFETY_MULTIPLIER;
 
-  const outputTokensPerFirm =
-    TOKEN_ESTIMATES.websiteVerification.output +
-    TOKEN_ESTIMATES.investorType.output +
-    TOKEN_ESTIMATES.investmentStages.output +
-    TOKEN_ESTIMATES.niches.output +
-    scaledTeamOutput +
-    scaledPortfolioOutput +
-    TOKEN_ESTIMATES.waterfallRetry.output * 2 * 0.3;
+  const outputTokensPerFirm = (
+    100 +            // Phase 1
+    500 * 0.8 +      // Phase 3
+    (200 * 3 + 400 * 3) * 0.5 + // Phase 4
+    100 +            // Phase 5a
+    500 * 0.5        // Phase 5b
+  ) * SAFETY_MULTIPLIER;
 
-  // Duration estimate — 50 concurrent workers at 10,000 RPM (OpenAI gpt-5.4-mini/nano)
-  // LLM bottleneck: (firmCount × 6 calls) / (10000 RPM / 60) seconds
-  // Scraping bottleneck: ceil(firmCount / 50) × 25s per batch
-  // Wall-clock = max of the two (they run in parallel)
-  const llmSeconds      = (firmCount * 6) / (10000 / 60);
-  const scrapingSeconds = Math.ceil(firmCount / 50) * 25;
+  // ── Duration estimate ──
+  // Super scraper: ~15-45s per firm (parallel fetch + LLM calls)
+  // 50 concurrent workers, but LLM queue is shared
+  // LLM bottleneck: (firmCount × 6 avg calls) / (1000 RPM / 60) seconds
+  // Scraping bottleneck: ceil(firmCount / 50) × 30s per batch
+  const llmSeconds      = (firmCount * 6) / (1000 / 60);
+  const scrapingSeconds = Math.ceil(firmCount / 50) * 30;
   const totalSeconds    = Math.max(llmSeconds, scrapingSeconds);
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
@@ -168,13 +166,12 @@ export function estimateEnrichmentCost(
     totalCostHigh,
     perFirmCost:   Math.round(perFirmCost * 10000) / 10000,
     breakdown: {
-      websiteVerification:         Math.round(verificationCost    * firmCount * 100) / 100,
-      investorTypeExtraction:      Math.round(investorTypeCost    * firmCount * 100) / 100,
-      investmentStagesExtraction:  Math.round(investmentStagesCost* firmCount * 100) / 100,
-      nichesExtraction:            Math.round(nichesCost          * firmCount * 100) / 100,
-      teamMemberExtraction:        Math.round(teamMembersCost     * firmCount * 100) / 100,
-      portfolioExtraction:         Math.round(portfolioCost       * firmCount * 100) / 100,
-      waterfallEnrichment:         Math.round(waterfallCost       * firmCount * 100) / 100,
+      urlDiscovery:             Math.round(phase1CostPerFirm  * SAFETY_MULTIPLIER * firmCount * 100) / 100,
+      llmExtraction:            Math.round(phase3CostPerFirm  * SAFETY_MULTIPLIER * firmCount * 100) / 100,
+      agenticEscalation:        Math.round(phase4CostPerFirm  * SAFETY_MULTIPLIER * firmCount * 100) / 100,
+      validationConsolidation:  Math.round((phase5aCostPerFirm + phase5bCostPerFirm) * SAFETY_MULTIPLIER * firmCount * 100) / 100,
+      hunterEnrichment:         Math.round(hunterCostPerFirm  * firmCount * 100) / 100,
+      smtpVerification:         0,
     },
     estimatedTokens: {
       input:  Math.round(inputTokensPerFirm  * firmCount),
