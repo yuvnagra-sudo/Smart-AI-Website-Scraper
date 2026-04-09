@@ -6,6 +6,9 @@
 
 export NODE_ENV=production
 
+echo "[start.sh] Running database migrations..."
+npx drizzle-kit push --force
+
 echo "[start.sh] Starting background worker..."
 node --max-old-space-size=4096 dist/worker.js &
 
