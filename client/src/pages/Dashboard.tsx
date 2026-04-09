@@ -1355,6 +1355,13 @@ export default function Dashboard() {
                             {/* Cancel/Pause buttons for processing/pending jobs */}
                             {(isProcessing || job.status === "pending") && (
                               <>
+                                {(job as any).outputFileKey && (
+                                  <DownloadResultsButton
+                                    jobId={job.id}
+                                    outputFileUrl={job.outputFileUrl}
+                                    label="Partial Results"
+                                  />
+                                )}
                                 <Button
                                   size="sm"
                                   variant="outline"
