@@ -7,7 +7,7 @@
 export NODE_ENV=production
 
 echo "[start.sh] Starting background worker..."
-node dist/worker.js &
+node --max-old-space-size=4096 dist/worker.js &
 
 echo "[start.sh] Starting web server (foreground)..."
-exec node dist/index.js
+exec node --max-old-space-size=4096 dist/index.js

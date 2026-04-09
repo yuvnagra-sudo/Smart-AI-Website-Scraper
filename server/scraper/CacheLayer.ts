@@ -7,6 +7,7 @@ import { CacheEntry } from "./types";
 export class CacheLayer {
   private cache: Map<string, CacheEntry<any>> = new Map();
   private cleanupInterval: NodeJS.Timeout | null = null;
+  private readonly maxEntries = 500; // Cap at ~150MB to prevent unbounded growth
 
   constructor() {
     this.startCleanupTask();
@@ -35,6 +36,15 @@ export class CacheLayer {
    * Set cached value
    */
   set<T>(key: string, data: T, ttl: number): void {
+    // Evict oldest 20% if at capacity to prevent unbounded memory growth
+    if (this.cache.size >= this.maxEntries && !this.cache.has(key)) {
+      const toEvict = Math.floor(this.maxEntries * 0.2);
+      const sorted = [...this.cache.entries()].sort((a, b) => a[1].timestamp - b[1].timestamp);
+      for (let i = 0; i < toEvict && i < sorted.length; i++) {
+        this.cache.delete(sorted[i][0]);
+      }
+    }
+
     const entry: CacheEntry<T> = {
       key,
       data,

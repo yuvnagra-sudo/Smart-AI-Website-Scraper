@@ -1242,6 +1242,12 @@ export async function scrapeUrlSuper(
     diag.phase3FieldsFilled = phase3Filled;
     console.log(`[superScraper] Phase 3 complete: ${phase3Filled}/${sections.length} fields confident`);
 
+    // Release page content to free memory — Phase 4 fetches fresh pages via fetchPage()
+    for (const page of allPages) {
+      page.content = "";
+      page.rawHtml = undefined;
+    }
+
     // ── ASSESSMENT GATE 2 ───────────────────────────────────────────────────
     if (!criticalFieldsFilled(sections, fieldResults)) {
 

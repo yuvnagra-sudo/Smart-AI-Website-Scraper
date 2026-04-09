@@ -32,7 +32,7 @@ export class BrowserPool {
   private maxIdleTime: number; // milliseconds
   private cleanupInterval: NodeJS.Timeout | null = null;
 
-  constructor(maxBrowsers = 15, maxIdleTime = 5 * 60 * 1000) {
+  constructor(maxBrowsers = 6, maxIdleTime = 30 * 1000) {
     this.maxBrowsers = maxBrowsers;
     this.maxIdleTime = maxIdleTime;
     this.startCleanupTask();

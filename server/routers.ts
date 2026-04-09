@@ -712,7 +712,7 @@ export async function processEnrichmentJob(jobId: number) {
 
     // Concurrent worker queue — processes up to CONCURRENCY firms simultaneously.
     // Node.js is single-threaded so queue.shift() and Set mutations are race-free.
-    const CONCURRENCY = 50;
+    const CONCURRENCY = 20;
     const firmQueue = [...firms];
     const activeFirms = new Set<string>();
     let parallelProcessedCount = 0;
@@ -1053,7 +1053,7 @@ export async function processAgentJob(jobId: number) {
     inputBaseline = statsNow.totalInputTokens;
     outputBaseline = statsNow.totalOutputTokens;
 
-    const CONCURRENCY = 50;
+    const CONCURRENCY = 20;
     const firmQueue = [...firms];
     // Track queued URLs to prevent directory expansion from creating duplicates
     const queuedUrls = new Set(firms.map(f => f.websiteUrl));
@@ -1166,6 +1166,22 @@ export async function processAgentJob(jobId: number) {
           totalInputTokens: currentStats.totalInputTokens - inputBaseline,
           totalOutputTokens: currentStats.totalOutputTokens - outputBaseline,
         });
+
+        // Incremental save every 50 firms — crash recovery + downloadable mid-job
+        if (processed % 50 === 0) {
+          try {
+            const partialBuffer = createAgentOutputExcel(sections, profileResults, collectedUrls, diagnosticResults);
+            const partialKey = `enrichment/${job.userId}/${jobId}-results.xlsx`;
+            const { url: partialUrl } = await storagePut(
+              partialKey, partialBuffer,
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            );
+            await updateEnrichmentJob(jobId, { outputFileUrl: partialUrl, outputFileKey: partialKey });
+            console.log(`[processAgentJob] Incremental save: ${profileResults.length} profiles (${processed} processed)`);
+          } catch (err) {
+            console.warn(`[processAgentJob] Incremental save failed (non-fatal):`, err);
+          }
+        }
       }
     };
 
