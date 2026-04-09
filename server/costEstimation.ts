@@ -75,9 +75,13 @@ export function estimateEnrichmentCost(
   // ~1000 input tokens (URL list), ~100 output tokens (picks)
   const phase1CostPerFirm = llmCost(1000, 100, NANO_PRICING);
 
-  // ── Phase 3: Targeted extraction (nano, 80% of firms need this) ──
+  // ── Phase 3: Targeted extraction (80% of firms need this) ──
+  // Uses mini for analytical/judgment fields, nano for data-only fields.
   // ~5000 input tokens (5 preprocessed pages), ~500 output tokens (structured JSON)
-  const phase3CostPerFirm = llmCost(5000, 500, NANO_PRICING) * 0.8;
+  // Assume ~60% of sections are analytical → 60% mini, 40% nano pricing
+  const phase3NanoCost = llmCost(5000, 500, NANO_PRICING) * 0.4;
+  const phase3MiniCost = llmCost(5000, 500, MINI_PRICING) * 0.6;
+  const phase3CostPerFirm = (phase3NanoCost + phase3MiniCost) * 0.8;
 
   // ── Phase 4: Agentic escalation (50% of firms, avg 4 LLM calls per hop, 3 hops avg) ──
   // Many real-world sites are sparse — assume half escalate to the agent loop.

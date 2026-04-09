@@ -58,7 +58,7 @@ import { fetchViaJina, fetchWebsiteContentHybrid } from "./jinaFetcher";
 import { queuedLLMCall } from "./_core/llmQueue";
 import { detectTeamMemberProfileLinks } from "./deepTeamProfileScraper";
 import { generateStandardURLs, discoverRelevantURLs } from "./multiUrlDiscovery";
-import type { AgentSection, AgentScrapeResult, ScrapeStats } from "./agentScraper";
+import type { AgentSection, AgentScrapeResult, ScrapeStats, ScrapeDiagnostics } from "./agentScraper";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -329,7 +329,17 @@ function extractJsonLd(rawHtml: string): { name?: string; email?: string; teleph
 /** Extract phone numbers from content. */
 function extractPhones(content: string): string[] {
   const phonePattern = /(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/g;
-  return [...new Set(content.match(phonePattern) ?? [])].slice(0, 5);
+  const matches = content.match(phonePattern) ?? [];
+  // Filter out false positives: pure digit strings that could be timestamps, IDs, or CSS values
+  const filtered = matches.filter(m => {
+    const digitsOnly = m.replace(/\D/g, "");
+    // Must be 7-15 digits (valid phone range)
+    if (digitsOnly.length < 7 || digitsOnly.length > 15) return false;
+    // Raw 10+ digit strings without separators (e.g. "1627624836") are likely timestamps/IDs
+    if (/^\d{10,}$/.test(m.trim())) return false;
+    return true;
+  });
+  return [...new Set(filtered)].slice(0, 5);
 }
 
 /** Run all deterministic extractors and return a partial FieldResultMap. */
@@ -527,13 +537,17 @@ async function llmExtractFields(
 FIELDS TO EXTRACT (read each description carefully):
 ${fieldGuide}
 
+FIELD TYPES:
+- Data fields (names, emails, phones, LinkedIn): Extract directly from page content. Return "" if not visible on the page.
+- Analysis/judgment fields (fit, need, signal, competitor, qualification): Reason about what the page content IMPLIES about this company. Use evidence from the page to make a judgment call. It is OK to infer — just cite what you observed (e.g. "Uses Odoo eCommerce based on footer tag" or "No IT services mentioned; appears to be a retail florist"). For these fields, a well-reasoned assessment is better than an empty string. Only return "" if the page content is truly too thin to form any judgment.
+
 FORMATTING RULES:
 - Return plain text values only. Do NOT use markdown links like [text](url).
 - Do NOT include HTML tags, URL encoding (%C3%A9), or HTML entities (&amp;).
 - For person/name fields: return the person's full name and title (e.g. "Jane Doe, CEO"). Do NOT put email addresses in name fields.
 - For contact/email fields: return email addresses and phone numbers as plain text (e.g. "jane@company.com; +1 555-1234").
-- If a field cannot be determined from the content, return an empty string "". Do NOT guess or hallucinate.
-- Be specific and concrete — use actual data from the page, not vague summaries.
+- For data fields: if a field cannot be determined from the content, return an empty string "". Do NOT guess or hallucinate.
+- For analysis fields: provide a brief, evidence-based assessment. Be specific — cite what you observed on the page.
 - Ignore navigation menus, cookie banners, footer boilerplate, and third-party content.
 
 Already found: ${alreadyFoundBrief || "(nothing yet)"}
@@ -972,6 +986,8 @@ async function validateExtraction(
 Extracted fields:
 ${filledEntries}
 
+IMPORTANT: Some fields contain analytical assessments (fit analysis, service needs, competitor signals, qualifications). These are subjective judgments by nature — only flag them as wrong if they clearly contradict the page content or contain fabricated facts. Do NOT remove them just because they express an opinion or inference.
+
 For each problematic field, provide a corrected value or "REMOVE" if the data is wrong and should be cleared. If everything looks correct, return an empty corrections object.`,
       }],
       temperature: 0,
@@ -1046,6 +1062,20 @@ export async function scrapeUrlSuper(
   const visitedUrls = new Set<string>();
   const allPages: FetchedPage[] = [];
   let fieldResults: FieldResultMap = {};
+
+  // Diagnostic tracking
+  const diag: ScrapeDiagnostics = {
+    pagesCollected: 0,
+    pageUrls: [],
+    pageSizes: [],
+    phase2FieldsFilled: 0,
+    phase3FieldsFilled: 0,
+    phase4FieldsFilled: 0,
+    phase5FieldsFilled: 0,
+    failedUrls: [],
+    softDeleted: [],
+    topPagePreview: "",
+  };
 
   // ── PHASE 1: FAST DISCOVERY & PARALLEL FETCH ─────────────────────────────
 
@@ -1156,6 +1186,16 @@ export async function scrapeUrlSuper(
 
   console.log(`[superScraper] Phase 1 complete: ${allPages.length} pages fetched`);
 
+  // Populate Phase 1 diagnostics
+  diag.pagesCollected = allPages.length;
+  diag.pageUrls = allPages.map(p => p.url);
+  diag.pageSizes = allPages.map(p => p.content?.length ?? 0);
+  // Failed URLs = visited but didn't produce a page (fetch errors, soft-404s, etc.)
+  const successfulUrls = new Set(allPages.map(p => p.url));
+  diag.failedUrls = [...visitedUrls].filter(u => !successfulUrls.has(u));
+  const sortedForPreview = [...allPages].sort((a, b) => scoreUrl(b.url) - scoreUrl(a.url));
+  diag.topPagePreview = sortedForPreview[0]?.content?.slice(0, 500) ?? "(no content)";
+
   // ── PHASE 2: DETERMINISTIC EXTRACTION ────────────────────────────────────
 
   if (isCancelled?.()) throw new Error("JOB_CANCELLED");
@@ -1165,6 +1205,7 @@ export async function scrapeUrlSuper(
   fieldResults = mergeFieldResults(fieldResults, deterministicResults);
 
   const phase2Filled = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD).length;
+  diag.phase2FieldsFilled = phase2Filled;
   console.log(`[superScraper] Phase 2 complete: ${phase2Filled}/${sections.length} fields confident`);
 
   // ── ASSESSMENT GATE 1 ─────────────────────────────────────────────────────
@@ -1177,7 +1218,16 @@ export async function scrapeUrlSuper(
     console.log(`[superScraper] Phase 3: Targeted LLM extraction`);
 
     try {
-      data = await llmExtractFields(allPages, sections, systemPrompt, data);
+      // Use mini model when analytical/judgment fields are present (fit, need, signal, etc.)
+      // Nano is too conservative for fields requiring business reasoning
+      const missingInPhase3 = sections.filter(s => !data[s.key]?.trim());
+      const hasAnalyticalFields = missingInPhase3.some(s => {
+        const kl = (s.key + " " + s.label).toLowerCase();
+        return !/email|phone|tel|linkedin|name|title|role|position/.test(kl);
+      });
+      const phase3Model = hasAnalyticalFields ? MODEL_MINI : MODEL_NANO;
+
+      data = await llmExtractFields(allPages, sections, systemPrompt, data, phase3Model);
       // Update fieldResults with LLM results (confidence 0.75 for LLM-extracted)
       for (const s of sections) {
         if (data[s.key]?.trim() && !(fieldResults[s.key]?.value?.trim())) {
@@ -1189,6 +1239,7 @@ export async function scrapeUrlSuper(
     }
 
     const phase3Filled = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD).length;
+    diag.phase3FieldsFilled = phase3Filled;
     console.log(`[superScraper] Phase 3 complete: ${phase3Filled}/${sections.length} fields confident`);
 
     // ── ASSESSMENT GATE 2 ───────────────────────────────────────────────────
@@ -1254,6 +1305,10 @@ export async function scrapeUrlSuper(
           }
           if (still_missing.some(s => /linkedin/i.test(s.key + " " + s.label))) {
             diverseQueries.push(`site:linkedin.com/in "${companyName}" partner OR founder`);
+          }
+          // Analytical fields — search for business context, tech stack, services
+          if (still_missing.some(s => /fit|need|signal|competitor|service|qualification/i.test(s.key + " " + s.label))) {
+            diverseQueries.push(`"${companyName}" site:builtwith.com OR site:crunchbase.com OR "technology" OR "services"`);
           }
           // Deduplicate queries
           const uniqueQueries = [...new Set(diverseQueries)].slice(0, 3);
@@ -1338,6 +1393,7 @@ export async function scrapeUrlSuper(
       }
 
       const phase4Filled = sections.filter(s => data[s.key]?.trim()).length;
+      diag.phase4FieldsFilled = phase4Filled;
       console.log(`[superScraper] Phase 4 complete: ${phase4Filled}/${sections.length} fields filled (${phase4LlmCalls} LLM calls)`);
     } // end gate 2
   } // end gate 1
@@ -1376,6 +1432,8 @@ export async function scrapeUrlSuper(
     }
   }
 
+  diag.phase5FieldsFilled = sections.filter(s => data[s.key]?.trim()).length;
+
   // ── PHASE 6: POST-SCRAPE ENRICHMENT CASCADE ────────────────────────────────
   //
   //  Order (cheapest / highest-coverage first):
@@ -1393,7 +1451,12 @@ export async function scrapeUrlSuper(
   if (!isCancelled?.()) {
     try {
       const { hunterDomainSearch } = await import("./dataSources/hunterApi");
+      const { addExternalCost } = await import("./_core/openaiLLM");
       const hunterResult = await hunterDomainSearch(_domain, sections, fieldResults);
+      // Track Hunter API cost ($0.01 per domain search) — skipped calls don't cost
+      if (!hunterResult.skippedReason) {
+        addExternalCost(0.01, "hunter.io domain search");
+      }
       if (hunterResult.bestMatch) {
         const hm = hunterResult.bestMatch;
         const sourceUrl = `https://hunter.io/domain-search?domain=${_domain}`;
@@ -1550,5 +1613,5 @@ export async function scrapeUrlSuper(
     `${stats.emailCount} emails, ${stats.personCount} people, ${durationSec}s`,
   );
 
-  return { type: "profile", data, stats };
+  return { type: "profile", data, stats, diagnostics: diag };
 }

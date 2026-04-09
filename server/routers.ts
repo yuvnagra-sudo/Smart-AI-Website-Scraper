@@ -11,7 +11,7 @@ import { getDb } from "./db";
 import { enrichedFirms, teamMembers, portfolioCompanies, investmentThesis } from "../drizzle/schema";
 import { eq, and, like, count } from "drizzle-orm";
 import { parseInputExcel, parseInputHeaders, createOutputExcel, createAgentOutputExcel, type EnrichedVCData, type TeamMemberData, type PortfolioCompanyData, type ProcessingSummaryData, type FileHeaders } from "./excelProcessor";
-import { scrapeUrl, type AgentSection, type DirectoryEntry as AgentDirectoryEntry, type ScrapeStats } from "./agentScraper";
+import { scrapeUrl, type AgentSection, type DirectoryEntry as AgentDirectoryEntry, type ScrapeStats, type ScrapeDiagnostics } from "./agentScraper";
 import { scrapeUrlSuper } from "./superScraper";
 import { generateInvestmentThesisSummaries } from "./investmentThesisAnalyzer";
 import { generateResultsFile } from "./generateResultsService";
@@ -327,13 +327,13 @@ Rules for sections:
 - 3-8 sections total
 - Each section key: snake_case, max 40 chars
 - Each section label: 2-4 words, suitable as a CSV column header
-- Each section desc: 1-2 sentence research instruction
+- Each section desc: 2-3 sentence research instruction. CRITICAL: preserve the user's specific criteria, examples, exclusion rules, and context in each description. Do NOT genericize — if the user mentions specific services, industries, competitor types, or exclusion criteria, those MUST appear in the relevant section desc. For judgment/analysis fields (fit assessment, service needs, competitor signals), include what evidence to look for and what counts as a positive vs negative signal.
 
 Return ONLY valid JSON (no markdown, no code fences):
 {
   "objective": "one concise sentence describing what to find",
-  "sections": [{"key":"snake_case_key","label":"Display Name","desc":"Research instruction"}],
-  "systemPrompt": "Complete extraction prompt. Start with 'You are a [role]. Extract the following fields from the provided page content:' followed by numbered **Bold** sections with instructions. Include {companyName} and {websiteUrl} as placeholders."
+  "sections": [{"key":"snake_case_key","label":"Display Name","desc":"Research instruction with specific criteria from user's description"}],
+  "systemPrompt": "Complete extraction prompt. Start with 'You are a [role]. Extract the following fields from the provided page content:' followed by numbered **Bold** sections with instructions. Include {companyName} and {websiteUrl} as placeholders. IMPORTANT: Include the user's specific criteria, exclusion rules, and context in the prompt so the LLM knows exactly what to look for and what to exclude."
 }`;
 
         try {
@@ -1023,10 +1023,23 @@ export async function processAgentJob(jobId: number) {
     const objective = job.objective ?? "";
 
     const columnMapping = job.columnMappingJson ? JSON.parse(job.columnMappingJson) : undefined;
-    const firms = await parseInputExcel(job.inputFileUrl, columnMapping);
+    const rawFirms = await parseInputExcel(job.inputFileUrl, columnMapping);
+
+    // Deduplicate by normalized URL — keep first occurrence
+    const seenUrls = new Set<string>();
+    const firms = rawFirms.filter(f => {
+      const norm = f.websiteUrl.toLowerCase().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/$/, "");
+      if (seenUrls.has(norm)) return false;
+      seenUrls.add(norm);
+      return true;
+    });
+    if (firms.length < rawFirms.length) {
+      console.log(`[processAgentJob] Deduplicated: ${rawFirms.length} → ${firms.length} unique URLs`);
+    }
     console.log(`[processAgentJob] Job ${jobId}: ${firms.length} URLs, ${sections.length} sections`);
 
     const profileResults: Array<Record<string, string>> = [];
+    const diagnosticResults: Array<{ companyName: string; websiteUrl: string; diagnostics: ScrapeDiagnostics }> = [];
     const collectedUrls: AgentDirectoryEntry[] = [];
     let processed = 0;
     // Running totals for the stats grid (updated after each firm)
@@ -1042,6 +1055,8 @@ export async function processAgentJob(jobId: number) {
 
     const CONCURRENCY = 50;
     const firmQueue = [...firms];
+    // Track queued URLs to prevent directory expansion from creating duplicates
+    const queuedUrls = new Set(firms.map(f => f.websiteUrl));
 
     const runWorker = async () => {
       while (firmQueue.length > 0) {
@@ -1077,12 +1092,13 @@ export async function processAgentJob(jobId: number) {
             // enriched with the user's custom sections.
             for (const entry of result.entries) {
               const scrapeTarget = entry.nativeUrl || entry.directoryUrl;
-              if (scrapeTarget && scrapeTarget !== firm.websiteUrl) {
+              if (scrapeTarget && scrapeTarget !== firm.websiteUrl && !queuedUrls.has(scrapeTarget)) {
                 firmQueue.push({
                   companyName: entry.name || scrapeTarget,
                   websiteUrl: scrapeTarget,
                   description: rowObjective,
                 });
+                queuedUrls.add(scrapeTarget);
               }
             }
             console.log(`[processAgentJob] Directory expanded: ${result.entries.length} entries queued for scraping`);
@@ -1093,6 +1109,13 @@ export async function processAgentJob(jobId: number) {
               "Website": firm.websiteUrl,
               ...result.data,
             });
+            if (result.diagnostics) {
+              diagnosticResults.push({
+                companyName: firm.companyName,
+                websiteUrl: firm.websiteUrl,
+                diagnostics: result.diagnostics,
+              });
+            }
             const stats: ScrapeStats = result.stats;
             // Accumulate stats-grid counters
             totalEmailsFound += stats.emailCount ?? 0;
@@ -1131,6 +1154,7 @@ export async function processAgentJob(jobId: number) {
         }
 
         processed++;
+        const currentStats = getOpenAIStats();
         await incrementJobProcessedCountSafely(jobId);
         await updateJobProgressSafely(jobId, {
           currentFirmName: firm.companyName,
@@ -1138,6 +1162,9 @@ export async function processAgentJob(jobId: number) {
           emailsFound: totalEmailsFound,
           peopleFound: totalPeopleFound,
           domainsWithData: totalDomainsWithData,
+          totalCostUSD: Math.round((currentStats.totalCost - costBaseline) * 10000) / 10000,
+          totalInputTokens: currentStats.totalInputTokens - inputBaseline,
+          totalOutputTokens: currentStats.totalOutputTokens - outputBaseline,
         });
       }
     };
@@ -1148,7 +1175,7 @@ export async function processAgentJob(jobId: number) {
 
     // Save partial results helper (used by both cancel and pause paths)
     const savePartialResults = async () => {
-      const excelBuffer = createAgentOutputExcel(sections, profileResults, collectedUrls);
+      const excelBuffer = createAgentOutputExcel(sections, profileResults, collectedUrls, diagnosticResults);
       const outputKey = `enrichment/${job.userId}/${jobId}-partial-results.xlsx`;
       const { url: outputUrl } = await storagePut(
         outputKey,
@@ -1189,7 +1216,7 @@ export async function processAgentJob(jobId: number) {
     }
 
     // Generate output Excel and upload to S3
-    const excelBuffer = createAgentOutputExcel(sections, profileResults, collectedUrls);
+    const excelBuffer = createAgentOutputExcel(sections, profileResults, collectedUrls, diagnosticResults);
     const outputKey = `enrichment/${job.userId}/${jobId}-results.xlsx`;
     const { url: outputUrl } = await storagePut(
       outputKey,

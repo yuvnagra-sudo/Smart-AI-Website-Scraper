@@ -300,7 +300,7 @@ export async function parseInputExcel(fileUrl: string, columnMapping?: ColumnMap
 }
 
 import type { InvestmentThesisSummary } from "./investmentThesisAnalyzer";
-import type { AgentSection, DirectoryEntry } from "./agentScraper";
+import type { AgentSection, DirectoryEntry, ScrapeDiagnostics } from "./agentScraper";
 
 export interface ProcessingSummaryData {
   firmName: string;
@@ -399,6 +399,7 @@ export function createAgentOutputExcel(
   sections: AgentSection[],
   profileResults: Array<Record<string, string>>,
   collectedUrls: DirectoryEntry[],
+  diagnosticResults?: Array<{ companyName: string; websiteUrl: string; diagnostics: ScrapeDiagnostics }>,
 ): Buffer {
   const workbook = XLSX.utils.book_new();
 
@@ -433,6 +434,27 @@ export function createAgentOutputExcel(
     const sanitizedUrlRows = sanitizeForExcel(urlRows);
     const urlSheet = XLSX.utils.json_to_sheet(sanitizedUrlRows);
     XLSX.utils.book_append_sheet(workbook, urlSheet, "Collected URLs");
+  }
+
+  // Sheet 3: Diagnostics — raw scrape data per company for debugging
+  if (diagnosticResults && diagnosticResults.length > 0) {
+    const diagRows = diagnosticResults.map((d) => ({
+      "Company": d.companyName,
+      "Website": d.websiteUrl,
+      "Pages Collected": d.diagnostics.pagesCollected,
+      "Page URLs": d.diagnostics.pageUrls.join("\n"),
+      "Page Sizes (chars)": d.diagnostics.pageSizes.join(", "),
+      "Phase 2 Fields Filled": d.diagnostics.phase2FieldsFilled,
+      "Phase 3 Fields Filled": d.diagnostics.phase3FieldsFilled,
+      "Phase 4 Fields Filled": d.diagnostics.phase4FieldsFilled,
+      "Phase 5 Fields Filled": d.diagnostics.phase5FieldsFilled,
+      "Failed URLs": d.diagnostics.failedUrls.join("\n") || "(none)",
+      "Soft-404 URLs": d.diagnostics.softDeleted.join("\n") || "(none)",
+      "Top Page Preview": d.diagnostics.topPagePreview,
+    }));
+    const sanitizedDiagRows = sanitizeForExcel(diagRows);
+    const diagSheet = XLSX.utils.json_to_sheet(sanitizedDiagRows);
+    XLSX.utils.book_append_sheet(workbook, diagSheet, "Diagnostics");
   }
 
   return XLSX.write(workbook, {

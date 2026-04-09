@@ -126,6 +126,15 @@ export function getOpenAIStats() {
 }
 
 /**
+ * Add cost from an external (non-LLM) API call so it flows through the
+ * existing cost tracking pipeline (getOpenAIStats → totalCostUSD).
+ */
+export function addExternalCost(amount: number, source: string): void {
+  totalCost += amount;
+  console.log(`[External Cost] +$${amount.toFixed(4)} (${source}) — running total: $${totalCost.toFixed(4)}`);
+}
+
+/**
  * Reset statistics (for testing)
  */
 export function resetOpenAIStats() {

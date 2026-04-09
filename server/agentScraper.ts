@@ -39,9 +39,23 @@ export interface ScrapeStats {
   hasData?: boolean;     // True if at least one field was filled
 }
 
+/** Diagnostic data collected during scraping — used for the Debug sheet in output Excel. */
+export interface ScrapeDiagnostics {
+  pagesCollected: number;
+  pageUrls: string[];
+  pageSizes: number[];           // char count per page
+  phase2FieldsFilled: number;
+  phase3FieldsFilled: number;
+  phase4FieldsFilled: number;
+  phase5FieldsFilled: number;
+  failedUrls: string[];
+  softDeleted: string[];         // soft-404 URLs
+  topPagePreview: string;        // first 500 chars of best-scoring page
+}
+
 export type AgentScrapeResult =
   | { type: "directory"; entries: DirectoryEntry[] }
-  | { type: "profile"; data: Record<string, string>; stats: ScrapeStats };
+  | { type: "profile"; data: Record<string, string>; stats: ScrapeStats; diagnostics?: ScrapeDiagnostics };
 
 type PageClass = "directory" | "directory-entry" | "profile";
 

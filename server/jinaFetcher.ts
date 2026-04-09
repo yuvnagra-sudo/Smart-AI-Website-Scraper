@@ -4,6 +4,7 @@
  */
 
 import axios from 'axios';
+import { jinaLimiter } from './_core/jinaRateLimiter';
 
 interface JinaFetchResult {
   success: boolean;
@@ -28,6 +29,9 @@ export async function fetchViaJina(url: string): Promise<JinaFetchResult | null>
   }
 
   try {
+    // Acquire a rate-limiter token before making the request
+    await jinaLimiter.acquire();
+
     console.log(`[Jina] Fetching ${url}`);
 
     // Jina Reader API endpoint
@@ -55,19 +59,24 @@ export async function fetchViaJina(url: string): Promise<JinaFetchResult | null>
     }
 
     return null;
-  } catch (error) {
+  } catch (error: any) {
     const duration = Date.now() - startTime;
+    const status = error?.response?.status;
     const errorMsg = error instanceof Error ? error.message : String(error);
 
-    // Log different error types
+    // Log different error types with proper HTTP status extraction
     if (errorMsg.includes('timeout')) {
       console.log(`[Jina] ⏱️ Timeout (${duration}ms): ${url}`);
-    } else if (errorMsg.includes('403') || errorMsg.includes('429')) {
-      console.log(`[Jina] 🚫 Rate limited/blocked (${duration}ms): ${url}`);
-    } else if (errorMsg.includes('404')) {
+    } else if (status === 429) {
+      console.log(`[Jina] 🚫 Rate limited (${duration}ms): ${url}`);
+    } else if (status === 422) {
+      console.log(`[Jina] ⚠️ Unprocessable URL (${duration}ms): ${url}`);
+    } else if (status === 403) {
+      console.log(`[Jina] 🚫 Blocked (${duration}ms): ${url}`);
+    } else if (status === 404) {
       console.log(`[Jina] 🔍 Not found (${duration}ms): ${url}`);
     } else {
-      console.log(`[Jina] ❌ Error (${duration}ms): ${errorMsg}`);
+      console.log(`[Jina] ❌ Error ${status ?? ''} (${duration}ms): ${errorMsg}`);
     }
 
     return null;
