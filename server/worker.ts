@@ -17,6 +17,19 @@ import { eq, and, or, lt, isNull } from 'drizzle-orm';
 import { processEnrichmentJob, processAgentJob } from './routers';
 import { markJobCancelled, clearJobCancelled, markJobPaused, clearJobPaused } from './_core/jobCancellation';
 
+// Prevent unhandled promise rejections from crashing the worker process.
+// puppeteer-extra-plugin-stealth fires internal events that can reject outside
+// any try/catch (e.g. "Requesting main frame too early!", "Session closed").
+process.on("unhandledRejection", (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  // Suppress known noisy Puppeteer/stealth errors
+  if (/main frame too early|Session closed|Target closed|Protocol error/i.test(msg)) {
+    console.warn(`[Worker] Suppressed unhandled rejection: ${msg.slice(0, 120)}`);
+    return;
+  }
+  console.error("[Worker] Unhandled rejection:", reason);
+});
+
 const POLL_INTERVAL = 5000; // Check for new jobs every 5 seconds
 const HEARTBEAT_INTERVAL = 30000; // Send heartbeat every 30 seconds
 const STALE_THRESHOLD = 5 * 60 * 1000; // 5 minutes without heartbeat = stale
