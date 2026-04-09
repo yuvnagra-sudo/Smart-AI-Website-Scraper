@@ -237,10 +237,16 @@ async function fetchPage(
     const msg = err instanceof Error ? err.message : String(err);
     const code = (err as any)?.code ?? "";
     const status = (err as any)?.response?.status ?? (err as any)?.status ?? 0;
-    if (status === 404 || status === 403 || status === 410 || code === "ERR_BAD_REQUEST" || code === "ECONNREFUSED" || code === "ENOTFOUND") {
-      return null; // expected — page simply doesn't exist
+    const silentCodes = ["ERR_BAD_REQUEST", "ECONNREFUSED", "ENOTFOUND", "ECONNRESET",
+      "ETIMEDOUT", "CERT_HAS_EXPIRED", "ERR_TLS_CERT_ALTNAME_INVALID",
+      "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "DEPTH_ZERO_SELF_SIGNED_CERT",
+      "SELF_SIGNED_CERT_IN_CHAIN", "ERR_SOCKET_CLOSED"];
+    const silentStatuses = [404, 403, 410, 502, 503, 522, 525];
+    if (silentStatuses.includes(status) || silentCodes.includes(code)) {
+      return null; // expected — page down, cert expired, DNS fail, etc.
     }
-    console.warn(`[superScraper] fetchPage non-fatal error for ${url}: ${msg}`);
+    // One-line log only — never dump full error objects
+    console.warn(`[superScraper] fetchPage error for ${url}: ${code || status || ""} ${msg.slice(0, 120)}`);
     return null;
   }
 }

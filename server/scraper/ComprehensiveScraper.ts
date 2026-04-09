@@ -86,7 +86,8 @@ export class ComprehensiveScraper {
         return result;
       } catch (error) {
         lastError = error as Error;
-        console.log(`[Scraper] ${strategy.name} failed for ${options.url}:`, error);
+        const errMsg = error instanceof Error ? error.message : String(error);
+        console.log(`[Scraper] ${strategy.name} failed for ${options.url}: ${errMsg.slice(0, 150)}`);
         continue;
       }
     }
