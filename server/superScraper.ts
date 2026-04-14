@@ -77,7 +77,7 @@ const MAX_AGENT_HOPS = parseInt(process.env.SUPER_SCRAPER_AGENT_HOPS ?? "4", 10)
 const MAX_DEEP_PROFILES = parseInt(process.env.SUPER_MAX_DEEP_PROFILES ?? "6", 10);
 
 /** Confidence threshold — fields above this are considered "filled". */
-const CONFIDENCE_THRESHOLD = 0.65;
+const CONFIDENCE_THRESHOLD = 0.50;
 
 // ---------------------------------------------------------------------------
 // Model tiering — nano for cheap extraction, mini for reasoning-heavy tasks
@@ -92,17 +92,23 @@ const MODEL_MINI = "gpt-5.4-mini";
 // Per-field confidence thresholds — different fields need different certainty
 // ---------------------------------------------------------------------------
 
-/** Get the confidence threshold for a given section key/label. */
+/** Get the confidence threshold for a given section key/label.
+ *  Name and title are the only critical fields. Everything else (email,
+ *  LinkedIn, phone, social) is a nice-to-have bonus — not worth gating on. */
 function getFieldThreshold(key: string, label: string): number {
   const kl = (key + " " + label).toLowerCase();
-  if (/email/.test(kl)) return 0.90;
-  if (/phone|tel/.test(kl)) return 0.85;
-  if (/linkedin/.test(kl)) return 0.90;
-  if (/\bname\b/.test(kl)) return 0.75;
-  if (/title|role|position/.test(kl)) return 0.70;
-  if (/niche|focus|thesis|sector/.test(kl)) return 0.60;
-  if (/portfolio|investment/.test(kl)) return 0.60;
-  if (/description|overview/.test(kl)) return 0.55;
+  // Contact/social fields — never gate on these
+  if (/email/.test(kl)) return 0.0;
+  if (/phone|tel/.test(kl)) return 0.0;
+  if (/linkedin/.test(kl)) return 0.0;
+  if (/social|twitter|facebook|instagram/.test(kl)) return 0.0;
+  // Identity fields — these actually matter
+  if (/\bname\b/.test(kl)) return 0.65;
+  if (/title|role|position/.test(kl)) return 0.55;
+  // Everything else
+  if (/niche|focus|thesis|sector/.test(kl)) return 0.50;
+  if (/portfolio|investment/.test(kl)) return 0.50;
+  if (/description|overview/.test(kl)) return 0.45;
   return CONFIDENCE_THRESHOLD; // default fallback
 }
 
@@ -457,11 +463,12 @@ function fieldMapToStrings(map: FieldResultMap): Record<string, string> {
   return out;
 }
 
-/** Check if all critical fields (email, name, title of decision maker) are filled using per-field thresholds. */
+/** Check if critical fields are filled using per-field thresholds.
+ *  Only name is truly critical — we want partial results (name + title)
+ *  even without email/LinkedIn. */
 function criticalFieldsFilled(sections: AgentSection[], fieldResults: FieldResultMap): boolean {
   const critical = sections.filter(s =>
-    /email|name|title|role|position/i.test(s.key + " " + s.label) &&
-    /decision.?maker|dm\d|contact|person/i.test(s.key),
+    /\bname\b|title|role|position/i.test(s.key + " " + s.label),
   );
   const toCheck = critical.length > 0 ? critical : sections;
   return toCheck.every(s => {
@@ -470,9 +477,14 @@ function criticalFieldsFilled(sections: AgentSection[], fieldResults: FieldResul
   });
 }
 
-/** Return section keys that are still below their per-field confidence threshold. */
+/** Return section keys that are still below their per-field confidence threshold.
+ *  Email, LinkedIn, phone, and social profiles are excluded — they are nice-to-haves,
+ *  not worth burning expensive phases to chase down. */
 function missingFields(sections: AgentSection[], fieldResults: FieldResultMap): AgentSection[] {
   return sections.filter(s => {
+    const kl = (s.key + " " + s.label).toLowerCase();
+    // Skip contact/social fields — they're bonuses, not requirements
+    if (/email|linkedin|phone|tel|social|twitter|facebook|instagram/.test(kl)) return false;
     const threshold = getFieldThreshold(s.key, s.label);
     return (fieldResults[s.key]?.confidence ?? 0) < threshold;
   });

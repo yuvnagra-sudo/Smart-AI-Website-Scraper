@@ -10,7 +10,7 @@
  */
 
 import { queuedLLMCall } from "./_core/llmQueue";
-import { type ScrapeProfile, VC_PROFILE } from "./scrapeProfile";
+import { type ScrapeProfile, GENERAL_PROFILE } from "./scrapeProfile";
 
 /**
  * Pre-extract emails from page content before LLM analysis
@@ -157,7 +157,7 @@ export async function analyzePageWithLLM(
     ? pageContent.substring(0, 25000) + "\n\n[Content truncated...]"
     : pageContent;
   
-  const prompt = buildAnalysisPrompt(truncatedContent, pageUrl, firmName, context, context.profile ?? VC_PROFILE);
+  const prompt = buildAnalysisPrompt(truncatedContent, pageUrl, firmName, context, context.profile ?? GENERAL_PROFILE);
   
   try {
     const response = await queuedLLMCall({

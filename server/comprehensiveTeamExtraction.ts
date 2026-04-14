@@ -6,7 +6,7 @@
 import * as cheerio from "cheerio";
 // Removed: import { invokeLLM } from "./_core/llm"; - Now using OpenAI only via llmQueue
 import { queuedLLMCall } from "./_core/llmQueue";
-import { type ScrapeProfile, VC_PROFILE } from "./scrapeProfile";
+import { type ScrapeProfile, GENERAL_PROFILE } from "./scrapeProfile";
 
 interface TeamMemberRaw {
   name: string;
@@ -24,7 +24,7 @@ export async function extractTeamMembersComprehensive(
   onProgress?: (message: string) => void,
   profile?: ScrapeProfile,
 ): Promise<TeamMemberRaw[]> {
-  const resolvedProfile = profile ?? VC_PROFILE;
+  const resolvedProfile = profile ?? GENERAL_PROFILE;
   console.log(`[comprehensiveTeamExtraction] Starting extraction for ${companyName}`);
   console.log(`[comprehensiveTeamExtraction] HTML length: ${html.length} chars`);
 

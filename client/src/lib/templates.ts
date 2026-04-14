@@ -386,7 +386,7 @@ export const ALL_TEMPLATES: Template[] = [
 const TEMPLATE_MAP = new Map<string, Template>(ALL_TEMPLATES.map(t => [t.id, t]));
 
 export function getTemplate(id: string): Template {
-  return TEMPLATE_MAP.get(id) ?? VC_TEMPLATE;
+  return TEMPLATE_MAP.get(id) ?? B2B_TEMPLATE;
 }
 
 // ─── Agent-pipeline section definitions for non-VC templates ─────────────────

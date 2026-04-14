@@ -11,7 +11,7 @@
 // Removed: import { invokeLLM } from "./_core/llm"; - Now using OpenAI only via llmQueue
 import { queuedLLMCall } from "./_core/llmQueue";
 import { scrapeLinkedInProfile } from "./linkedinMatcher";
-import { formatNichesForPrompt } from "./nicheTaxonomy";
+// Taxonomy removed — LLM extracts specializations from content directly
 import * as cheerio from "cheerio";
 
 interface SpecializationSource {
@@ -42,21 +42,17 @@ async function getSpecializationFromLinkedIn(
   const rawData = `${profileData.headline}\n${profileData.about}`;
   
   // Use AI to map LinkedIn data to our niche taxonomy
-  const nicheTaxonomy = formatNichesForPrompt();
-  
-  const prompt = `You are analyzing a VC team member's LinkedIn profile to identify their investment specialization.
+  const prompt = `You are analyzing a team member's LinkedIn profile to identify their areas of expertise and specialization.
 
 LinkedIn Headline: ${profileData.headline}
 LinkedIn About: ${profileData.about}
 
-Based on this information, identify which investment niches this person specializes in. Use ONLY the niches from this predefined taxonomy:
+Based on this information, identify what this person specializes in. Extract the specific areas, sectors, or domains that are actually mentioned or clearly implied. Do not limit yourself to any predefined list.
 
-${nicheTaxonomy}
-
-You can select multiple niches. Return your answer as a JSON object with a "niches" key containing an array of niche names exactly as they appear in the taxonomy.
+Return your answer as a JSON object with a "niches" key containing an array of specialization strings.
 
 Example format:
-{"niches": ["FinTech", "SaaS", "B2B Software"]}
+{"niches": ["Enterprise Sales", "SaaS", "B2B Software"]}
 
 If you cannot determine specialization, return: {"niches": []}`;
 
@@ -125,19 +121,15 @@ async function getSpecializationFromBio(
   if (!bioText) return null;
   
   // Use AI to extract specialization from bio
-  const nicheTaxonomy = formatNichesForPrompt();
-  
-  const prompt = `You are analyzing a VC team member's biography to identify their investment specialization.
+  const prompt = `You are analyzing a team member's biography to identify their areas of expertise and specialization.
 
 Team Member: ${memberName}
 Bio:
 ${bioText}
 
-Based on this biography, identify which investment niches this person specializes in. Use ONLY the niches from this predefined taxonomy:
+Based on this biography, identify what this person specializes in. Extract the specific areas, sectors, or domains that are actually mentioned or clearly implied. Do not limit yourself to any predefined list.
 
-${nicheTaxonomy}
-
-You can select multiple niches. Return your answer as a JSON object with a "niches" key containing an array of niche names exactly as they appear in the taxonomy.
+Return your answer as a JSON object with a "niches" key containing an array of specialization strings.
 
 Example format:
 {"niches": ["Healthcare", "Biotech"]}
@@ -206,19 +198,15 @@ async function getSpecializationFromPortfolio(
   if (relevantCompanies.length === 0) return null;
   
   const combinedText = relevantCompanies.join("\n\n");
-  const nicheTaxonomy = formatNichesForPrompt();
-  
-  const prompt = `You are analyzing portfolio companies that a VC team member has invested in or led to infer their specialization.
+  const prompt = `You are analyzing companies or projects that a team member has been involved with to infer their specialization.
 
 Team Member: ${memberName}
-Portfolio Information:
+Relevant Information:
 ${combinedText}
 
-Based on the companies this person has invested in, identify which investment niches they specialize in. Use ONLY the niches from this predefined taxonomy:
+Based on the companies or projects this person has been involved with, identify what areas they specialize in. Extract the specific sectors or domains that are actually implied. Do not limit yourself to any predefined list.
 
-${nicheTaxonomy}
-
-You can select multiple niches. Return your answer as a JSON object with a "niches" key containing an array of niche names exactly as they appear in the taxonomy.
+Return your answer as a JSON object with a "niches" key containing an array of specialization strings.
 
 Example format:
 {"niches": ["Enterprise Software", "SaaS"]}

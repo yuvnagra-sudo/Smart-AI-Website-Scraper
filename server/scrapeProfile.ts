@@ -87,103 +87,46 @@ export interface ScrapeProfile {
 // ════════════════════════════════════════════════════════════════════════════════
 
 /**
- * VC_PROFILE — original behaviour, fully backward-compatible.
- * Use this when scraping venture capital and private equity firms.
+ * VC_PROFILE — kept as an alias to GENERAL_PROFILE for backward compatibility.
+ * The hardcoded VC taxonomy has been removed. AI will derive categories from content.
  */
 export const VC_PROFILE: ScrapeProfile = {
   id: "vc",
-  name: "Venture Capital / Private Equity",
+  name: "General (formerly VC)",
 
-  organizationLabel: "VC firm",
+  organizationLabel: "company",
   peopleLabel: "team members",
   peopleSingular: "team member",
-  relatedItemsLabel: "portfolio companies",
-  relatedItemsSingular: "portfolio company",
-  categoriesLabel: "investment niches",
-  typesLabel: "investor type",
-  stagesLabel: "investment stages",
+  relatedItemsLabel: "related companies or projects",
+  relatedItemsSingular: "related company or project",
+  categoriesLabel: "focus areas",
+  typesLabel: "organization type",
+  stagesLabel: null,
 
-  categoryTaxonomy: [
-    "Artificial Intelligence (AI) & Machine Learning (ML)",
-    "SaaS",
-    "FinTech",
-    "Cybersecurity",
-    "Cloud Computing",
-    "BioTech",
-    "Digital Health",
-    "MedTech",
-    "CleanTech",
-    "Climate Tech",
-    "AgriTech",
-    "Robotics",
-    "Quantum Computing",
-    "Blockchain / Web3",
-    "Consumer Internet",
-    "E-Commerce",
-    "EdTech",
-    "PropTech",
-    "Mobility / Transportation",
-    "Space Technology",
-    "Hardware",
-    "Defense Tech",
-    "Enterprise Software",
-    "Marketplace",
-    "Gaming",
-    "Media / Content",
-    "Supply Chain",
-    "LegalTech",
-    "HR Tech",
-    "InsurTech",
-  ],
-  organizationTypes: [
-    "Venture Capital (VC)",
-    "Micro VC",
-    "Angel Network",
-    "Private Equity (PE)",
-    "Accelerator",
-    "Incubator",
-    "Venture Studio",
-    "Corporate Venture Capital (CVC)",
-    "Family Office",
-    "Venture Debt",
-    "Crowdfunding Platform",
-    "Government Fund",
-  ],
-  stages: [
-    "Pre-Seed",
-    "Seed",
-    "Series A",
-    "Series B",
-    "Series C",
-    "Series D+",
-    "Growth / Expansion",
-    "Bridge",
-    "Mezzanine",
-    "IPO / Public",
-  ],
+  categoryTaxonomy: null, // free-form — LLM picks categories from the content
+  organizationTypes: null,
+  stages: null,
 
   peopleFunctionCategories: [
-    "Partner",
-    "Managing Partner",
-    "General Partner",
-    "Principal",
-    "Associate",
-    "Analyst",
-    "Investment Manager",
-    "Operating Partner",
-    "Venture Partner",
-    "Early Stage Investor",
-    "Late Stage Investor",
+    "CEO / Founder",
+    "CTO / Technical Lead",
+    "CFO",
+    "VP / Director",
+    "Manager",
     "Specialist",
+    "Engineer / Developer",
+    "Designer",
+    "Sales / Marketing",
+    "Operations",
     "Other",
   ],
-  peopleSpecializationHint: "Investment focus area if mentioned (e.g. 'FinTech', 'Healthcare', 'Deep Tech')",
-  extractIndividualMandateFields: true,
+  peopleSpecializationHint: "Area of expertise or specialization if mentioned",
+  extractIndividualMandateFields: false,
 
   extractPeople: true,
   extractRelatedItems: true,
   extractOrganizationType: true,
-  extractStages: true,
+  extractStages: false,
 };
 
 /**
@@ -407,10 +350,10 @@ export const BUILT_IN_PROFILES: Record<string, ScrapeProfile> = {
   directory_entry: DIRECTORY_PROFILE,
 };
 
-/** Look up a profile by id, falling back to VC_PROFILE */
+/** Look up a profile by id, falling back to GENERAL_PROFILE */
 export function getProfile(id?: string): ScrapeProfile {
-  if (!id) return VC_PROFILE;
-  return BUILT_IN_PROFILES[id] ?? VC_PROFILE;
+  if (!id) return GENERAL_PROFILE;
+  return BUILT_IN_PROFILES[id] ?? GENERAL_PROFILE;
 }
 
 /**

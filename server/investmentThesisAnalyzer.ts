@@ -1,6 +1,7 @@
 /**
- * Investment Thesis Analyzer
+ * Organization Summary Analyzer
  * Aggregates firm-level insights for the summary sheet
+ * (Generalized — no longer VC-specific)
  */
 
 import type { EnrichedVCData, TeamMemberData, PortfolioCompanyData } from "./excelProcessor";
@@ -9,18 +10,18 @@ export interface InvestmentThesisSummary {
   vcFirm: string;
   websiteUrl: string;
   investorType: string;
-  primaryFocusAreas: string; // Top 3 niches
-  emergingInterests: string; // Niches from recent investments
+  primaryFocusAreas: string;
+  emergingInterests: string;
   preferredStages: string;
   averageCheckSize: string;
-  recentInvestmentPace: string; // e.g., "3 investments in last 6 months"
-  keyDecisionMakers: string; // Tier 1 partners
+  recentInvestmentPace: string;
+  keyDecisionMakers: string;
   totalTeamSize: number;
   tier1Count: number;
   tier2Count: number;
   portfolioSize: number;
-  recentPortfolioCount: number; // Last 6 months
-  talkingPoints: string; // AI-generated insights
+  recentPortfolioCount: number;
+  talkingPoints: string;
 }
 
 /**

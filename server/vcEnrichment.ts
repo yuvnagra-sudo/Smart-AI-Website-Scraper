@@ -5,8 +5,7 @@
 import { invokeLLM } from "./_core/openaiLLM";
 // Removed queuedLLMCall - using direct OpenAI calls now
 import { aggregateFreeApiData } from "./dataSources/freeApis";
-import { formatNichesForPrompt } from "./nicheTaxonomy";
-import { formatInvestorTypesForPrompt, formatInvestmentStagesForPrompt } from "./investorTaxonomy";
+// Taxonomies removed — LLM now extracts categories from content directly
 import { extractAndMatchLinkedInURLs } from "./improvedLinkedInExtractor";
 import { findLinkedInURLForPerson } from "./smartUrlConstructor";
 import { enrichTeamMemberSpecialization } from "./teamMemberEnrichment";
@@ -17,7 +16,7 @@ import * as cheerio from "cheerio";
 import { fetchViaJina, fetchWebsiteContentHybrid, fetchStats } from "./jinaFetcher";
 import { scrapeComprehensively, getTeamSpecificContent, getPortfolioSpecificContent, aggregateAllContent, type ComprehensiveScrapingResult } from "./comprehensiveMultiPageScraper";
 import { scrapeRecursively, type RecursiveScrapingResult } from "./recursiveScraper";
-import { type ScrapeProfile, VC_PROFILE } from "./scrapeProfile";
+import { type ScrapeProfile, GENERAL_PROFILE } from "./scrapeProfile";
 
 /**
  * Extract emails from HTML and try to match them to team member names
@@ -216,7 +215,7 @@ export class VCEnrichmentService {
   private profile: ScrapeProfile;
 
   constructor(profile?: ScrapeProfile) {
-    this.profile = profile ?? VC_PROFILE;
+    this.profile = profile ?? GENERAL_PROFILE;
   }
 
   private async fetchWebpage(url: string, useBrowser = false): Promise<string | null> {
@@ -566,25 +565,22 @@ Respond with ONLY "YES" or "NO" followed by a brief explanation (one sentence).`
     }
 
     const text = this.extractTextFromHtml(html, 5000);
-    const nicheTaxonomy = formatNichesForPrompt();
 
-    const prompt = `You are analyzing a venture capital firm's website to identify their investment focus areas.
+    const prompt = `You are analyzing a company's website to identify their focus areas, specializations, or categories.
 
 Company: ${companyName}
 
 Website Content:
 ${text}
 
-Based on the content above, identify which investment niches this VC firm focuses on. Use ONLY the niches from this predefined taxonomy:
+Based on the content above, identify what this organization focuses on. Extract the specific areas, sectors, or specializations that are actually mentioned or clearly implied. Do not limit yourself to any predefined list.
 
-${nicheTaxonomy}
-
-You can select multiple niches. Return your answer as a JSON object with a "niches" key containing an array of niche names exactly as they appear in the taxonomy.
+Return your answer as a JSON object with a "niches" key containing an array of focus area strings.
 
 Example format:
-{"niches": ["Artificial Intelligence (AI) & Machine Learning (ML)", "SaaS", "FinTech"]}
+{"niches": ["Enterprise Software", "Data Analytics", "Cloud Infrastructure"]}
 
-If you cannot determine the investment focus, return: {"niches": []}`;
+If you cannot determine the focus areas, return: {"niches": []}`;
 
     try {
       const response = await invokeLLM({
@@ -632,25 +628,22 @@ If you cannot determine the investment focus, return: {"niches": []}`;
     }
 
     const text = this.extractTextFromHtml(html);
-    const investorTaxonomy = formatInvestorTypesForPrompt();
 
-    const prompt = `You are analyzing a firm to determine what type of investor they are.
+    const prompt = `You are analyzing a company's website to determine what type of organization it is.
 
 Company: ${companyName}
 Description: ${description}
 Website Content:
 ${text}
 
-Based on the content above, identify what type of investor this firm is. Use ONLY the types from this predefined taxonomy:
+Based on the content above, identify what type of organization this is. Extract the specific type(s) that are actually mentioned or clearly implied. Do not limit yourself to any predefined list.
 
-${investorTaxonomy}
-
-You can select multiple types if applicable. Return your answer as a JSON object with a "types" key containing an array of type names exactly as they appear in the taxonomy.
+Return your answer as a JSON object with a "types" key containing an array of organization type strings.
 
 Example format:
-{"types": ["Venture Capital (VC)", "Micro VC"]}
+{"types": ["SaaS Company", "B2B Platform"]}
 
-If you cannot determine the investor type, return: {"types": []}`;
+If you cannot determine the organization type, return: {"types": []}`;
 
     try {
       const response = await invokeLLM({
@@ -698,25 +691,22 @@ If you cannot determine the investor type, return: {"types": []}`;
     }
 
     const text = this.extractTextFromHtml(html);
-    const stagesTaxonomy = formatInvestmentStagesForPrompt();
 
-    const prompt = `You are analyzing a VC firm to determine what investment stages they focus on.
+    const prompt = `You are analyzing a company's website to identify any relevant stages, phases, or maturity levels they work with or focus on.
 
 Company: ${companyName}
 Description: ${description}
 Website Content:
 ${text}
 
-Based on the content above, identify what investment stages this firm focuses on. Use ONLY the stages from this predefined taxonomy:
+Based on the content above, identify any relevant stages or phases mentioned. Extract what is actually stated or clearly implied. Do not limit yourself to any predefined list.
 
-${stagesTaxonomy}
-
-You can select multiple stages if the firm invests across different stages. Return your answer as a JSON object with a "stages" key containing an array of stage names exactly as they appear in the taxonomy.
+Return your answer as a JSON object with a "stages" key containing an array of stage strings.
 
 Example format:
-{"stages": ["Seed", "Series A", "Series B"]}
+{"stages": ["Early Stage", "Growth", "Enterprise"]}
 
-If you cannot determine the investment stages, return: {"stages": []}`;
+If you cannot determine any stages, return: {"stages": []}`;
 
     try {
       const response = await invokeLLM({

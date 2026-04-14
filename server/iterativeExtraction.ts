@@ -14,8 +14,7 @@
 
 import { invokeLLM } from "./_core/openaiLLM";
 import { fetchWebsiteContentHybrid } from "./jinaFetcher";
-import { formatNichesForPrompt } from "./nicheTaxonomy";
-import { formatInvestorTypesForPrompt, formatInvestmentStagesForPrompt } from "./investorTaxonomy";
+// Taxonomies removed — LLM now extracts categories from content directly
 
 /**
  * Extraction state tracks what data we have and what's missing
@@ -77,7 +76,7 @@ async function analyzeScrapeAndDecideNext(
   currentState: ExtractionState,
   availableLinks: string[]
 ): Promise<LLMDecision> {
-  const prompt = `You are an AI assistant helping to extract comprehensive data about a VC firm.
+  const prompt = `You are an AI assistant helping to extract comprehensive data about an organization.
 
 **Firm**: ${companyName}
 **Website**: ${baseUrl}
@@ -219,12 +218,12 @@ async function extractDataFromContent(
   
   // Extract investor type if missing
   if (currentState.investorType.length === 0) {
-    const investorTypePrompt = `Analyze this content and identify the investor type(s):\n\n${content.slice(0, 5000)}\n\nAvailable types:\n${formatInvestorTypesForPrompt()}\n\nReturn JSON: {"investorTypes": ["type1", "type2"]}`;
+    const investorTypePrompt = `Analyze this content and identify the organization type(s):\n\n${content.slice(0, 5000)}\n\nIdentify the type of organization based on the content. Do not limit yourself to any predefined list.\n\nReturn JSON: {"investorTypes": ["type1", "type2"]}`;
     
     try {
       const response = await invokeLLM({
         messages: [
-          { role: "system", content: "You are a VC data extraction specialist." },
+          { role: "system", content: "You are a data extraction specialist." },
           { role: "user", content: investorTypePrompt }
         ]
       });

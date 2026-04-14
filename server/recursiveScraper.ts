@@ -26,7 +26,7 @@ import {
   PageAnalysisResult
 } from './llmPageAnalyzer';
 import { fetchViaJina } from './jinaFetcher';
-import { type ScrapeProfile, VC_PROFILE } from './scrapeProfile';
+import { type ScrapeProfile, GENERAL_PROFILE } from './scrapeProfile';
 
 export interface RecursiveScrapingConfig {
   maxDepth: number;           // Maximum exploration depth (default: 3)
@@ -36,7 +36,7 @@ export interface RecursiveScrapingConfig {
   goal: 'team' | 'portfolio' | 'all';  // What data to prioritize
   enableDeepProfiles: boolean; // Whether to follow individual profile links
   onProgress?: (message: string, stats: ScrapingStats) => void;
-  /** Scraping profile — controls terminology and what to extract (default: VC_PROFILE) */
+  /** Scraping profile — controls terminology and what to extract (default: GENERAL_PROFILE) */
   profile?: ScrapeProfile;
 }
 
@@ -216,7 +216,7 @@ export async function scrapeRecursively(
           currentDepth: current.depth,
           maxDepth: cfg.maxDepth,
           goal: cfg.goal,
-          profile: cfg.profile ?? VC_PROFILE,
+          profile: cfg.profile ?? GENERAL_PROFILE,
         }
       );
       
