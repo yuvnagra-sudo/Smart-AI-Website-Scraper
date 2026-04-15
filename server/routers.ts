@@ -26,6 +26,7 @@ import { canResumeJob, prepareJobForResume, getResumeProgress } from "./resumeJo
 import { extractDirectory } from "./directoryExtractor";
 import { nanoid } from "nanoid";
 import { saveFirmImmediately, getProcessedFirms } from "./incrementalSave";
+import { scoreTeamMemberFit } from "./personFitScorer";
 import { isJobCancelled, isJobPaused } from "./_core/jobCancellation";
 
 // Feature flag: set USE_SUPER_SCRAPER=true in Railway env to activate the 5-phase super scraper.
@@ -216,6 +217,10 @@ export const appRouter = router({
             websiteUrlColumn: z.string(),
             descriptionColumn: z.string().optional(),
           }).optional(),
+          // Outreach context for AI fit scoring
+          outreachContext: z.string().optional(),
+          targetPersona: z.string().optional(),
+          exclusionCriteria: z.string().optional(),
         }),
       )
       .mutation(async ({ ctx, input }) => {
@@ -239,6 +244,9 @@ export const appRouter = router({
           systemPrompt: input.systemPrompt,
           objective: input.objective,
           columnMappingJson: input.columnMapping ? JSON.stringify(input.columnMapping) : undefined,
+          outreachContext: input.outreachContext,
+          targetPersona: input.targetPersona,
+          exclusionCriteria: input.exclusionCriteria,
         });
 
         // Job will be picked up by worker.ts via polling (within 5 seconds)
@@ -259,6 +267,10 @@ export const appRouter = router({
           objective: z.string().optional(),
           systemPrompt: z.string().optional(),
           sectionsJson: z.string().optional(),
+          // Outreach context for AI fit scoring
+          outreachContext: z.string().optional(),
+          targetPersona: z.string().optional(),
+          exclusionCriteria: z.string().optional(),
         }),
       )
       .mutation(async ({ ctx, input }) => {
@@ -309,6 +321,9 @@ export const appRouter = router({
           systemPrompt: input.systemPrompt ?? defaultSystemPrompt,
           objective: input.objective ?? defaultObjective,
           columnMappingJson: JSON.stringify({ companyNameColumn: "Company Name", websiteUrlColumn: "Website URL" }),
+          outreachContext: input.outreachContext,
+          targetPersona: input.targetPersona,
+          exclusionCriteria: input.exclusionCriteria,
         });
 
         console.log(`[quickScrape] Job ${jobId} queued with ${domains.length} domains — worker will pick up within 5s`);
@@ -729,9 +744,27 @@ export async function processEnrichmentJob(jobId: number) {
         }
       );
 
+      // AI fit scoring + buying committee identification (if outreach context provided)
+      let fitScores = null;
+      if (job.outreachContext || job.targetPersona) {
+        try {
+          fitScores = await scoreTeamMemberFit(
+            result.teamMembers,
+            { companyName: result.companyName, description: result.description },
+            {
+              context: job.outreachContext || "",
+              persona: job.targetPersona || "",
+              exclusions: job.exclusionCriteria || "",
+            },
+          );
+        } catch (err) {
+          console.error(`[Job ${jobId}] Fit scoring failed for "${result.companyName}" (non-fatal):`, err);
+        }
+      }
+
       // INCREMENTAL SAVE: persist to DB immediately
       console.log(`[Job ${jobId}] 💾 Saving "${result.companyName}"...`);
-      const firmId = await saveFirmImmediately(jobId, result, job.tierFilter || "all");
+      const firmId = await saveFirmImmediately(jobId, result, job.tierFilter || "all", fitScores);
       if (!firmId) {
         console.error(`[Job ${jobId}] ❌ Failed to save "${result.companyName}"`);
         return;

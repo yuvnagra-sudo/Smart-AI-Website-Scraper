@@ -73,6 +73,10 @@ export interface TeamMemberData {
   confidenceScore: string;
   decisionMakerTier: string;
   tierPriority: number;
+  // AI fit scoring + buying committee
+  fitScore?: number | null;
+  fitReasoning?: string | null;
+  buyingRole?: string | null;
 }
 
 export interface PortfolioCompanyData {

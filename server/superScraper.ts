@@ -93,15 +93,16 @@ const MODEL_MINI = "gpt-5.4-mini";
 // ---------------------------------------------------------------------------
 
 /** Get the confidence threshold for a given section key/label.
- *  Name and title are the only critical fields. Everything else (email,
- *  LinkedIn, phone, social) is a nice-to-have bonus — not worth gating on. */
+ *  Contact fields have a low quality floor (reject garbage, not gate phases).
+ *  Name and title are the critical identity fields.
+ *  Hunter + Apollo handle email/LinkedIn enrichment in Phase 6 separately. */
 function getFieldThreshold(key: string, label: string): number {
   const kl = (key + " " + label).toLowerCase();
-  // Contact/social fields — never gate on these
-  if (/email/.test(kl)) return 0.0;
-  if (/phone|tel/.test(kl)) return 0.0;
-  if (/linkedin/.test(kl)) return 0.0;
-  if (/social|twitter|facebook|instagram/.test(kl)) return 0.0;
+  // Contact fields — low threshold (quality floor, not phase gating)
+  if (/email/.test(kl)) return 0.30;
+  if (/phone|tel/.test(kl)) return 0.30;
+  if (/linkedin/.test(kl)) return 0.25;
+  if (/social|twitter|facebook|instagram/.test(kl)) return 0.0; // truly optional
   // Identity fields — these actually matter
   if (/\bname\b/.test(kl)) return 0.65;
   if (/title|role|position/.test(kl)) return 0.55;
@@ -1452,11 +1453,12 @@ export async function scrapeUrlSuper(
 
   diag.phase5FieldsFilled = sections.filter(s => data[s.key]?.trim()).length;
 
-  // ── PHASE 6: POST-SCRAPE ENRICHMENT CASCADE ────────────────────────────────
+  // ── PHASE 6: POST-SCRAPE ENRICHMENT CASCADE ──��─────────────────────────────
   //
-  //  Order (cheapest / highest-coverage first):
-  //    1. Hunter Domain Search — emails + names from Hunter's index (~$0.01/call)
-  //    2. SMTP handshake      — generic email fallback (free, last resort)
+  //  Step 1: Hunter + Apollo run in PARALLEL (different data, complementary):
+  //    1a. Hunter Domain Search — verified emails + names (~$0.01/call)
+  //    1b. Apollo People Search — people by title/seniority at domain (free)
+  //  Step 2: SMTP handshake — generic email fallback (free, last resort)
   //
   //  Each step is independently gated and non-fatal.
 
@@ -1465,60 +1467,117 @@ export async function scrapeUrlSuper(
     catch { return url; }
   })();
 
-  // ── Step 1: Hunter Domain Search ───────────────────────────────────────────
+  // ── Step 1: Hunter + Apollo in parallel ────────────────────────────────────
   if (!isCancelled?.()) {
-    try {
-      const { hunterDomainSearch } = await import("./dataSources/hunterApi");
-      const { addExternalCost } = await import("./_core/openaiLLM");
-      const hunterResult = await hunterDomainSearch(_domain, sections, fieldResults);
-      // Track Hunter API cost ($0.01 per domain search) — skipped calls don't cost
-      if (!hunterResult.skippedReason) {
-        addExternalCost(0.01, "hunter.io domain search");
+    const hunterPromise = (async () => {
+      try {
+        const { hunterDomainSearch } = await import("./dataSources/hunterApi");
+        const { addExternalCost } = await import("./_core/openaiLLM");
+        const hunterResult = await hunterDomainSearch(_domain, sections, fieldResults);
+        if (!hunterResult.skippedReason) {
+          addExternalCost(0.01, "hunter.io domain search");
+        }
+        return hunterResult;
+      } catch (err) {
+        console.warn(`[superScraper] Hunter Domain Search failed (non-fatal):`, err);
+        return null;
       }
-      if (hunterResult.bestMatch) {
-        const hm = hunterResult.bestMatch;
-        const sourceUrl = `https://hunter.io/domain-search?domain=${_domain}`;
+    })();
 
-        // Merge name, title, email, linkedin into weak DM fields
+    const apolloPromise = (async () => {
+      try {
+        const { apolloPeopleSearch, shouldRunApolloSearch } = await import("./dataSources/apolloApi");
+        if (!shouldRunApolloSearch().run) return null;
+        return await apolloPeopleSearch(_domain);
+      } catch (err) {
+        console.warn(`[superScraper] Apollo People Search failed (non-fatal):`, err);
+        return null;
+      }
+    })();
+
+    const [hunterSettled, apolloSettled] = await Promise.allSettled([hunterPromise, apolloPromise]);
+
+    // Merge Hunter results (emails, names, titles, LinkedIn)
+    const hunterResult = hunterSettled.status === "fulfilled" ? hunterSettled.value : null;
+    if (hunterResult?.bestMatch) {
+      const hm = hunterResult.bestMatch;
+      const sourceUrl = `https://hunter.io/domain-search?domain=${_domain}`;
+
+      for (const s of sections) {
+        const kl = s.key.toLowerCase();
+        const isDm = /decision.?maker|dm\d|contact|person/.test(kl);
+
+        if (isDm && /name/.test(kl) && !fieldResults[s.key]?.value && hm.firstName) {
+          const fullName = `${hm.firstName} ${hm.lastName}`.trim();
+          fieldResults[s.key] = { value: fullName, confidence: 0.82, sourceUrl };
+          data[s.key] = fullName;
+        } else if (isDm && /title|role|position/.test(kl) && !fieldResults[s.key]?.value && hm.position) {
+          fieldResults[s.key] = { value: hm.position, confidence: 0.82, sourceUrl };
+          data[s.key] = hm.position;
+        } else if (/email/i.test(kl) && !fieldResults[s.key]?.value && hm.value) {
+          fieldResults[s.key] = {
+            value: hm.value,
+            confidence: Math.min(0.95, hm.confidence / 100),
+            sourceUrl,
+          };
+          data[s.key] = hm.value;
+        } else if (isDm && /linkedin/.test(kl) && !fieldResults[s.key]?.value && hm.linkedinUrl) {
+          fieldResults[s.key] = { value: hm.linkedinUrl, confidence: 0.88, sourceUrl: hm.linkedinUrl };
+          data[s.key] = hm.linkedinUrl;
+        }
+      }
+      console.log(
+        `[superScraper] Hunter merged: ${hm.firstName} ${hm.lastName} <${hm.value}> (${hm.position || hm.seniority || "?"})`,
+      );
+    } else if (hunterResult?.skippedReason) {
+      console.log(`[superScraper] Hunter skipped: ${hunterResult.skippedReason}`);
+    }
+
+    // Merge Apollo results (people discovery — names, titles, LinkedIn, location)
+    const apolloResult = apolloSettled.status === "fulfilled" ? apolloSettled.value : null;
+    if (apolloResult && apolloResult.people.length > 0) {
+      console.log(`[superScraper] Apollo found ${apolloResult.people.length} people at ${_domain}`);
+
+      // Cross-reference Apollo people with Hunter emails
+      const hunterEmails = hunterResult?.allEmails ?? [];
+
+      for (const person of apolloResult.people) {
+        // Try to find matching Hunter email for this Apollo person
+        const matchingHunterEmail = hunterEmails.find(he => {
+          const hunterName = `${he.firstName} ${he.lastName}`.trim().toLowerCase();
+          const apolloName = person.name.toLowerCase();
+          return hunterName === apolloName ||
+            (he.firstName && person.name.toLowerCase().includes(he.firstName.toLowerCase()) &&
+             he.lastName && person.name.toLowerCase().includes(he.lastName.toLowerCase()));
+        });
+
+        // Merge into DM fields if they're still empty
         for (const s of sections) {
           const kl = s.key.toLowerCase();
           const isDm = /decision.?maker|dm\d|contact|person/.test(kl);
 
-          // Name field
-          if (isDm && /name/.test(kl) && !fieldResults[s.key]?.value && hm.firstName) {
-            const fullName = `${hm.firstName} ${hm.lastName}`.trim();
-            fieldResults[s.key] = { value: fullName, confidence: 0.82, sourceUrl };
-            data[s.key] = fullName;
-          }
-          // Title/Position field
-          else if (isDm && /title|role|position/.test(kl) && !fieldResults[s.key]?.value && hm.position) {
-            fieldResults[s.key] = { value: hm.position, confidence: 0.82, sourceUrl };
-            data[s.key] = hm.position;
-          }
-          // Email field
-          else if (/email/i.test(kl) && !fieldResults[s.key]?.value && hm.value) {
+          if (isDm && /name/.test(kl) && !fieldResults[s.key]?.value && person.name) {
+            fieldResults[s.key] = { value: person.name, confidence: 0.78, sourceUrl: "apollo.io" };
+            data[s.key] = person.name;
+          } else if (isDm && /title|role|position/.test(kl) && !fieldResults[s.key]?.value && person.title) {
+            fieldResults[s.key] = { value: person.title, confidence: 0.78, sourceUrl: "apollo.io" };
+            data[s.key] = person.title;
+          } else if (/email/i.test(kl) && !fieldResults[s.key]?.value && matchingHunterEmail?.value) {
+            // Attach Hunter email to Apollo person
             fieldResults[s.key] = {
-              value: hm.value,
-              confidence: Math.min(0.95, hm.confidence / 100),
-              sourceUrl,
+              value: matchingHunterEmail.value,
+              confidence: Math.min(0.95, matchingHunterEmail.confidence / 100),
+              sourceUrl: "hunter.io + apollo.io",
             };
-            data[s.key] = hm.value;
-          }
-          // LinkedIn URL field
-          else if (isDm && /linkedin/.test(kl) && !fieldResults[s.key]?.value && hm.linkedinUrl) {
-            fieldResults[s.key] = { value: hm.linkedinUrl, confidence: 0.88, sourceUrl: hm.linkedinUrl };
-            data[s.key] = hm.linkedinUrl;
+            data[s.key] = matchingHunterEmail.value;
+          } else if (isDm && /linkedin/.test(kl) && !fieldResults[s.key]?.value && person.linkedinUrl) {
+            fieldResults[s.key] = { value: person.linkedinUrl, confidence: 0.85, sourceUrl: "apollo.io" };
+            data[s.key] = person.linkedinUrl;
           }
         }
-
-        console.log(
-          `[superScraper] Hunter merged: ${hm.firstName} ${hm.lastName} <${hm.value}> (${hm.position || hm.seniority || "?"})`,
-        );
-      } else if (hunterResult.skippedReason) {
-        console.log(`[superScraper] Hunter skipped: ${hunterResult.skippedReason}`);
       }
-    } catch (err) {
-      console.warn(`[superScraper] Hunter Domain Search failed (non-fatal):`, err);
+    } else if (apolloResult?.skippedReason) {
+      console.log(`[superScraper] Apollo skipped: ${apolloResult.skippedReason}`);
     }
   }
 

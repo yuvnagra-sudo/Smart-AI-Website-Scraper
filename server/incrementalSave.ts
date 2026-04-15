@@ -8,6 +8,7 @@ import { enrichedFirms, teamMembers, portfolioCompanies, processedFirms } from "
 import { eq, and } from "drizzle-orm";
 import { classifyDecisionMakerTier } from './decisionMakerTiers';
 import { calculateRecencyScore } from './portfolioIntelligence';
+import { findFitScore, type FitScore } from './personFitScorer';
 import type { EnrichmentResult } from "./vcEnrichment";
 
 /**
@@ -17,7 +18,8 @@ import type { EnrichmentResult } from "./vcEnrichment";
 export async function saveFirmImmediately(
   jobId: number,
   result: EnrichmentResult,
-  tierFilter: string = "all"
+  tierFilter: string = "all",
+  fitScores?: FitScore[] | null,
 ): Promise<number | null> {
   const db = await getDb();
   if (!db) {
@@ -112,6 +114,9 @@ export async function saveFirmImmediately(
       }
 
       if (includeMember) {
+        // Look up AI fit score for this member
+        const memberFit = fitScores ? findFitScore(fitScores, member.name) : undefined;
+
         await db.insert(teamMembers).values({
           jobId,
           firmId,
@@ -135,6 +140,9 @@ export async function saveFirmImmediately(
           confidenceScore: typeof member.confidenceScore === 'number' ? member.confidenceScore : null,
           decisionMakerTier: tierClassification.tier,
           tierPriority: tierClassification.priority,
+          fitScore: memberFit?.score ?? null,
+          fitReasoning: memberFit?.reasoning ?? null,
+          buyingRole: memberFit?.buyingRole ?? null,
         });
         savedMemberCount++;
       }

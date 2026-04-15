@@ -143,9 +143,25 @@ export async function generateResultsFile(
     { header: "confidenceScore", key: "confidenceScore", width: 20 },
     { header: "decisionMakerTier", key: "decisionMakerTier", width: 20 },
     { header: "tierPriority", key: "tierPriority", width: 15 },
+    { header: "fitScore", key: "fitScore", width: 12 },
+    { header: "fitTier", key: "fitTier", width: 15 },
+    { header: "buyingRole", key: "buyingRole", width: 20 },
+    { header: "fitReasoning", key: "fitReasoning", width: 50 },
   ];
 
-  allTeamMembers.forEach((member: any) => {
+  // Sort by fitScore descending (highest fit first), nulls last
+  const sortedMembers = [...allTeamMembers].sort((a: any, b: any) => {
+    const aScore = a.fitScore ?? -1;
+    const bScore = b.fitScore ?? -1;
+    return bScore - aScore;
+  });
+
+  sortedMembers.forEach((member: any) => {
+    const fitScore = member.fitScore ?? null;
+    const fitTier = fitScore != null
+      ? (fitScore >= 80 ? "High Fit" : fitScore >= 50 ? "Medium Fit" : fitScore >= 20 ? "Low Fit" : "No Fit")
+      : null;
+
     membersSheet.addRow({
       vcFirm: member.vcFirm,
       name: member.name,
@@ -167,6 +183,10 @@ export async function generateResultsFile(
       confidenceScore: member.confidenceScore,
       decisionMakerTier: member.decisionMakerTier,
       tierPriority: member.tierPriority,
+      fitScore,
+      fitTier,
+      buyingRole: member.buyingRole || "",
+      fitReasoning: member.fitReasoning || "",
     });
   });
 

@@ -43,16 +43,24 @@ function extractEmailsFromHTML(html: string, memberNames: string[]): Map<string,
   if (textEmailMatches) {
     for (const email of textEmailMatches) {
       const lowerEmail = email.toLowerCase();
-      // Filter out generic/false positive emails
-      if (!lowerEmail.includes('example.com') && 
+      // Filter out system/junk emails only — keep generic forwarding emails
+      // (info@, contact@, admin@ etc. often get forwarded to the right person)
+      const JUNK_EMAIL_PREFIXES = [
+        'noreply@', 'no-reply@', 'donotreply@', 'do-not-reply@',
+        'webmaster@', 'postmaster@', 'mailer-daemon@',
+        'unsubscribe@', 'bounce@', 'daemon@',
+      ];
+      const JUNK_EMAIL_DOMAINS = [
+        'example.com', 'example.org', 'example.net',
+        'test.com', 'localhost', 'placeholder.com',
+        'email.com', 'domain.com', 'company.com',
+        'yourcompany.com', 'yourdomain.com', 'sentry.io',
+        'wixpress.com', 'mailinator.com', 'tempmail.com',
+      ];
+      const emailDomain = lowerEmail.split('@')[1] || '';
+      if (!JUNK_EMAIL_PREFIXES.some(p => lowerEmail.startsWith(p)) &&
+          !JUNK_EMAIL_DOMAINS.some(d => emailDomain === d) &&
           !lowerEmail.includes('placeholder') &&
-          !lowerEmail.startsWith('info@') &&
-          !lowerEmail.startsWith('contact@') &&
-          !lowerEmail.startsWith('hello@') &&
-          !lowerEmail.startsWith('support@') &&
-          !lowerEmail.startsWith('careers@') &&
-          !lowerEmail.startsWith('press@') &&
-          !lowerEmail.startsWith('media@') &&
           !allEmails.includes(lowerEmail)) {
         allEmails.push(lowerEmail);
       }

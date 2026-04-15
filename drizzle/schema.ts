@@ -56,6 +56,10 @@ export const enrichmentJobs = mysqlTable("enrichmentJobs", {
   objective:    text("objective"),      // Plain-text user objective
   columnMappingJson: text("columnMappingJson"), // JSON: {companyNameColumn, websiteUrlColumn, descriptionColumn?}
   errorMessage: text("errorMessage"),
+  // Outreach context for AI fit scoring
+  outreachContext: text("outreachContext"),     // "We sell X to Y"
+  targetPersona: text("targetPersona"),         // "VP Engineering, CTO, technical leads"
+  exclusionCriteria: text("exclusionCriteria"), // "Interns, admin staff, HR"
   // Scraper stats counters (updated incrementally as each firm is processed)
   emailsFound:     int("emailsFound").default(0),     // Total email addresses found across all firms
   peopleFound:     int("peopleFound").default(0),     // Total named people/contacts found
@@ -132,6 +136,10 @@ export const teamMembers = mysqlTable("teamMembers", {
   confidenceScore: int("confidenceScore"),
   decisionMakerTier: varchar("decisionMakerTier", { length: 20 }),
   tierPriority: int("tierPriority"),
+  // AI fit scoring + buying committee identification
+  fitScore: int("fitScore"),                                    // 0-100
+  fitReasoning: text("fitReasoning"),                           // "VP Engineering - direct decision maker for dev tools"
+  buyingRole: varchar("buyingRole", { length: 30 }),            // "Decision Maker" | "Technical Buyer" | "Financial Buyer" | "Influencer" | "Gatekeeper"
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 // Note: Unique constraint removed - deduplication handled in-memory before insert
