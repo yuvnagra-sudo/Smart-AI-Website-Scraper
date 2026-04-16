@@ -74,12 +74,21 @@ function extractEmailsFromHTML(html: string, memberNames: string[]): Map<string,
   // against extracted emails. Handles short names (Al, Bo), initials (JS), and all
   // common corporate formats across company sizes and regions.
   //
+  // AMBIGUITY HANDLING: Patterns shared by multiple people (e.g. "js" matches both
+  // "John Smith" and "Jane Sullivan") are excluded from matching. Only unique patterns
+  // are used, so no person gets wrongly attributed another's email.
+  //
   // Based on industry data:
   //   - Small companies (<50): firstname@ dominates (70%+)
   //   - Mid companies (50-200): firstname.lastname@ and flastname@ crossover
   //   - Large companies (1000+): first.last@ (48%+), flast@ common
   //   - Finance/legal: lastname.firstname@ (~25%)
   //   - Separators: dot (most common), underscore, hyphen all used
+
+  // Step 1: Generate patterns for ALL people first
+  const allMemberPatterns = new Map<string, Set<string>>(); // memberName → patterns
+  const patternOwners = new Map<string, string[]>();         // pattern → [memberNames who claim it]
+
   for (const memberName of memberNames) {
     const nameParts = memberName.toLowerCase()
       .replace(/['']/g, '')        // O'Brien → obrien
@@ -89,43 +98,37 @@ function extractEmailsFromHTML(html: string, memberNames: string[]): Map<string,
 
     const firstName = nameParts[0];
     const lastName = nameParts[nameParts.length - 1];
-    const fi = firstName[0]; // first initial
-    const li = lastName[0];  // last initial
+    const fi = firstName[0];
+    const li = lastName[0];
 
-    // For hyphenated last names like "Smith-Jones", also try the combined form
     const lastNameFull = nameParts.length > 2
-      ? nameParts.slice(1).join('')   // all parts after first = last name combined
+      ? nameParts.slice(1).join('')
       : lastName;
     const lastNameHyphen = nameParts.length > 2
-      ? nameParts.slice(1).join('-')  // all parts after first with hyphens
+      ? nameParts.slice(1).join('-')
       : lastName;
 
     const patterns = new Set<string>();
 
     // === SEPARATORS: dot, underscore, hyphen, none ===
     for (const sep of ['.', '_', '-', '']) {
-      // firstname{sep}lastname (most common pattern globally)
       patterns.add(`${firstName}${sep}${lastName}`);
-      // lastname{sep}firstname (common in finance/legal, ~25%)
       patterns.add(`${lastName}${sep}${firstName}`);
-      // f{sep}lastname (first initial + last, common at large corps)
       patterns.add(`${fi}${sep}${lastName}`);
-      // firstname{sep}l (first + last initial)
       patterns.add(`${firstName}${sep}${li}`);
-      // l{sep}firstname (last initial + first, less common but exists)
       patterns.add(`${li}${sep}${firstName}`);
     }
 
     // === INITIALS ===
-    patterns.add(`${fi}${li}`);           // fl
-    patterns.add(`${fi}.${li}`);          // f.l
-    patterns.add(`${li}${fi}`);           // lf
-    patterns.add(`${li}.${fi}`);          // l.f
+    patterns.add(`${fi}${li}`);
+    patterns.add(`${fi}.${li}`);
+    patterns.add(`${li}${fi}`);
+    patterns.add(`${li}.${fi}`);
 
-    // === FIRST NAME ONLY (common at startups, <50 employees) ===
+    // === FIRST NAME ONLY ===
     patterns.add(firstName);
 
-    // === LAST NAME ONLY (some companies) ===
+    // === LAST NAME ONLY ===
     patterns.add(lastName);
 
     // === HYPHENATED / COMPOUND LAST NAMES ===
@@ -144,37 +147,57 @@ function extractEmailsFromHTML(html: string, memberNames: string[]): Map<string,
       const mi = middleName[0];
 
       for (const sep of ['.', '_', '-', '']) {
-        // firstname{sep}middle{sep}lastname
         patterns.add(`${firstName}${sep}${middleName}${sep}${lastName}`);
-        // f{sep}middle{sep}lastname
         patterns.add(`${fi}${sep}${middleName}${sep}${lastName}`);
-        // firstname{sep}m{sep}lastname (middle initial)
         patterns.add(`${firstName}${sep}${mi}${sep}${lastName}`);
-        // f{sep}m{sep}lastname
         patterns.add(`${fi}${sep}${mi}${sep}${lastName}`);
       }
-      // fml (all initials)
       patterns.add(`${fi}${mi}${li}`);
       patterns.add(`${fi}.${mi}.${li}`);
-      // fmlastname
       patterns.add(`${fi}${mi}${lastName}`);
       patterns.add(`${fi}.${mi}.${lastName}`);
-      // firstnamelastname (skip middle)
       patterns.add(`${firstName}${lastName}`);
       patterns.add(`${firstName}.${lastName}`);
     }
 
-    // === NUMBERED VARIATIONS (when multiple people share a name) ===
+    // === NUMBERED VARIATIONS ===
     for (const n of ['1', '2', '3']) {
       patterns.add(`${firstName}.${lastName}${n}`);
       patterns.add(`${firstName}${lastName}${n}`);
       patterns.add(`${fi}${lastName}${n}`);
     }
 
+    allMemberPatterns.set(memberName, patterns);
+
+    // Track which patterns belong to which people
+    Array.from(patterns).forEach(p => {
+      const owners = patternOwners.get(p) || [];
+      owners.push(memberName);
+      patternOwners.set(p, owners);
+    });
+  }
+
+  // Step 2: Find ambiguous patterns (claimed by 2+ people)
+  const ambiguousPatterns = new Set<string>();
+  Array.from(patternOwners.entries()).forEach(([pattern, owners]) => {
+    if (owners.length > 1) {
+      ambiguousPatterns.add(pattern);
+    }
+  });
+  if (ambiguousPatterns.size > 0) {
+    console.log(`[extractEmailsFromHTML] ${ambiguousPatterns.size} ambiguous patterns excluded (shared by multiple people)`);
+  }
+
+  // Step 3: Match emails using only UNIQUE patterns per person
+  for (const memberName of memberNames) {
+    const patterns = allMemberPatterns.get(memberName);
+    if (!patterns) continue;
+
     for (const email of allEmails) {
       const emailLocal = email.split('@')[0].toLowerCase();
 
-      if (patterns.has(emailLocal)) {
+      // Only match if this pattern uniquely identifies this person
+      if (patterns.has(emailLocal) && !ambiguousPatterns.has(emailLocal)) {
         emailMap.set(memberName, email);
         console.log(`[extractEmailsFromHTML] Matched email ${email} to ${memberName} (pattern: ${emailLocal})`);
         break;
