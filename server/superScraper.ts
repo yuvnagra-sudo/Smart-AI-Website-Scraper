@@ -1547,39 +1547,75 @@ export async function scrapeUrlSuper(
     if (apolloResult && apolloResult.people.length > 0) {
       console.log(`[superScraper] Apollo found ${apolloResult.people.length} people at ${_domain}`);
 
-      // Cross-reference Apollo people with Hunter emails
       const hunterEmails = hunterResult?.allEmails ?? [];
 
+      // Resolve obfuscated Apollo names via SERP (if Serper key available)
+      let serperAvailable = false;
+      let resolveLinkedInFn: typeof import("./dataSources/serperSearch").resolveLinkedInViaSERP | null = null;
+      try {
+        const serperModule = await import("./dataSources/serperSearch");
+        serperAvailable = serperModule.isSerperAvailable();
+        resolveLinkedInFn = serperModule.resolveLinkedInViaSERP;
+      } catch { /* serper not available */ }
+
       for (const person of apolloResult.people) {
-        // Cross-reference with Hunter emails by name matching
+        let resolvedName = person.name;
+        let resolvedLinkedin: string | null = null;
+
+        // If Apollo returned an obfuscated last name (contains *), resolve via SERP
+        const hasObfuscatedLast = person.lastName.includes("*") || person.lastName.length <= 2;
+        if (hasObfuscatedLast && serperAvailable && resolveLinkedInFn && person.firstName) {
+          try {
+            const serpResult = await resolveLinkedInFn(
+              person.firstName,
+              person.title,
+              person.organizationName || _domain,
+              _domain,
+            );
+            if (serpResult.fullName) {
+              resolvedName = serpResult.fullName;
+              console.log(`[superScraper] SERP resolved: ${person.firstName} ${person.lastName} → ${resolvedName}`);
+            }
+            if (serpResult.linkedinUrl) {
+              resolvedLinkedin = serpResult.linkedinUrl;
+            }
+            // Small delay between SERP calls
+            await new Promise(resolve => setTimeout(resolve, 500));
+          } catch (err) {
+            console.warn(`[superScraper] SERP resolve failed for ${person.firstName} (non-fatal):`, err);
+          }
+        }
+
+        // Cross-reference with Hunter emails by name
         const matchingHunterEmail = hunterEmails.find(he => {
           const hunterName = `${he.firstName} ${he.lastName}`.trim().toLowerCase();
-          const apolloName = person.name.toLowerCase();
-          return hunterName === apolloName ||
-            (he.firstName && apolloName.includes(he.firstName.toLowerCase()) &&
-             he.lastName && apolloName.includes(he.lastName.toLowerCase()));
+          const nameToMatch = resolvedName.toLowerCase();
+          return hunterName === nameToMatch ||
+            (he.firstName && nameToMatch.includes(he.firstName.toLowerCase()) &&
+             he.lastName && nameToMatch.includes(he.lastName.toLowerCase()));
         });
 
-        // Apollo search returns limited data (name, title, org — no email/linkedin/location).
-        // Merge what we have into DM fields if still empty.
+        // Merge into DM fields if still empty
         for (const s of sections) {
           const kl = s.key.toLowerCase();
           const isDm = /decision.?maker|dm\d|contact|person/.test(kl);
 
-          if (isDm && /name/.test(kl) && !fieldResults[s.key]?.value && person.name) {
-            fieldResults[s.key] = { value: person.name, confidence: CONFIDENCE.EXTRACTED, sourceUrl: "apollo.io" };
-            data[s.key] = person.name;
+          if (isDm && /name/.test(kl) && !fieldResults[s.key]?.value && resolvedName) {
+            fieldResults[s.key] = { value: resolvedName, confidence: CONFIDENCE.EXTRACTED, sourceUrl: "apollo.io" };
+            data[s.key] = resolvedName;
           } else if (isDm && /title|role|position/.test(kl) && !fieldResults[s.key]?.value && person.title) {
             fieldResults[s.key] = { value: person.title, confidence: CONFIDENCE.EXTRACTED, sourceUrl: "apollo.io" };
             data[s.key] = person.title;
           } else if (/email/i.test(kl) && !fieldResults[s.key]?.value && matchingHunterEmail?.value) {
-            // Attach Hunter email to Apollo person (cross-referenced by name)
             fieldResults[s.key] = {
               value: matchingHunterEmail.value,
               confidence: Math.min(CONFIDENCE.VERIFIED, matchingHunterEmail.confidence / 100),
               sourceUrl: "hunter.io + apollo.io",
             };
             data[s.key] = matchingHunterEmail.value;
+          } else if (isDm && /linkedin/.test(kl) && !fieldResults[s.key]?.value && resolvedLinkedin) {
+            fieldResults[s.key] = { value: resolvedLinkedin, confidence: CONFIDENCE.EXTRACTED, sourceUrl: "serper + apollo.io" };
+            data[s.key] = resolvedLinkedin;
           }
         }
       }

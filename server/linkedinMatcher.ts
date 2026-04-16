@@ -337,60 +337,28 @@ async function matchLinkedInURLsToNamesInternal(
 }
 
 /**
- * Search Google for LinkedIn profile URL
+ * Search for LinkedIn profile URL via Serper (Google SERP API).
+ * Replaces old raw Google scraping which failed 80-90% of the time.
+ * Uses the same SERPER_API_KEY as the gtm-offer-engine repo.
  */
 export async function searchLinkedInViaGoogle(
   personName: string,
   companyName: string
 ): Promise<string | null> {
   try {
-    // Use Google search to find LinkedIn profile
-    const searchQuery = `${personName} ${companyName} site:linkedin.com/in/`;
-    const encodedQuery = encodeURIComponent(searchQuery);
-    
-    // Note: This is a simplified version. In production, you'd want to use:
-    // - Google Custom Search API (100 free queries/day)
-    // - SerpAPI (paid service with better reliability)
-    // - Bing Search API (alternative)
-    
-    const searchUrl = `https://www.google.com/search?q=${encodedQuery}`;
-    
-    const response = await axios.get(searchUrl, {
-      timeout: 10000,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      },
-    });
-    
-    const $ = cheerio.load(response.data);
-    
-    // Extract LinkedIn URLs from search results
-    const linkedinUrls: string[] = [];
-    
-    $("a[href*='linkedin.com/in/']").each((_, el) => {
-      const href = $(el).attr("href");
-      if (href) {
-        // Google wraps URLs, extract the actual LinkedIn URL
-        const match = href.match(/linkedin\.com\/in\/([^&\/\?]+)/);
-        if (match) {
-          const cleanUrl = `https://www.linkedin.com/in/${match[1]}`;
-          if (!linkedinUrls.includes(cleanUrl)) {
-            linkedinUrls.push(cleanUrl);
-          }
-        }
-      }
-    });
-    
-    // Return the first result (most relevant)
-    if (linkedinUrls.length > 0) {
-      // Validate that it's actually accessible
-      const isValid = await validateLinkedInURL(linkedinUrls[0]);
-      return isValid ? linkedinUrls[0] : null; // "verified" or "unverified" both truthy
+    const { resolveLinkedInViaSERP, isSerperAvailable } = await import("./dataSources/serperSearch");
+    if (!isSerperAvailable()) {
+      console.log(`[linkedinMatcher] Serper not available (SERPER_API_KEY not set), skipping SERP search`);
+      return null;
     }
-    
-    return null;
+
+    const nameParts = personName.split(/\s+/);
+    const firstName = nameParts[0] || personName;
+
+    const result = await resolveLinkedInViaSERP(firstName, "", companyName);
+    return result.linkedinUrl;
   } catch (error) {
-    console.error(`Error searching Google for LinkedIn profile:`, error);
+    console.error(`Error searching for LinkedIn profile via Serper:`, error);
     return null;
   }
 }
