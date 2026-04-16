@@ -69,39 +69,60 @@ function extractEmailsFromHTML(html: string, memberNames: string[]): Map<string,
   
   console.log(`[extractEmailsFromHTML] Found ${allEmails.length} unique emails on page`);
   
-  // Try to match emails to member names
-  // Require minimum name length to prevent false matches (e.g. "co" matching "contact@")
+  // Match emails to member names using pattern generation (not substring search).
+  // Generates all plausible email patterns for each person, then checks for exact
+  // matches. This handles short names (Al, Bo) and initials (JS) without false
+  // positives from substring matching ("co" won't match "contact@").
   for (const memberName of memberNames) {
-    const nameParts = memberName.toLowerCase().split(/\s+/);
-    const firstName = nameParts[0] || '';
-    const lastName = nameParts[nameParts.length - 1] || '';
+    const nameParts = memberName.toLowerCase().split(/\s+/).filter(p => p.length > 0);
+    if (nameParts.length < 2) continue;
 
-    // Skip if names are too short for reliable substring matching
-    if (firstName.length < 3 || lastName.length < 2) continue;
+    const firstName = nameParts[0];
+    const lastName = nameParts[nameParts.length - 1];
+    const fi = firstName[0]; // first initial
+    const li = lastName[0];  // last initial
+
+    // Generate all plausible email local-part patterns for this person
+    const patterns = new Set<string>([
+      // firstname.lastname, firstname-lastname, firstnamelastname
+      `${firstName}.${lastName}`,
+      `${firstName}-${lastName}`,
+      `${firstName}${lastName}`,
+      // lastname.firstname, lastname-firstname, lastnamefirstname
+      `${lastName}.${firstName}`,
+      `${lastName}-${firstName}`,
+      `${lastName}${firstName}`,
+      // f.lastname, flastname, f-lastname
+      `${fi}.${lastName}`,
+      `${fi}${lastName}`,
+      `${fi}-${lastName}`,
+      // firstname.l, firstnamel, firstname-l
+      `${firstName}.${li}`,
+      `${firstName}${li}`,
+      `${firstName}-${li}`,
+      // fl (initials)
+      `${fi}${li}`,
+      `${fi}.${li}`,
+      // firstname only (common for small companies)
+      firstName,
+    ]);
+
+    // If there's a middle name, add variations with it
+    if (nameParts.length > 2) {
+      const middleName = nameParts[1];
+      const mi = middleName[0];
+      patterns.add(`${firstName}.${middleName}.${lastName}`);
+      patterns.add(`${firstName}${middleName}${lastName}`);
+      patterns.add(`${fi}${mi}${lastName}`);
+      patterns.add(`${fi}.${mi}.${lastName}`);
+    }
 
     for (const email of allEmails) {
-      const emailLocal = email.split('@')[0];
+      const emailLocal = email.split('@')[0].toLowerCase();
 
-      // Strong match: both first AND last name in local part
-      if (emailLocal.includes(firstName) && emailLocal.includes(lastName)) {
+      if (patterns.has(emailLocal)) {
         emailMap.set(memberName, email);
-        console.log(`[extractEmailsFromHTML] Matched email ${email} to ${memberName} (strong: first+last)`);
-        break;
-      }
-      // Exact patterns: firstname.lastname, firstnamelastname, f.lastname, flastname
-      if (emailLocal === `${firstName}.${lastName}` || emailLocal === `${firstName}${lastName}`) {
-        emailMap.set(memberName, email);
-        console.log(`[extractEmailsFromHTML] Matched email ${email} to ${memberName} (exact pattern)`);
-        break;
-      }
-      if (firstName.length > 0 && lastName.length > 1 && emailLocal === `${firstName[0]}${lastName}`) {
-        emailMap.set(memberName, email);
-        console.log(`[extractEmailsFromHTML] Matched email ${email} to ${memberName} (initial+last)`);
-        break;
-      }
-      if (firstName.length > 0 && lastName.length > 1 && emailLocal === `${firstName[0]}.${lastName}`) {
-        emailMap.set(memberName, email);
-        console.log(`[extractEmailsFromHTML] Matched email ${email} to ${memberName} (initial.last)`);
+        console.log(`[extractEmailsFromHTML] Matched email ${email} to ${memberName} (pattern: ${emailLocal})`);
         break;
       }
     }
