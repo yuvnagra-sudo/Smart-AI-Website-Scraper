@@ -21,6 +21,14 @@ import { type ScrapeProfile, GENERAL_PROFILE } from "./scrapeProfile";
 /**
  * Extract emails from HTML and try to match them to team member names
  */
+// Best generic email prefixes ranked by likelihood of reaching a decision maker
+const GENERIC_EMAIL_RANK = [
+  'info', 'contact', 'hello', 'admin', 'office',
+  'team', 'general', 'enquiries', 'inquiries',
+  'sales', 'partnerships', 'business',
+  'support', 'help',
+];
+
 function extractEmailsFromHTML(html: string, memberNames: string[]): Map<string, string> {
   const emailMap = new Map<string, string>();
   const $ = cheerio.load(html);
@@ -240,7 +248,30 @@ function extractEmailsFromHTML(html: string, memberNames: string[]): Map<string,
     }
   }
   
-  console.log(`[extractEmailsFromHTML] Matched ${emailMap.size}/${memberNames.length} members to emails`);
+  // Collect unmatched generic/forwarding emails as fallback contacts
+  const usedEmails = new Set(Array.from(emailMap.values()));
+  const genericEmails: string[] = [];
+  for (const email of allEmails) {
+    if (usedEmails.has(email)) continue;
+    const prefix = email.split('@')[0].toLowerCase();
+    if (GENERIC_EMAIL_RANK.includes(prefix)) {
+      genericEmails.push(email);
+    }
+  }
+  // Sort by rank (info@ > contact@ > hello@ > ...)
+  genericEmails.sort((a, b) => {
+    const aRank = GENERIC_EMAIL_RANK.indexOf(a.split('@')[0].toLowerCase());
+    const bRank = GENERIC_EMAIL_RANK.indexOf(b.split('@')[0].toLowerCase());
+    return aRank - bRank;
+  });
+
+  // Attach best generic email as __generic__ for fallback use
+  if (genericEmails.length > 0) {
+    emailMap.set('__generic__', genericEmails[0]);
+    console.log(`[extractEmailsFromHTML] Best generic fallback: ${genericEmails[0]}`);
+  }
+
+  console.log(`[extractEmailsFromHTML] Matched ${emailMap.size - (emailMap.has('__generic__') ? 1 : 0)}/${memberNames.length} members to personal emails`);
   return emailMap;
 }
 
@@ -1257,11 +1288,37 @@ If you cannot determine any stages, return: {"stages": []}`;
         })
       );
       
+      // Fallback: if NO people were found at all, create a generic contact entry
+      // so the user at least gets a way to reach the company
+      const genericEmail = mainPageEmails.get('__generic__') || "";
+      if (enrichedMembers.length === 0 && genericEmail) {
+        console.log(`[extractTeamMembers] No people found — creating fallback contact with ${genericEmail}`);
+        enrichedMembers.push({
+          name: companyName,
+          title: "General Contact (no individual found)",
+          jobFunction: "",
+          specialization: "",
+          linkedinUrl: "",
+          email: genericEmail,
+          portfolioCompanies: "",
+          investmentFocus: "",
+          stagePreference: "",
+          checkSizeRange: "",
+          geographicFocus: "",
+          investmentThesis: "",
+          notableInvestments: "",
+          yearsExperience: "",
+          background: "",
+          dataSourceUrl: teamUrl,
+          confidenceScore: "Low",
+        });
+      }
+
       // Log data quality metrics
       const linkedinCount = enrichedMembers.filter(m => m.linkedinUrl && m.linkedinUrl.length > 0).length;
       const specializationCount = enrichedMembers.filter(m => m.specialization && m.specialization.length > 0).length;
       const emailCount = enrichedMembers.filter(m => m.email && m.email.length > 0).length;
-      
+
       console.log(`[extractTeamMembers] Final enriched members: ${enrichedMembers.length}`);
       console.log(`[extractTeamMembers] Data quality metrics:`);
       console.log(`[extractTeamMembers]   - LinkedIn URLs: ${linkedinCount}/${enrichedMembers.length} (${Math.round(linkedinCount / enrichedMembers.length * 100)}%)`);
