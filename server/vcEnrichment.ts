@@ -184,23 +184,58 @@ function extractEmailsFromHTML(html: string, memberNames: string[]): Map<string,
       ambiguousPatterns.add(pattern);
     }
   });
-  if (ambiguousPatterns.size > 0) {
-    console.log(`[extractEmailsFromHTML] ${ambiguousPatterns.size} ambiguous patterns excluded (shared by multiple people)`);
-  }
 
-  // Step 3: Match emails using only UNIQUE patterns per person
+  // Step 3: Two-pass matching — specific patterns first, then ambiguous
+  //
+  // Pass 1: Match using UNIQUE patterns only (safe, no conflicts)
+  //   John Smith matches john.smith@, jsmith@
+  //   Jane Sullivan matches jane.sullivan@, jsullivan@
+  //
+  // Pass 2: For people STILL unmatched, try ambiguous patterns.
+  //   If only ONE claimant of an ambiguous pattern is still unmatched, it's theirs.
+  //   Example: "js@" is ambiguous (John + Jane), but Jane already matched
+  //   jsullivan@ in pass 1 → John is the only unmatched claimant → js@ is John's.
+
+  // Pass 1: unique patterns
   for (const memberName of memberNames) {
     const patterns = allMemberPatterns.get(memberName);
     if (!patterns) continue;
 
     for (const email of allEmails) {
       const emailLocal = email.split('@')[0].toLowerCase();
-
-      // Only match if this pattern uniquely identifies this person
       if (patterns.has(emailLocal) && !ambiguousPatterns.has(emailLocal)) {
         emailMap.set(memberName, email);
-        console.log(`[extractEmailsFromHTML] Matched email ${email} to ${memberName} (pattern: ${emailLocal})`);
+        console.log(`[extractEmailsFromHTML] Matched email ${email} to ${memberName} (unique pattern: ${emailLocal})`);
         break;
+      }
+    }
+  }
+
+  // Pass 2: ambiguous patterns — only for unmatched people, only if one claimant remains
+  const unmatchedMembers = memberNames.filter(name => !emailMap.has(name) && allMemberPatterns.has(name));
+
+  if (unmatchedMembers.length > 0 && ambiguousPatterns.size > 0) {
+    for (const memberName of unmatchedMembers) {
+      const patterns = allMemberPatterns.get(memberName);
+      if (!patterns) continue;
+
+      for (const email of allEmails) {
+        // Skip emails already assigned to someone
+        if (Array.from(emailMap.values()).includes(email)) continue;
+
+        const emailLocal = email.split('@')[0].toLowerCase();
+        if (!patterns.has(emailLocal) || !ambiguousPatterns.has(emailLocal)) continue;
+
+        // This pattern is ambiguous — check how many of its claimants are still unmatched
+        const claimants = patternOwners.get(emailLocal) || [];
+        const unmatchedClaimants = claimants.filter(name => !emailMap.has(name));
+
+        if (unmatchedClaimants.length === 1 && unmatchedClaimants[0] === memberName) {
+          // Only one unmatched claimant left — it must be theirs
+          emailMap.set(memberName, email);
+          console.log(`[extractEmailsFromHTML] Matched email ${email} to ${memberName} (resolved ambiguous: ${emailLocal}, other claimants already matched)`);
+          break;
+        }
       }
     }
   }
