@@ -58,6 +58,7 @@ import { fetchViaJina, fetchWebsiteContentHybrid } from "./jinaFetcher";
 import { queuedLLMCall } from "./_core/llmQueue";
 import { detectTeamMemberProfileLinks } from "./deepTeamProfileScraper";
 import { generateStandardURLs, discoverRelevantURLs } from "./multiUrlDiscovery";
+import { CONFIDENCE } from "./confidenceLevels";
 import type { AgentSection, AgentScrapeResult, ScrapeStats, ScrapeDiagnostics } from "./agentScraper";
 
 // ---------------------------------------------------------------------------
@@ -391,7 +392,7 @@ function deterministicExtract(
       if (uniqueEmails.length > 0) contactParts.push(...uniqueEmails.slice(0, 3));
       if (uniquePhones.length > 0) contactParts.push(uniquePhones[0]);
       if (contactParts.length > 0) {
-        result[s.key] = { value: contactParts.join("; "), confidence: 0.82, sourceUrl: pages[0]?.url };
+        result[s.key] = { value: contactParts.join("; "), confidence: CONFIDENCE.EXTRACTED, sourceUrl: pages[0]?.url };
       }
     }
     // Decision maker fields — ONLY gets name + title from JSON-LD, never raw emails
@@ -401,7 +402,7 @@ function deterministicExtract(
         if (person?.name) {
           const parts = [person.name];
           if (person.jobTitle) parts.push(person.jobTitle);
-          result[s.key] = { value: parts.join(", "), confidence: 0.80, sourceUrl: pages[0]?.url };
+          result[s.key] = { value: parts.join(", "), confidence: CONFIDENCE.EXTRACTED, sourceUrl: pages[0]?.url };
         }
       }
       // Don't fall back to email here — let the LLM handle this field
@@ -410,32 +411,32 @@ function deterministicExtract(
     else if (/linkedin/.test(combined)) {
       if (/company|firm|org/.test(combined)) {
         if (uniqueCompanies.length > 0) {
-          result[s.key] = { value: uniqueCompanies[0], confidence: 0.88, sourceUrl: pages[0]?.url };
+          result[s.key] = { value: uniqueCompanies[0], confidence: CONFIDENCE.VERIFIED, sourceUrl: pages[0]?.url };
         }
       } else {
         if (uniqueProfiles.length > 0) {
-          result[s.key] = { value: uniqueProfiles[0], confidence: 0.88, sourceUrl: pages[0]?.url };
+          result[s.key] = { value: uniqueProfiles[0], confidence: CONFIDENCE.VERIFIED, sourceUrl: pages[0]?.url };
         }
       }
     }
     // Phone fields
     else if (/phone|tel/.test(combined)) {
       if (uniquePhones.length > 0) {
-        result[s.key] = { value: uniquePhones[0], confidence: 0.80, sourceUrl: pages[0]?.url };
+        result[s.key] = { value: uniquePhones[0], confidence: CONFIDENCE.EXTRACTED, sourceUrl: pages[0]?.url };
       }
     }
     // Name fields (from JSON-LD)
     else if ((/\bname\b/.test(kl) || /\bname\b/.test(ll)) && allJsonLd.length > 0) {
       const person = allJsonLd.find(j => j.name);
       if (person?.name) {
-        result[s.key] = { value: person.name, confidence: 0.85, sourceUrl: pages[0]?.url };
+        result[s.key] = { value: person.name, confidence: CONFIDENCE.EXTRACTED, sourceUrl: pages[0]?.url };
       }
     }
     // Title/role fields (from JSON-LD)
     else if ((/title|role|position/.test(kl) || /title|role|position/.test(ll)) && allJsonLd.length > 0) {
       const person = allJsonLd.find(j => j.jobTitle);
       if (person?.jobTitle) {
-        result[s.key] = { value: person.jobTitle, confidence: 0.85, sourceUrl: pages[0]?.url };
+        result[s.key] = { value: person.jobTitle, confidence: CONFIDENCE.EXTRACTED, sourceUrl: pages[0]?.url };
       }
     }
     // Qualification / notes / fit fields — leave for LLM (no deterministic extraction)
@@ -1090,6 +1091,9 @@ export async function scrapeUrlSuper(
     topPagePreview: "",
   };
 
+  // Track non-fatal failures for visibility (never silent)
+  const extractionFailures: string[] = [];
+
   // ── PHASE 1: FAST DISCOVERY & PARALLEL FETCH ─────────────────────────────
 
   if (isCancelled?.()) throw new Error("JOB_CANCELLED");
@@ -1244,11 +1248,12 @@ export async function scrapeUrlSuper(
       // Update fieldResults with LLM results (confidence 0.75 for LLM-extracted)
       for (const s of sections) {
         if (data[s.key]?.trim() && !(fieldResults[s.key]?.value?.trim())) {
-          fieldResults[s.key] = { value: data[s.key], confidence: 0.75, sourceUrl: allPages[0]?.url };
+          fieldResults[s.key] = { value: data[s.key], confidence: CONFIDENCE.INFERRED, sourceUrl: allPages[0]?.url };
         }
       }
     } catch (err) {
       console.warn(`[superScraper] Phase 3 failed (non-fatal):`, err);
+      extractionFailures.push(`Phase 3 LLM extraction: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     const phase3Filled = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD).length;
@@ -1393,7 +1398,7 @@ export async function scrapeUrlSuper(
         // Update fieldResults from data for gate checks
         for (const s of sections) {
           if (data[s.key]?.trim() && !(fieldResults[s.key]?.value?.trim())) {
-            fieldResults[s.key] = { value: data[s.key], confidence: 0.70, sourceUrl: "phase4" };
+            fieldResults[s.key] = { value: data[s.key], confidence: CONFIDENCE.INFERRED, sourceUrl: "phase4" };
           }
         }
 
@@ -1438,6 +1443,7 @@ export async function scrapeUrlSuper(
       }
     } catch (err) {
       console.warn(`[superScraper] Phase 5a validation failed (non-fatal):`, err);
+      extractionFailures.push(`Phase 5a validation: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -1448,6 +1454,7 @@ export async function scrapeUrlSuper(
       data = await llmExtractFields(allPages, sections, systemPrompt, data, MODEL_NANO);
     } catch (err) {
       console.warn(`[superScraper] Phase 5b failed (non-fatal):`, err);
+      extractionFailures.push(`Phase 5b consolidation: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -1480,6 +1487,7 @@ export async function scrapeUrlSuper(
         return hunterResult;
       } catch (err) {
         console.warn(`[superScraper] Hunter Domain Search failed (non-fatal):`, err);
+        extractionFailures.push(`Hunter API: ${err instanceof Error ? err.message : String(err)}`);
         return null;
       }
     })();
@@ -1491,6 +1499,7 @@ export async function scrapeUrlSuper(
         return await apolloPeopleSearch(_domain);
       } catch (err) {
         console.warn(`[superScraper] Apollo People Search failed (non-fatal):`, err);
+        extractionFailures.push(`Apollo API: ${err instanceof Error ? err.message : String(err)}`);
         return null;
       }
     })();
@@ -1509,10 +1518,10 @@ export async function scrapeUrlSuper(
 
         if (isDm && /name/.test(kl) && !fieldResults[s.key]?.value && hm.firstName) {
           const fullName = `${hm.firstName} ${hm.lastName}`.trim();
-          fieldResults[s.key] = { value: fullName, confidence: 0.82, sourceUrl };
+          fieldResults[s.key] = { value: fullName, confidence: CONFIDENCE.EXTRACTED, sourceUrl };
           data[s.key] = fullName;
         } else if (isDm && /title|role|position/.test(kl) && !fieldResults[s.key]?.value && hm.position) {
-          fieldResults[s.key] = { value: hm.position, confidence: 0.82, sourceUrl };
+          fieldResults[s.key] = { value: hm.position, confidence: CONFIDENCE.EXTRACTED, sourceUrl };
           data[s.key] = hm.position;
         } else if (/email/i.test(kl) && !fieldResults[s.key]?.value && hm.value) {
           fieldResults[s.key] = {
@@ -1522,7 +1531,7 @@ export async function scrapeUrlSuper(
           };
           data[s.key] = hm.value;
         } else if (isDm && /linkedin/.test(kl) && !fieldResults[s.key]?.value && hm.linkedinUrl) {
-          fieldResults[s.key] = { value: hm.linkedinUrl, confidence: 0.88, sourceUrl: hm.linkedinUrl };
+          fieldResults[s.key] = { value: hm.linkedinUrl, confidence: CONFIDENCE.VERIFIED, sourceUrl: hm.linkedinUrl };
           data[s.key] = hm.linkedinUrl;
         }
       }
@@ -1557,10 +1566,10 @@ export async function scrapeUrlSuper(
           const isDm = /decision.?maker|dm\d|contact|person/.test(kl);
 
           if (isDm && /name/.test(kl) && !fieldResults[s.key]?.value && person.name) {
-            fieldResults[s.key] = { value: person.name, confidence: 0.78, sourceUrl: "apollo.io" };
+            fieldResults[s.key] = { value: person.name, confidence: CONFIDENCE.EXTRACTED, sourceUrl: "apollo.io" };
             data[s.key] = person.name;
           } else if (isDm && /title|role|position/.test(kl) && !fieldResults[s.key]?.value && person.title) {
-            fieldResults[s.key] = { value: person.title, confidence: 0.78, sourceUrl: "apollo.io" };
+            fieldResults[s.key] = { value: person.title, confidence: CONFIDENCE.EXTRACTED, sourceUrl: "apollo.io" };
             data[s.key] = person.title;
           } else if (/email/i.test(kl) && !fieldResults[s.key]?.value && matchingHunterEmail?.value) {
             // Attach Hunter email to Apollo person
@@ -1571,7 +1580,7 @@ export async function scrapeUrlSuper(
             };
             data[s.key] = matchingHunterEmail.value;
           } else if (isDm && /linkedin/.test(kl) && !fieldResults[s.key]?.value && person.linkedinUrl) {
-            fieldResults[s.key] = { value: person.linkedinUrl, confidence: 0.85, sourceUrl: "apollo.io" };
+            fieldResults[s.key] = { value: person.linkedinUrl, confidence: CONFIDENCE.EXTRACTED, sourceUrl: "apollo.io" };
             data[s.key] = person.linkedinUrl;
           }
         }
@@ -1684,11 +1693,19 @@ export async function scrapeUrlSuper(
   };
 
   const durationSec = ((Date.now() - startMs) / 1000).toFixed(1);
+
+  // Log failure summary (never silent — always visible)
+  if (extractionFailures.length > 0) {
+    console.warn(`[superScraper] ⚠️ ${extractionFailures.length} non-fatal failures for ${url}:`);
+    extractionFailures.forEach(f => console.warn(`  - ${f}`));
+  }
+
   console.log(
     `[superScraper] ✅ Done: ${allPages.length} pages, ` +
     `${stats.fieldsFilled}/${sections.length} filled, ` +
-    `${stats.emailCount} emails, ${stats.personCount} people, ${durationSec}s`,
+    `${stats.emailCount} emails, ${stats.personCount} people, ` +
+    `${extractionFailures.length} failures, ${durationSec}s`,
   );
 
-  return { type: "profile", data, stats, diagnostics: diag };
+  return { type: "profile", data, stats, diagnostics: { ...diag, failures: extractionFailures } };
 }

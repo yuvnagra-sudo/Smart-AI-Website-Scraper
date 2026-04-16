@@ -78,28 +78,25 @@ export function generateLinkedInVariations(fullName: string): string[] {
 }
 
 /**
- * Validate if a LinkedIn URL exists (without logging in)
+ * Validate if a LinkedIn URL exists (without logging in).
+ * Returns "verified" (200), "unverified" (999/rate-limited), or false (404/error).
  */
-export async function validateLinkedInURL(url: string): Promise<boolean> {
+export async function validateLinkedInURL(url: string): Promise<"verified" | "unverified" | false> {
   try {
     const response = await axios.head(url, {
       timeout: 5000,
       maxRedirects: 0,
-      validateStatus: (status) => status === 200 || status === 999, // 999 is LinkedIn's rate limit response
+      validateStatus: (status) => status === 200 || status === 999,
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
       },
     });
-    
-    // 200 = profile exists
-    // 999 = LinkedIn rate limiting (profile likely exists)
-    return response.status === 200 || response.status === 999;
+
+    if (response.status === 200) return "verified";
+    if (response.status === 999) return "unverified"; // rate-limited — don't trust as confirmed
+    return false;
   } catch (error: any) {
-    // 404 = profile doesn't exist
-    if (error.response?.status === 404) {
-      return false;
-    }
-    // For other errors (network, timeout), assume it might exist
+    if (error.response?.status === 404) return false;
     return false;
   }
 }
@@ -173,13 +170,13 @@ export async function matchLinkedInURLsToNames(
       const variations = generateLinkedInVariations(memberName).slice(0, 3); // Only try top 3
       
       for (const url of variations) {
-        const exists = await validateLinkedInURL(url);
-        if (exists) {
+        const validationResult = await validateLinkedInURL(url);
+        if (validationResult) {
           matches.push({
             name: memberName,
             linkedinUrl: url,
-            confidence: "Low",
-            matchMethod: "Generated and validated",
+            confidence: validationResult === "verified" ? "Medium" : "Low",
+            matchMethod: validationResult === "verified" ? "Generated and verified (200)" : "Generated but unverified (rate-limited)",
           });
           break;
         }
@@ -319,13 +316,13 @@ async function matchLinkedInURLsToNamesInternal(
       const variations = generateLinkedInVariations(memberName).slice(0, 3); // Only try top 3
       
       for (const url of variations) {
-        const exists = await validateLinkedInURL(url);
-        if (exists) {
+        const validationResult = await validateLinkedInURL(url);
+        if (validationResult) {
           matches.push({
             name: memberName,
             linkedinUrl: url,
-            confidence: "Low",
-            matchMethod: "Generated and validated",
+            confidence: validationResult === "verified" ? "Medium" : "Low",
+            matchMethod: validationResult === "verified" ? "Generated and verified (200)" : "Generated but unverified (rate-limited)",
           });
           break;
         }
@@ -388,7 +385,7 @@ export async function searchLinkedInViaGoogle(
     if (linkedinUrls.length > 0) {
       // Validate that it's actually accessible
       const isValid = await validateLinkedInURL(linkedinUrls[0]);
-      return isValid ? linkedinUrls[0] : null;
+      return isValid ? linkedinUrls[0] : null; // "verified" or "unverified" both truthy
     }
     
     return null;

@@ -70,26 +70,38 @@ function extractEmailsFromHTML(html: string, memberNames: string[]): Map<string,
   console.log(`[extractEmailsFromHTML] Found ${allEmails.length} unique emails on page`);
   
   // Try to match emails to member names
+  // Require minimum name length to prevent false matches (e.g. "co" matching "contact@")
   for (const memberName of memberNames) {
     const nameParts = memberName.toLowerCase().split(/\s+/);
     const firstName = nameParts[0] || '';
     const lastName = nameParts[nameParts.length - 1] || '';
-    
+
+    // Skip if names are too short for reliable substring matching
+    if (firstName.length < 3 || lastName.length < 2) continue;
+
     for (const email of allEmails) {
       const emailLocal = email.split('@')[0];
-      
-      // Match patterns like: firstname.lastname, firstnamelastname, firstname, f.lastname, flastname
+
+      // Strong match: both first AND last name in local part
       if (emailLocal.includes(firstName) && emailLocal.includes(lastName)) {
         emailMap.set(memberName, email);
-        console.log(`[extractEmailsFromHTML] Matched email ${email} to ${memberName}`);
+        console.log(`[extractEmailsFromHTML] Matched email ${email} to ${memberName} (strong: first+last)`);
         break;
-      } else if (emailLocal === firstName || emailLocal === `${firstName}.${lastName}` || emailLocal === `${firstName}${lastName}`) {
+      }
+      // Exact patterns: firstname.lastname, firstnamelastname, f.lastname, flastname
+      if (emailLocal === `${firstName}.${lastName}` || emailLocal === `${firstName}${lastName}`) {
         emailMap.set(memberName, email);
-        console.log(`[extractEmailsFromHTML] Matched email ${email} to ${memberName}`);
+        console.log(`[extractEmailsFromHTML] Matched email ${email} to ${memberName} (exact pattern)`);
         break;
-      } else if (firstName.length > 0 && lastName.length > 0 && emailLocal === `${firstName[0]}${lastName}`) {
+      }
+      if (firstName.length > 0 && lastName.length > 1 && emailLocal === `${firstName[0]}${lastName}`) {
         emailMap.set(memberName, email);
-        console.log(`[extractEmailsFromHTML] Matched email ${email} to ${memberName}`);
+        console.log(`[extractEmailsFromHTML] Matched email ${email} to ${memberName} (initial+last)`);
+        break;
+      }
+      if (firstName.length > 0 && lastName.length > 1 && emailLocal === `${firstName[0]}.${lastName}`) {
+        emailMap.set(memberName, email);
+        console.log(`[extractEmailsFromHTML] Matched email ${email} to ${memberName} (initial.last)`);
         break;
       }
     }
@@ -904,11 +916,9 @@ If you cannot determine any stages, return: {"stages": []}`;
               (msg) => console.log(`[Team Extraction - Page ${additionalPages.indexOf(pageUrl) + 2}] ${msg}`)
             );
             
-            // Deduplicate
+            // Deduplicate using robust name matching (handles nicknames, hyphens, suffixes)
             for (const member of pageMembers) {
-              const exists = members.find(
-                m => m.name.toLowerCase() === member.name.toLowerCase()
-              );
+              const exists = findPersonByName(members, member.name);
               if (!exists) {
                 members.push(member);
               }

@@ -7,12 +7,46 @@ import * as cheerio from "cheerio";
 // Removed: import { invokeLLM } from "./_core/llm"; - Now using OpenAI only via llmQueue
 import { queuedLLMCall } from "./_core/llmQueue";
 import { type ScrapeProfile, GENERAL_PROFILE } from "./scrapeProfile";
+import { findPersonByName } from "./nameNormalization";
 
 interface TeamMemberRaw {
   name: string;
   title: string;
   job_function: string;
   specialization: string;
+}
+
+/**
+ * Validate that an LLM-extracted name is actually a person's name.
+ * Rejects placeholders, garbage, single words, HTML, and pure numbers.
+ */
+function isValidExtractedName(name: string): boolean {
+  if (!name || name.trim().length < 2) return false;
+  const lower = name.toLowerCase().trim();
+
+  const GARBAGE_NAMES = [
+    'unknown', 'tbd', 'n/a', 'none', 'placeholder', 'test',
+    'team member', 'staff member', 'staff', 'employee', 'person', 'contact',
+    'name', 'full name', 'first last', 'firstname lastname',
+    'john doe', 'jane doe', 'no name', 'anonymous',
+    'member', 'partner', 'associate', 'analyst', // titles, not names
+  ];
+  if (GARBAGE_NAMES.includes(lower)) return false;
+
+  // Reject pure numbers, HTML tags, HTML entities
+  if (/^\d+$/.test(lower)) return false;
+  if (/<[^>]+>/.test(name)) return false;
+  if (/&[a-z]+;/i.test(name)) return false;
+
+  // Reject if it looks like a URL or email
+  if (/^https?:\/\//i.test(name)) return false;
+  if (/@/.test(name)) return false;
+
+  // Must have at least 2 word-like parts (first + last name)
+  const parts = lower.split(/\s+/).filter(p => p.length > 0);
+  if (parts.length < 2) return false;
+
+  return true;
 }
 
 /**
@@ -62,12 +96,13 @@ export async function extractTeamMembersComprehensive(
 
     const chunkMembers = await extractTeamMembersFromText(chunk, companyName, resolvedProfile);
     
-    // Deduplicate by name (case-insensitive)
+    // Validate + deduplicate by name (robust matching with nicknames, hyphens, suffixes)
     for (const member of chunkMembers) {
-      const exists = allMembers.find(
-        m => m.name.toLowerCase() === member.name.toLowerCase()
-      );
-      
+      if (!isValidExtractedName(member.name)) {
+        console.log(`[comprehensiveTeamExtraction] Rejected invalid name: "${member.name}"`);
+        continue;
+      }
+      const exists = findPersonByName(allMembers, member.name);
       if (!exists) {
         allMembers.push(member);
       }

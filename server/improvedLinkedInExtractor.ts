@@ -190,13 +190,16 @@ export function matchLinkedInURLsToTeamMembers(
         const firstLower = first.toLowerCase();
         const lastLower = last.toLowerCase();
         
-        // Check if both first and last name appear in context
-        if (firstLower && lastLower && contextLower.includes(firstLower) && contextLower.includes(lastLower)) {
-          // Additional check: they should be reasonably close to each other
-          const firstIndex = contextLower.indexOf(firstLower);
-          const lastIndex = contextLower.indexOf(lastLower);
-          
-          if (Math.abs(firstIndex - lastIndex) < 100) { // Within 100 characters
+        // Check if both first and last name appear as whole words in context
+        // Use word boundaries to prevent "John" matching inside "Johnson"
+        const firstRegex = firstLower.length >= 3 ? new RegExp(`\\b${firstLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`) : null;
+        const lastRegex = lastLower.length >= 2 ? new RegExp(`\\b${lastLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`) : null;
+        if (firstRegex && lastRegex && firstRegex.test(contextLower) && lastRegex.test(contextLower)) {
+          // Additional check: they should be close together (50 chars, not 100)
+          const firstIndex = contextLower.search(firstRegex);
+          const lastIndex = contextLower.search(lastRegex);
+
+          if (Math.abs(firstIndex - lastIndex) < 50) { // Within 50 characters (tightened from 100)
             bestMatch = {
               name: memberName,
               linkedinUrl: url,

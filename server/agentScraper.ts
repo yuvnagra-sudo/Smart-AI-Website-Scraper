@@ -51,6 +51,7 @@ export interface ScrapeDiagnostics {
   failedUrls: string[];
   softDeleted: string[];         // soft-404 URLs
   topPagePreview: string;        // first 500 chars of best-scoring page
+  failures?: string[];           // non-fatal extraction failures for visibility
 }
 
 export type AgentScrapeResult =
