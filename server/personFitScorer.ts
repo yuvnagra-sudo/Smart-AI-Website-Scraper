@@ -68,7 +68,11 @@ Rules:
 - Score and label ONLY based on the data provided. Do not invent information.
 - A company may have 0-5 relevant buying committee members. Not everyone is relevant.
 - If someone matches the exclusion criteria, give them score 0 with buyingRole null.
-- Score people RELATIVE to each other — the best-fit person should have the highest score.`;
+- Score people RELATIVE to each other — the best-fit person should have the highest score.
+- The list may include a "General Contact" entry with a generic email (info@, contact@).
+  Score it 30-40 (Low Fit) with buyingRole "Gatekeeper". This means: if the only named
+  people are terrible ICP fits (score <30), the generic email should outrank them because
+  it might get forwarded to the right person. But any decent ICP fit should outrank the generic email.`;
 
 const RESPONSE_SCHEMA = {
   type: "json_schema" as const,

@@ -1288,15 +1288,49 @@ If you cannot determine any stages, return: {"stages": []}`;
         })
       );
       
-      // Fallback: if NO people were found at all, create a generic contact entry
-      // so the user at least gets a way to reach the company
+      // Last-resort API email lookup for people with name but no email
+      // Uses Hunter Email Finder (1 credit/call) — only for top 5 people without emails
+      const membersWithoutEmail = enrichedMembers.filter(m => m.name && !m.email);
+      if (membersWithoutEmail.length > 0 && process.env.HUNTER_API_KEY) {
+        const domain = url.replace(/^https?:\/\//, '').replace(/^www\./, '').split('/')[0];
+        const toLookup = membersWithoutEmail.slice(0, 5); // Cap at 5 to control cost
+        console.log(`[extractTeamMembers] API email lookup for ${toLookup.length} people without emails (Hunter Email Finder)`);
+
+        try {
+          const { hunterEmailFinder } = await import('./dataSources/hunterApi');
+          for (const member of toLookup) {
+            const nameParts = member.name.split(/\s+/);
+            if (nameParts.length < 2) continue;
+            const firstName = nameParts[0];
+            const lastName = nameParts[nameParts.length - 1];
+
+            const result = await hunterEmailFinder(firstName, lastName, domain);
+            if (result.email && result.confidence >= 50) {
+              member.email = result.email;
+              member.confidenceScore = "Medium";
+              console.log(`[extractTeamMembers] Hunter Email Finder: ${member.name} → ${result.email} (confidence: ${result.confidence})`);
+            }
+            // Small delay between calls to avoid rate limiting
+            await new Promise(resolve => setTimeout(resolve, 300));
+          }
+        } catch (err) {
+          console.warn(`[extractTeamMembers] Hunter Email Finder fallback failed (non-fatal):`, err);
+        }
+      }
+
+      // Always include a generic contact row if a forwarding email exists.
+      // The AI fit scorer will rank it appropriately — a generic email that reaches
+      // the right department beats a named person with terrible ICP fit.
       const genericEmail = mainPageEmails.get('__generic__') || "";
-      if (enrichedMembers.length === 0 && genericEmail) {
-        console.log(`[extractTeamMembers] No people found — creating fallback contact with ${genericEmail}`);
+      if (genericEmail) {
+        const label = enrichedMembers.length === 0
+          ? "General Contact (no individual found)"
+          : "General Contact (forwarding email)";
+        console.log(`[extractTeamMembers] Adding generic contact row: ${genericEmail} (${label})`);
         enrichedMembers.push({
           name: companyName,
-          title: "General Contact (no individual found)",
-          jobFunction: "",
+          title: label,
+          jobFunction: "General",
           specialization: "",
           linkedinUrl: "",
           email: genericEmail,

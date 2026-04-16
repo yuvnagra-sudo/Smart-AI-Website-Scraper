@@ -210,3 +210,80 @@ export async function hunterDomainSearch(
     return { bestMatch: null, allEmails: [], totalEmails: 0, skippedReason: String(err) };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Email Finder — find a specific person's email by name + domain
+// ---------------------------------------------------------------------------
+
+export interface HunterEmailFinderResult {
+  email: string | null;
+  confidence: number;    // 0-100
+  sources: number;
+  skippedReason?: string;
+}
+
+/**
+ * Find a specific person's email using Hunter.io Email Finder API.
+ * Costs 1 credit per call. Use as last resort after website extraction fails.
+ */
+export async function hunterEmailFinder(
+  firstName: string,
+  lastName: string,
+  domain: string,
+): Promise<HunterEmailFinderResult> {
+  if (!getApiKey()) {
+    return { email: null, confidence: 0, sources: 0, skippedReason: "HUNTER_API_KEY not set" };
+  }
+  if (!firstName || !lastName || !domain) {
+    return { email: null, confidence: 0, sources: 0, skippedReason: "Missing name or domain" };
+  }
+
+  const d = domain.replace(/^www\./, "").toLowerCase();
+  console.log(`[hunterApi] Email Finder: ${firstName} ${lastName} @ ${d}`);
+
+  const url =
+    `${HUNTER_BASE_URL}/email-finder` +
+    `?domain=${encodeURIComponent(d)}` +
+    `&first_name=${encodeURIComponent(firstName)}` +
+    `&last_name=${encodeURIComponent(lastName)}` +
+    `&api_key=${getApiKey()}`;
+
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+
+    if (res.status === 429) {
+      return { email: null, confidence: 0, sources: 0, skippedReason: "Rate limited" };
+    }
+    if (!res.ok) {
+      return { email: null, confidence: 0, sources: 0, skippedReason: `HTTP ${res.status}` };
+    }
+
+    const json = (await res.json()) as {
+      data?: {
+        email?: string;
+        score?: number;
+        sources?: unknown[];
+      };
+      errors?: Array<{ details: string }>;
+    };
+
+    if (json.errors?.length) {
+      return { email: null, confidence: 0, sources: 0, skippedReason: json.errors[0].details };
+    }
+
+    const email = json.data?.email || null;
+    const confidence = json.data?.score ?? 0;
+    const sources = json.data?.sources?.length ?? 0;
+
+    if (email) {
+      console.log(`[hunterApi] Email Finder found: ${email} (confidence: ${confidence}, sources: ${sources})`);
+    } else {
+      console.log(`[hunterApi] Email Finder: no email found for ${firstName} ${lastName} @ ${d}`);
+    }
+
+    return { email, confidence, sources };
+  } catch (err) {
+    console.warn(`[hunterApi] Email Finder failed for ${firstName} ${lastName} @ ${d}:`, err);
+    return { email: null, confidence: 0, sources: 0, skippedReason: String(err) };
+  }
+}
