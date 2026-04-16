@@ -70,11 +70,21 @@ function extractEmailsFromHTML(html: string, memberNames: string[]): Map<string,
   console.log(`[extractEmailsFromHTML] Found ${allEmails.length} unique emails on page`);
   
   // Match emails to member names using pattern generation (not substring search).
-  // Generates all plausible email patterns for each person, then checks for exact
-  // matches. This handles short names (Al, Bo) and initials (JS) without false
-  // positives from substring matching ("co" won't match "contact@").
+  // Generates ~40 plausible email patterns per person, then checks for exact match
+  // against extracted emails. Handles short names (Al, Bo), initials (JS), and all
+  // common corporate formats across company sizes and regions.
+  //
+  // Based on industry data:
+  //   - Small companies (<50): firstname@ dominates (70%+)
+  //   - Mid companies (50-200): firstname.lastname@ and flastname@ crossover
+  //   - Large companies (1000+): first.last@ (48%+), flast@ common
+  //   - Finance/legal: lastname.firstname@ (~25%)
+  //   - Separators: dot (most common), underscore, hyphen all used
   for (const memberName of memberNames) {
-    const nameParts = memberName.toLowerCase().split(/\s+/).filter(p => p.length > 0);
+    const nameParts = memberName.toLowerCase()
+      .replace(/['']/g, '')        // O'Brien → obrien
+      .split(/[\s-]+/)             // split on spaces AND hyphens
+      .filter(p => p.length > 0);
     if (nameParts.length < 2) continue;
 
     const firstName = nameParts[0];
@@ -82,39 +92,83 @@ function extractEmailsFromHTML(html: string, memberNames: string[]): Map<string,
     const fi = firstName[0]; // first initial
     const li = lastName[0];  // last initial
 
-    // Generate all plausible email local-part patterns for this person
-    const patterns = new Set<string>([
-      // firstname.lastname, firstname-lastname, firstnamelastname
-      `${firstName}.${lastName}`,
-      `${firstName}-${lastName}`,
-      `${firstName}${lastName}`,
-      // lastname.firstname, lastname-firstname, lastnamefirstname
-      `${lastName}.${firstName}`,
-      `${lastName}-${firstName}`,
-      `${lastName}${firstName}`,
-      // f.lastname, flastname, f-lastname
-      `${fi}.${lastName}`,
-      `${fi}${lastName}`,
-      `${fi}-${lastName}`,
-      // firstname.l, firstnamel, firstname-l
-      `${firstName}.${li}`,
-      `${firstName}${li}`,
-      `${firstName}-${li}`,
-      // fl (initials)
-      `${fi}${li}`,
-      `${fi}.${li}`,
-      // firstname only (common for small companies)
-      firstName,
-    ]);
+    // For hyphenated last names like "Smith-Jones", also try the combined form
+    const lastNameFull = nameParts.length > 2
+      ? nameParts.slice(1).join('')   // all parts after first = last name combined
+      : lastName;
+    const lastNameHyphen = nameParts.length > 2
+      ? nameParts.slice(1).join('-')  // all parts after first with hyphens
+      : lastName;
 
-    // If there's a middle name, add variations with it
+    const patterns = new Set<string>();
+
+    // === SEPARATORS: dot, underscore, hyphen, none ===
+    for (const sep of ['.', '_', '-', '']) {
+      // firstname{sep}lastname (most common pattern globally)
+      patterns.add(`${firstName}${sep}${lastName}`);
+      // lastname{sep}firstname (common in finance/legal, ~25%)
+      patterns.add(`${lastName}${sep}${firstName}`);
+      // f{sep}lastname (first initial + last, common at large corps)
+      patterns.add(`${fi}${sep}${lastName}`);
+      // firstname{sep}l (first + last initial)
+      patterns.add(`${firstName}${sep}${li}`);
+      // l{sep}firstname (last initial + first, less common but exists)
+      patterns.add(`${li}${sep}${firstName}`);
+    }
+
+    // === INITIALS ===
+    patterns.add(`${fi}${li}`);           // fl
+    patterns.add(`${fi}.${li}`);          // f.l
+    patterns.add(`${li}${fi}`);           // lf
+    patterns.add(`${li}.${fi}`);          // l.f
+
+    // === FIRST NAME ONLY (common at startups, <50 employees) ===
+    patterns.add(firstName);
+
+    // === LAST NAME ONLY (some companies) ===
+    patterns.add(lastName);
+
+    // === HYPHENATED / COMPOUND LAST NAMES ===
+    if (lastNameFull !== lastName) {
+      for (const sep of ['.', '_', '-', '']) {
+        patterns.add(`${firstName}${sep}${lastNameFull}`);
+        patterns.add(`${fi}${sep}${lastNameFull}`);
+      }
+      patterns.add(`${firstName}.${lastNameHyphen}`);
+      patterns.add(`${fi}.${lastNameHyphen}`);
+    }
+
+    // === MIDDLE NAME VARIATIONS ===
     if (nameParts.length > 2) {
       const middleName = nameParts[1];
       const mi = middleName[0];
-      patterns.add(`${firstName}.${middleName}.${lastName}`);
-      patterns.add(`${firstName}${middleName}${lastName}`);
+
+      for (const sep of ['.', '_', '-', '']) {
+        // firstname{sep}middle{sep}lastname
+        patterns.add(`${firstName}${sep}${middleName}${sep}${lastName}`);
+        // f{sep}middle{sep}lastname
+        patterns.add(`${fi}${sep}${middleName}${sep}${lastName}`);
+        // firstname{sep}m{sep}lastname (middle initial)
+        patterns.add(`${firstName}${sep}${mi}${sep}${lastName}`);
+        // f{sep}m{sep}lastname
+        patterns.add(`${fi}${sep}${mi}${sep}${lastName}`);
+      }
+      // fml (all initials)
+      patterns.add(`${fi}${mi}${li}`);
+      patterns.add(`${fi}.${mi}.${li}`);
+      // fmlastname
       patterns.add(`${fi}${mi}${lastName}`);
       patterns.add(`${fi}.${mi}.${lastName}`);
+      // firstnamelastname (skip middle)
+      patterns.add(`${firstName}${lastName}`);
+      patterns.add(`${firstName}.${lastName}`);
+    }
+
+    // === NUMBERED VARIATIONS (when multiple people share a name) ===
+    for (const n of ['1', '2', '3']) {
+      patterns.add(`${firstName}.${lastName}${n}`);
+      patterns.add(`${firstName}${lastName}${n}`);
+      patterns.add(`${fi}${lastName}${n}`);
     }
 
     for (const email of allEmails) {
