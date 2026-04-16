@@ -1551,16 +1551,17 @@ export async function scrapeUrlSuper(
       const hunterEmails = hunterResult?.allEmails ?? [];
 
       for (const person of apolloResult.people) {
-        // Try to find matching Hunter email for this Apollo person
+        // Cross-reference with Hunter emails by name matching
         const matchingHunterEmail = hunterEmails.find(he => {
           const hunterName = `${he.firstName} ${he.lastName}`.trim().toLowerCase();
           const apolloName = person.name.toLowerCase();
           return hunterName === apolloName ||
-            (he.firstName && person.name.toLowerCase().includes(he.firstName.toLowerCase()) &&
-             he.lastName && person.name.toLowerCase().includes(he.lastName.toLowerCase()));
+            (he.firstName && apolloName.includes(he.firstName.toLowerCase()) &&
+             he.lastName && apolloName.includes(he.lastName.toLowerCase()));
         });
 
-        // Merge into DM fields if they're still empty
+        // Apollo search returns limited data (name, title, org — no email/linkedin/location).
+        // Merge what we have into DM fields if still empty.
         for (const s of sections) {
           const kl = s.key.toLowerCase();
           const isDm = /decision.?maker|dm\d|contact|person/.test(kl);
@@ -1572,16 +1573,13 @@ export async function scrapeUrlSuper(
             fieldResults[s.key] = { value: person.title, confidence: CONFIDENCE.EXTRACTED, sourceUrl: "apollo.io" };
             data[s.key] = person.title;
           } else if (/email/i.test(kl) && !fieldResults[s.key]?.value && matchingHunterEmail?.value) {
-            // Attach Hunter email to Apollo person
+            // Attach Hunter email to Apollo person (cross-referenced by name)
             fieldResults[s.key] = {
               value: matchingHunterEmail.value,
-              confidence: Math.min(0.95, matchingHunterEmail.confidence / 100),
+              confidence: Math.min(CONFIDENCE.VERIFIED, matchingHunterEmail.confidence / 100),
               sourceUrl: "hunter.io + apollo.io",
             };
             data[s.key] = matchingHunterEmail.value;
-          } else if (isDm && /linkedin/.test(kl) && !fieldResults[s.key]?.value && person.linkedinUrl) {
-            fieldResults[s.key] = { value: person.linkedinUrl, confidence: CONFIDENCE.EXTRACTED, sourceUrl: "apollo.io" };
-            data[s.key] = person.linkedinUrl;
           }
         }
       }
