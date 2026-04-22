@@ -228,8 +228,9 @@ async function fetchPage(
     if (!rawHtml && result.source === "jina") {
       try {
         const resp = await fetch(url, {
-          headers: { "User-Agent": "Mozilla/5.0 (compatible; SuperScraper/1.0)" },
+          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36" },
           signal: AbortSignal.timeout(8000),
+          redirect: "follow",
         });
         if (resp.ok) {
           const html = await resp.text();
@@ -267,21 +268,51 @@ async function fetchPage(
 function extractEmails(content: string, rawHtml?: string): string[] {
   const emails = new Set<string>();
   const emailRegex = /\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b/g;
-  const noisePrefix = /^(info|contact|hello|support|admin|team|press|media|careers|jobs|hr|sales|marketing|legal|privacy|security|noreply|no-reply|webmaster|postmaster|news|newsletter)@/i;
+
+  // Only filter system/junk emails — keep generic forwarding emails
+  // (info@, contact@, admin@ etc. may be the only way to reach someone)
+  const JUNK_PREFIXES = /^(noreply|no-reply|donotreply|do-not-reply|webmaster|postmaster|mailer-daemon|bounce|daemon|unsubscribe)@/i;
+  const JUNK_DOMAINS = /\.(png|jpg|gif|svg|css|js|woff|ico)$|@(example\.com|test\.com|localhost|placeholder\.com|sentry\.io|sentry-next\.wixpress\.com|wixpress\.com|mailinator\.com|tempmail\.com)$/i;
+
+  function isJunk(email: string): boolean {
+    return JUNK_PREFIXES.test(email) || JUNK_DOMAINS.test(email);
+  }
 
   // From markdown content
   for (const m of (content.match(emailRegex) ?? [])) {
-    if (!noisePrefix.test(m)) emails.add(m.toLowerCase());
+    const lower = m.toLowerCase();
+    if (!isJunk(lower)) emails.add(lower);
   }
 
-  // From raw HTML mailto: links (most reliable)
+  // From raw HTML — both mailto: links AND regex on full HTML text
+  // This catches emails that Jina's markdown conversion strips out
+  // (e.g. emails in footers, sidebars, JS-rendered contact sections)
   if (rawHtml) {
     const $ = cheerio.load(rawHtml);
+
+    // mailto: links (highest reliability)
     $('a[href^="mailto:"]').each((_, el) => {
       const href = $(el).attr("href") ?? "";
       const email = href.replace(/^mailto:/i, "").split("?")[0].trim().toLowerCase();
-      if (email.match(/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/) && !noisePrefix.test(email)) {
+      if (email.match(/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/) && !isJunk(email)) {
         emails.add(email);
+      }
+    });
+
+    // Regex on full body text (catches emails in footers that Jina strips)
+    const bodyText = $("body").text();
+    for (const m of (bodyText.match(emailRegex) ?? [])) {
+      const lower = m.toLowerCase();
+      if (!isJunk(lower)) emails.add(lower);
+    }
+
+    // Also scan href attributes (some sites use href="mailto:..." without the mailto prefix properly)
+    $("a[href*='@']").each((_, el) => {
+      const href = $(el).attr("href") ?? "";
+      const match = href.match(/([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/);
+      if (match) {
+        const lower = match[1].toLowerCase();
+        if (!isJunk(lower)) emails.add(lower);
       }
     });
   }
@@ -289,13 +320,20 @@ function extractEmails(content: string, rawHtml?: string): string[] {
   return Array.from(emails);
 }
 
-/** Extract LinkedIn profile/company URLs from content. */
-function extractLinkedInUrls(content: string): { profiles: string[]; companies: string[] } {
+/** Extract LinkedIn profile/company URLs from content AND raw HTML. */
+function extractLinkedInUrls(content: string, rawHtml?: string): { profiles: string[]; companies: string[] } {
   const profilePattern = /https?:\/\/(?:www\.)?linkedin\.com\/in\/[a-zA-Z0-9_-]+\/?/g;
   const companyPattern = /https?:\/\/(?:www\.)?linkedin\.com\/company\/[a-zA-Z0-9_-]+\/?/g;
-  const profiles = [...new Set(content.match(profilePattern) ?? [])];
-  const companies = [...new Set(content.match(companyPattern) ?? [])];
-  return { profiles, companies };
+  const profiles = new Set(content.match(profilePattern) ?? []);
+  const companies = new Set(content.match(companyPattern) ?? []);
+
+  // Also scan raw HTML (catches links in footers/sidebars stripped by Jina)
+  if (rawHtml) {
+    for (const m of (rawHtml.match(profilePattern) ?? [])) profiles.add(m);
+    for (const m of (rawHtml.match(companyPattern) ?? [])) companies.add(m);
+  }
+
+  return { profiles: [...profiles], companies: [...companies] };
 }
 
 /** Extract JSON-LD Person/Organization data from raw HTML. */
@@ -335,15 +373,20 @@ function extractJsonLd(rawHtml: string): { name?: string; email?: string; teleph
 }
 
 /** Extract phone numbers from content. */
-function extractPhones(content: string): string[] {
+function extractPhones(content: string, rawHtml?: string): string[] {
   const phonePattern = /(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/g;
-  const matches = content.match(phonePattern) ?? [];
-  // Filter out false positives: pure digit strings that could be timestamps, IDs, or CSS values
+  // Scan both markdown content AND raw HTML body text
+  let allText = content;
+  if (rawHtml) {
+    try {
+      const $ = cheerio.load(rawHtml);
+      allText += "\n" + $("body").text();
+    } catch { /* non-fatal */ }
+  }
+  const matches = allText.match(phonePattern) ?? [];
   const filtered = matches.filter(m => {
     const digitsOnly = m.replace(/\D/g, "");
-    // Must be 7-15 digits (valid phone range)
     if (digitsOnly.length < 7 || digitsOnly.length > 15) return false;
-    // Raw 10+ digit strings without separators (e.g. "1627624836") are likely timestamps/IDs
     if (/^\d{10,}$/.test(m.trim())) return false;
     return true;
   });
@@ -366,10 +409,10 @@ function deterministicExtract(
 
   for (const page of pages) {
     allEmails.push(...extractEmails(page.content, page.rawHtml));
-    const li = extractLinkedInUrls(page.content);
+    const li = extractLinkedInUrls(page.content, page.rawHtml);
     allLinkedInProfiles.push(...li.profiles);
     allLinkedInCompanies.push(...li.companies);
-    allPhones.push(...extractPhones(page.content));
+    allPhones.push(...extractPhones(page.content, page.rawHtml));
     if (page.rawHtml) allJsonLd.push(...extractJsonLd(page.rawHtml));
   }
 
