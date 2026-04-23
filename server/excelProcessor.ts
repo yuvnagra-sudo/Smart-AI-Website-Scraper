@@ -442,20 +442,26 @@ export function createAgentOutputExcel(
 
   // Sheet 3: Diagnostics — raw scrape data per company for debugging
   if (diagnosticResults && diagnosticResults.length > 0) {
-    const diagRows = diagnosticResults.map((d) => ({
-      "Company": d.companyName,
-      "Website": d.websiteUrl,
-      "Pages Collected": d.diagnostics.pagesCollected,
-      "Page URLs": d.diagnostics.pageUrls.join("\n"),
-      "Page Sizes (chars)": d.diagnostics.pageSizes.join(", "),
-      "Phase 2 Fields Filled": d.diagnostics.phase2FieldsFilled,
-      "Phase 3 Fields Filled": d.diagnostics.phase3FieldsFilled,
-      "Phase 4 Fields Filled": d.diagnostics.phase4FieldsFilled,
-      "Phase 5 Fields Filled": d.diagnostics.phase5FieldsFilled,
-      "Failed URLs": d.diagnostics.failedUrls.join("\n") || "(none)",
-      "Soft-404 URLs": d.diagnostics.softDeleted.join("\n") || "(none)",
-      "Top Page Preview": d.diagnostics.topPagePreview,
-    }));
+    const diagRows = diagnosticResults.map((d) => {
+      const diag = d.diagnostics as any; // extended diagnostics may have extra fields
+      return {
+        "Company": d.companyName,
+        "Website": d.websiteUrl,
+        "Pages Collected": d.diagnostics.pagesCollected,
+        "Page URLs": d.diagnostics.pageUrls.join("\n"),
+        "Page Sizes (chars)": d.diagnostics.pageSizes.join(", "),
+        "Phase 2 Fields Filled": d.diagnostics.phase2FieldsFilled,
+        "Phase 3 Fields Filled": d.diagnostics.phase3FieldsFilled,
+        "Phase 4 Fields Filled": d.diagnostics.phase4FieldsFilled,
+        "Phase 5 Fields Filled": d.diagnostics.phase5FieldsFilled,
+        "Failed URLs": d.diagnostics.failedUrls.join("\n") || "(none)",
+        "Soft-404 URLs": d.diagnostics.softDeleted.join("\n") || "(none)",
+        "Hunter Contacts": Array.isArray(diag.hunterContacts) ? diag.hunterContacts.join("\n") : "(none)",
+        "Hunter Re-Eval": diag.hunterReEval || "(not run)",
+        "Failures": Array.isArray(diag.failures) && diag.failures.length > 0 ? diag.failures.join("\n") : "(none)",
+        "Top Page Preview": d.diagnostics.topPagePreview,
+      };
+    });
     const sanitizedDiagRows = sanitizeForExcel(diagRows);
     const diagSheet = XLSX.utils.json_to_sheet(sanitizedDiagRows);
     XLSX.utils.book_append_sheet(workbook, diagSheet, "Diagnostics");

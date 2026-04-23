@@ -1564,38 +1564,138 @@ export async function scrapeUrlSuper(
 
     const [hunterSettled, apolloSettled] = await Promise.allSettled([hunterPromise, apolloPromise]);
 
-    // Merge Hunter results (emails, names, titles, LinkedIn)
+    // Merge Hunter results — use FULL email list + LLM re-evaluation
     const hunterResult = hunterSettled.status === "fulfilled" ? hunterSettled.value : null;
-    if (hunterResult?.bestMatch) {
-      const hm = hunterResult.bestMatch;
-      const sourceUrl = `https://hunter.io/domain-search?domain=${_domain}`;
+    const allHunterEmails = hunterResult?.allEmails ?? [];
 
-      for (const s of sections) {
-        const kl = s.key.toLowerCase();
-        const isDm = /decision.?maker|dm\d|contact|person/.test(kl);
-
-        if (isDm && /name/.test(kl) && !fieldResults[s.key]?.value && hm.firstName) {
-          const fullName = `${hm.firstName} ${hm.lastName}`.trim();
-          fieldResults[s.key] = { value: fullName, confidence: CONFIDENCE.EXTRACTED, sourceUrl };
-          data[s.key] = fullName;
-        } else if (isDm && /title|role|position/.test(kl) && !fieldResults[s.key]?.value && hm.position) {
-          fieldResults[s.key] = { value: hm.position, confidence: CONFIDENCE.EXTRACTED, sourceUrl };
-          data[s.key] = hm.position;
-        } else if (/email/i.test(kl) && !fieldResults[s.key]?.value && hm.value) {
-          fieldResults[s.key] = {
-            value: hm.value,
-            confidence: Math.min(0.95, hm.confidence / 100),
-            sourceUrl,
-          };
-          data[s.key] = hm.value;
-        } else if (isDm && /linkedin/.test(kl) && !fieldResults[s.key]?.value && hm.linkedinUrl) {
-          fieldResults[s.key] = { value: hm.linkedinUrl, confidence: CONFIDENCE.VERIFIED, sourceUrl: hm.linkedinUrl };
-          data[s.key] = hm.linkedinUrl;
-        }
+    if (allHunterEmails.length > 0) {
+      console.log(`[superScraper] Hunter found ${allHunterEmails.length} contacts at ${_domain}`);
+      for (const he of allHunterEmails) {
+        console.log(`  - ${he.firstName} ${he.lastName} <${he.value}> | ${he.position || "?"} | ${he.seniority || "?"} | conf: ${he.confidence}`);
       }
-      console.log(
-        `[superScraper] Hunter merged: ${hm.firstName} ${hm.lastName} <${hm.value}> (${hm.position || hm.seniority || "?"})`,
+
+      // Save full Hunter list to diagnostics for debugging
+      (diag as any).hunterContacts = allHunterEmails.map(he =>
+        `${he.firstName} ${he.lastName} <${he.value}> (${he.position || he.seniority || "?"}, conf: ${he.confidence})`
       );
+
+      // Find the DM/contact section to understand what we're looking for
+      const contactSection = sections.find(s =>
+        /decision.?maker|dm\d|contact|person|erp/i.test(s.key + " " + s.label) &&
+        !/email|phone|linkedin/i.test(s.key)
+      );
+      const emailSection = sections.find(s => /email/i.test(s.key + " " + s.label));
+
+      // LLM re-evaluation: pick the best contact from Hunter's FULL list
+      // This can OVERRIDE the Phase 3 LLM's choice if Hunter has a better fit
+      if (contactSection && emailSection && allHunterEmails.filter(e => e.type !== "generic").length > 0) {
+        try {
+          const hunterList = allHunterEmails
+            .filter(e => e.type !== "generic")
+            .map((he, i) => `${i + 1}. ${he.firstName} ${he.lastName} | Title: ${he.position || "Unknown"} | Seniority: ${he.seniority || "Unknown"} | Email: ${he.value} | Confidence: ${he.confidence}%`)
+            .join("\n");
+
+          const currentContact = data[contactSection.key] || "(none found on website)";
+          const currentEmail = data[emailSection.key] || "(none)";
+
+          const reEvalResponse = await queuedLLMCall({
+            model: MODEL_NANO,
+            messages: [{
+              role: "user",
+              content: `You are selecting the best contact person from a list of people at a company.
+
+CRITERIA FOR THE BEST CONTACT:
+${contactSection.desc}
+
+CURRENT SELECTION (from website scraping):
+Contact: ${currentContact}
+Email: ${currentEmail}
+
+ALL AVAILABLE CONTACTS (from email database):
+${hunterList}
+
+Based on the criteria above, pick the BEST person from the available contacts list. If the current selection is already the best match, keep it. If someone else is a better fit, select them instead.
+
+Sales representatives should be a LAST RESORT — only pick a sales person if no operations, management, executive, finance, or ownership contacts exist.
+
+Return JSON:
+{"name": "First Last", "title": "Their Title", "email": "their@email.com", "reasoning": "Why this person is the best fit"}`,
+            }],
+            response_format: {
+              type: "json_schema",
+              json_schema: {
+                name: "best_contact",
+                strict: true,
+                schema: {
+                  type: "object",
+                  properties: {
+                    name: { type: "string" },
+                    title: { type: "string" },
+                    email: { type: "string" },
+                    reasoning: { type: "string" },
+                  },
+                  required: ["name", "title", "email", "reasoning"],
+                  additionalProperties: false,
+                },
+              },
+            },
+          });
+
+          const raw = reEvalResponse.choices[0]?.message?.content ?? "{}";
+          const pick = JSON.parse(typeof raw === "string" ? raw : "{}");
+
+          if (pick.name && pick.email) {
+            const changed = pick.email.toLowerCase() !== (currentEmail || "").toLowerCase().split(";")[0].trim();
+            const contactValue = pick.title ? `${pick.name}, ${pick.title}` : pick.name;
+
+            // Update contact field (always — LLM re-evaluated)
+            fieldResults[contactSection.key] = { value: contactValue, confidence: CONFIDENCE.VERIFIED, sourceUrl: "hunter.io + llm" };
+            data[contactSection.key] = contactValue;
+
+            // Update email field (always — LLM picked the best)
+            fieldResults[emailSection.key] = { value: pick.email, confidence: CONFIDENCE.VERIFIED, sourceUrl: "hunter.io" };
+            data[emailSection.key] = pick.email;
+
+            if (changed) {
+              console.log(`[superScraper] Hunter LLM re-eval: CHANGED contact to ${pick.name} <${pick.email}> (${pick.reasoning})`);
+            } else {
+              console.log(`[superScraper] Hunter LLM re-eval: KEPT ${pick.name} <${pick.email}> (${pick.reasoning})`);
+            }
+
+            // Save re-evaluation to diagnostics
+            (diag as any).hunterReEval = `${pick.name} <${pick.email}> — ${pick.reasoning}`;
+          }
+        } catch (err) {
+          console.warn(`[superScraper] Hunter LLM re-eval failed (non-fatal):`, err);
+          extractionFailures.push(`Hunter re-eval: ${err instanceof Error ? err.message : String(err)}`);
+
+          // Fallback: use bestMatch the old way (only fill empty fields)
+          const hm = hunterResult!.bestMatch;
+          if (hm) {
+            if (!data[contactSection.key] && hm.firstName) {
+              const fullName = `${hm.firstName} ${hm.lastName}`.trim();
+              data[contactSection.key] = hm.position ? `${fullName}, ${hm.position}` : fullName;
+              fieldResults[contactSection.key] = { value: data[contactSection.key], confidence: CONFIDENCE.EXTRACTED, sourceUrl: "hunter.io" };
+            }
+            if (!data[emailSection.key] && hm.value) {
+              data[emailSection.key] = hm.value;
+              fieldResults[emailSection.key] = { value: hm.value, confidence: CONFIDENCE.EXTRACTED, sourceUrl: "hunter.io" };
+            }
+          }
+        }
+      } else if (hunterResult?.bestMatch) {
+        // No personal emails from Hunter, or no contact section — fallback to bestMatch for empty fields only
+        const hm = hunterResult.bestMatch;
+        const sourceUrl = `https://hunter.io/domain-search?domain=${_domain}`;
+        for (const s of sections) {
+          const kl = s.key.toLowerCase();
+          if (/email/i.test(kl) && !fieldResults[s.key]?.value && hm.value) {
+            fieldResults[s.key] = { value: hm.value, confidence: CONFIDENCE.EXTRACTED, sourceUrl };
+            data[s.key] = hm.value;
+          }
+        }
+        console.log(`[superScraper] Hunter fallback: ${hm.firstName} ${hm.lastName} <${hm.value}>`);
+      }
     } else if (hunterResult?.skippedReason) {
       console.log(`[superScraper] Hunter skipped: ${hunterResult.skippedReason}`);
     }

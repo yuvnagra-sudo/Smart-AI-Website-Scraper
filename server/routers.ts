@@ -1179,6 +1179,28 @@ export async function processAgentJob(jobId: number) {
                 diagnostics: result.diagnostics,
               });
             }
+
+            // Save to database for queryability (agent pipeline was previously S3-only)
+            try {
+              const db = await (await import("./db")).getDb();
+              if (db) {
+                const { enrichedFirms } = await import("../drizzle/schema");
+                await db.insert(enrichedFirms).values({
+                  jobId,
+                  companyName: firm.companyName,
+                  websiteUrl: firm.websiteUrl,
+                  description: result.data["business_activities"] || result.data["business_does"] || result.data["company_overview"] || null,
+                  websiteVerified: "Yes",
+                  investorType: result.data["business_type"] || result.data["organization_type"] || null,
+                  investmentNiches: result.data["short_business_summary"] || result.data["specialties"] || null,
+                  headquarters: result.data["location"] || result.data["hq_location"] || null,
+                });
+              }
+            } catch (dbErr) {
+              // Non-fatal — S3 Excel is the primary output
+              console.warn(`[processAgentJob] DB save failed for ${firm.companyName} (non-fatal):`, dbErr);
+            }
+
             const stats: ScrapeStats = result.stats;
             // Accumulate stats-grid counters
             totalEmailsFound += stats.emailCount ?? 0;
