@@ -1667,22 +1667,54 @@ export async function scrapeUrlSuper(
     }
   }
 
-  // ── Step 2: SMTP Generic Email Fallback ────────────────────────────────────
+  // ── Step 2: SMTP Generic Email — fallback OR upgrade from sales-only email ──
   if (!isCancelled?.()) {
     try {
       const { shouldRunSmtpFallback, smtpVerifyGenericEmail } = await import("./dataSources/smtpVerify");
-      if (shouldRunSmtpFallback(sections, fieldResults)) {
+
+      // Check if the only email we have is a sales/hr/recruitment-type email
+      // that's a poor match for operations/decision-maker outreach
+      const SALES_PREFIXES = /^(sales|hr|recruitment|recruiting|careers|jobs|marketing|pr|press|media|events|partnerships)@/i;
+      let hasSalesOnlyEmail = false;
+      for (const s of sections) {
+        if (/email/i.test(s.key + " " + s.label) && fieldResults[s.key]?.value) {
+          const currentEmail = fieldResults[s.key]!.value.trim().toLowerCase();
+          if (SALES_PREFIXES.test(currentEmail)) {
+            hasSalesOnlyEmail = true;
+          }
+        }
+      }
+
+      const shouldRun = shouldRunSmtpFallback(sections, fieldResults) || hasSalesOnlyEmail;
+
+      if (shouldRun) {
         const smtpResult = await smtpVerifyGenericEmail(_domain);
         if (smtpResult) {
           const sourceUrl = `smtp://${smtpResult.mxHost}:${smtpResult.port}`;
           for (const s of sections) {
-            if (/email/i.test(s.key + " " + s.label) && !fieldResults[s.key]?.value) {
-              fieldResults[s.key] = {
-                value: smtpResult.email,
-                confidence: smtpResult.catchAll ? 0.55 : 0.75,
-                sourceUrl,
-              };
-              data[s.key] = smtpResult.email;
+            if (/email/i.test(s.key + " " + s.label)) {
+              const currentEmail = fieldResults[s.key]?.value?.trim().toLowerCase() || "";
+
+              if (!currentEmail) {
+                // No email at all — use SMTP result
+                fieldResults[s.key] = {
+                  value: smtpResult.email,
+                  confidence: smtpResult.catchAll ? CONFIDENCE.INFERRED : CONFIDENCE.EXTRACTED,
+                  sourceUrl,
+                };
+                data[s.key] = smtpResult.email;
+              } else if (SALES_PREFIXES.test(currentEmail) && smtpResult.email !== currentEmail) {
+                // Has a sales-type email — prepend the verified generic as primary,
+                // keep the sales email as secondary
+                const combined = `${smtpResult.email}; ${currentEmail}`;
+                fieldResults[s.key] = {
+                  value: combined,
+                  confidence: smtpResult.catchAll ? CONFIDENCE.INFERRED : CONFIDENCE.EXTRACTED,
+                  sourceUrl,
+                };
+                data[s.key] = combined;
+                console.log(`[superScraper] SMTP upgrade: ${currentEmail} → ${smtpResult.email} (primary); ${currentEmail} (secondary)`);
+              }
             }
           }
           console.log(`[superScraper] SMTP verified: ${smtpResult.email} (catch-all: ${smtpResult.catchAll})`);
