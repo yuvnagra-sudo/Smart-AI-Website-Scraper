@@ -47,6 +47,16 @@ export async function fetchViaJina(url: string): Promise<JinaFetchResult | null>
 
     if (response.status === 200 && response.data) {
       const duration = Date.now() - startTime;
+      const contentStr = typeof response.data === 'string' ? response.data : '';
+
+      // Track Jina cost: $50 for 1B tokens ≈ $0.00000005/token, ~4 chars per token
+      try {
+        const { addExternalCost } = await import('./_core/openaiLLM');
+        const estimatedTokens = Math.ceil(contentStr.length / 4);
+        const cost = estimatedTokens * 0.00000005;
+        addExternalCost(cost, `jina.ai reader (${estimatedTokens} tokens)`);
+      } catch { /* non-fatal */ }
+
       console.log(`[Jina] ✅ Success (${duration}ms): ${url}`);
 
       return {

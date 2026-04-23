@@ -1137,6 +1137,36 @@ export async function processAgentJob(jobId: number) {
             console.log(`[processAgentJob] Directory expanded: ${result.entries.length} entries queued for scraping`);
             insertJobLog({ jobId, url: firm.websiteUrl, companyName: firm.companyName, status: "success", fieldsTotal: 0, fieldsFilled: 0, durationMs: Date.now() - startMs }).catch(() => {});
           } else {
+            // AI fit scoring for agent pipeline (if outreach context provided)
+            if (job.outreachContext || job.targetPersona) {
+              try {
+                // Find DM-like fields in the extracted data
+                const dmFields = Object.entries(result.data).filter(([k]) =>
+                  /contact|decision.?maker|dm|erp|person|name/i.test(k) && !/email|phone|linkedin/i.test(k)
+                );
+                const dmValue = dmFields.find(([, v]) => v?.trim())?.[1] || "";
+                // Extract name part (before comma/dash that indicates title)
+                const namePart = dmValue.split(/[,;|–—]/).map(p => p.trim()).find(p =>
+                  p.split(/\s+/).length >= 2 && !p.includes("@") && !/^\d/.test(p) && !p.toLowerCase().startsWith("no ")
+                );
+                if (namePart && namePart.length > 2) {
+                  const titlePart = dmValue.replace(namePart, "").replace(/^[,;|–— ]+/, "").trim();
+                  const fitScores = await scoreTeamMemberFit(
+                    [{ name: namePart, title: titlePart }],
+                    { companyName: firm.companyName },
+                    { context: job.outreachContext || "", persona: job.targetPersona || "", exclusions: job.exclusionCriteria || "" },
+                  );
+                  if (fitScores?.[0]) {
+                    result.data["fit_score"] = String(fitScores[0].score);
+                    result.data["buying_role"] = fitScores[0].buyingRole || "";
+                    result.data["fit_reasoning"] = fitScores[0].reasoning;
+                  }
+                }
+              } catch (err) {
+                console.warn(`[processAgentJob] Fit scoring failed for ${firm.companyName} (non-fatal):`, err);
+              }
+            }
+
             profileResults.push({
               "Company Name": firm.companyName,
               "Website": firm.websiteUrl,

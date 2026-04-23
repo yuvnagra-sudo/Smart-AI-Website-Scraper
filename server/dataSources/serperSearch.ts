@@ -63,6 +63,12 @@ async function serperSearch(query: string, num: number = 5): Promise<SerperSearc
       organic?: Array<{ title?: string; link?: string; snippet?: string; position?: number }>;
     };
 
+    // Track Serper cost: ~$0.001 per search (1 credit)
+    try {
+      const { addExternalCost } = await import("../_core/openaiLLM");
+      addExternalCost(0.001, "serper.dev search");
+    } catch { /* non-fatal */ }
+
     return (json.organic ?? []).map((r, i) => ({
       title: r.title ?? "",
       link: r.link ?? "",

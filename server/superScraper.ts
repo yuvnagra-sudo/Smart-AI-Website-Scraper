@@ -1058,9 +1058,17 @@ For each problematic field, provide a corrected value or "REMOVE" if the data is
             properties: {
               valid: { type: "boolean", description: "True if all fields look correct" },
               corrections: {
-                type: "object",
-                description: "Map of field key → corrected value or REMOVE",
-                additionalProperties: { type: "string" },
+                type: "array",
+                description: "List of field corrections. Empty array if everything is correct.",
+                items: {
+                  type: "object",
+                  properties: {
+                    field: { type: "string", description: "The field key to correct" },
+                    value: { type: "string", description: "Corrected value, or REMOVE to clear" },
+                  },
+                  required: ["field", "value"],
+                  additionalProperties: false,
+                },
               },
             },
             required: ["valid", "corrections"],
@@ -1072,9 +1080,16 @@ For each problematic field, provide a corrected value or "REMOVE" if the data is
 
     const raw = response.choices[0]?.message?.content ?? "{}";
     const parsed = JSON.parse(typeof raw === "string" ? raw : "{}");
+    // Convert corrections array [{field, value}] to object {field: value}
+    const corrections: Record<string, string> = {};
+    if (Array.isArray(parsed.corrections)) {
+      for (const c of parsed.corrections) {
+        if (c.field && c.value) corrections[c.field] = c.value;
+      }
+    }
     return {
       valid: parsed.valid !== false,
-      corrections: typeof parsed.corrections === "object" ? parsed.corrections : {},
+      corrections,
     };
   } catch (err) {
     console.warn(`[superScraper] Validation failed (non-fatal):`, err instanceof Error ? err.message : String(err));

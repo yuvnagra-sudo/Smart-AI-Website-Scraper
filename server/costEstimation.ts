@@ -23,8 +23,11 @@ export interface CostEstimate {
     llmExtraction: number;        // Phase 3 targeted extraction
     agenticEscalation: number;    // Phase 4 (20% of firms)
     validationConsolidation: number; // Phase 5a+5b
-    hunterEnrichment: number;     // Phase 6 Hunter.io
-    smtpVerification: number;     // Phase 6 SMTP (free)
+    hunterDomainSearch: number;   // Phase 6 Hunter Domain Search
+    hunterEmailFinder: number;    // Hunter Email Finder (name-based lookup)
+    serperSearch: number;         // Serper SERP search
+    jinaReader: number;           // Jina AI Reader
+    smtpVerification: number;     // SMTP (free)
   };
   estimatedTokens: {
     input: number;
@@ -99,23 +102,33 @@ export function estimateEnrichmentCost(
   // ~5000 input tokens, ~500 output tokens
   const phase5bCostPerFirm = llmCost(5000, 500, NANO_PRICING) * 0.5;
 
-  // ── Phase 6: Hunter.io (if enabled, ~60% of firms need email lookup) ──
-  const hunterCostPerFirm = HUNTER_ENABLED ? HUNTER_COST_PER_CALL * 0.6 : 0;
+  // ── Phase 6: Hunter Domain Search (if enabled, ~60% of firms need email lookup) ──
+  const hunterDomainCostPerFirm = HUNTER_ENABLED ? HUNTER_COST_PER_CALL * 0.6 : 0;
 
-  // ── Phase 6: SMTP (free) ──
+  // ── Hunter Email Finder (name-based lookup, ~30% of firms, avg 2 calls) ──
+  const hunterFinderCostPerFirm = HUNTER_ENABLED ? HUNTER_COST_PER_CALL * 2 * 0.3 : 0;
+
+  // ── Serper SERP search (~20% of firms need search, $0.001/call) ──
+  const SERPER_ENABLED = !!process.env.SERPER_API_KEY;
+  const serperCostPerFirm = SERPER_ENABLED ? 0.001 * 0.2 : 0;
+
+  // ── Jina Reader (~$0.00000005/token, ~10 pages × 5000 chars/4 = negligible) ──
+  const jinaCostPerFirm = 0.000006; // ~$0.000006 per firm, tracked for transparency
+
+  // ── SMTP (free) ──
   const smtpCostPerFirm = 0;
 
   // ── Raw per-firm cost ──
+  const externalCostPerFirm = hunterDomainCostPerFirm + hunterFinderCostPerFirm + serperCostPerFirm + jinaCostPerFirm + smtpCostPerFirm;
   const rawPerFirmCost =
     phase1CostPerFirm +
     phase3CostPerFirm +
     phase4CostPerFirm +
     phase5aCostPerFirm +
     phase5bCostPerFirm +
-    hunterCostPerFirm +
-    smtpCostPerFirm;
+    externalCostPerFirm;
 
-  // Apply 2.5x safety multiplier to LLM costs (not Hunter — that's a fixed API price)
+  // Apply 2.5x safety multiplier to LLM costs (not external APIs — those are fixed prices)
   const llmPerFirmCost = (
     phase1CostPerFirm +
     phase3CostPerFirm +
@@ -124,7 +137,7 @@ export function estimateEnrichmentCost(
     phase5bCostPerFirm
   ) * SAFETY_MULTIPLIER;
 
-  const perFirmCost = llmPerFirmCost + hunterCostPerFirm + smtpCostPerFirm;
+  const perFirmCost = llmPerFirmCost + externalCostPerFirm;
   const totalCost = perFirmCost * firmCount;
 
   // Cost range — ±40% (easy sites are much cheaper, hard sites hit Phase 4 heavily)
@@ -174,7 +187,10 @@ export function estimateEnrichmentCost(
       llmExtraction:            Math.round(phase3CostPerFirm  * SAFETY_MULTIPLIER * firmCount * 100) / 100,
       agenticEscalation:        Math.round(phase4CostPerFirm  * SAFETY_MULTIPLIER * firmCount * 100) / 100,
       validationConsolidation:  Math.round((phase5aCostPerFirm + phase5bCostPerFirm) * SAFETY_MULTIPLIER * firmCount * 100) / 100,
-      hunterEnrichment:         Math.round(hunterCostPerFirm  * firmCount * 100) / 100,
+      hunterDomainSearch:       Math.round(hunterDomainCostPerFirm * firmCount * 100) / 100,
+      hunterEmailFinder:        Math.round(hunterFinderCostPerFirm * firmCount * 100) / 100,
+      serperSearch:              Math.round(serperCostPerFirm * firmCount * 100) / 100,
+      jinaReader:                Math.round(jinaCostPerFirm * firmCount * 10000) / 10000,
       smtpVerification:         0,
     },
     estimatedTokens: {

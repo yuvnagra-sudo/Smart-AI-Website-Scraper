@@ -275,6 +275,12 @@ export async function hunterEmailFinder(
     const confidence = json.data?.score ?? 0;
     const sources = json.data?.sources?.length ?? 0;
 
+    // Track cost — Email Finder costs 1 credit ($0.01) per call (not skipped)
+    try {
+      const { addExternalCost } = await import("../_core/openaiLLM");
+      addExternalCost(0.01, "hunter.io email finder");
+    } catch { /* non-fatal */ }
+
     if (email) {
       console.log(`[hunterApi] Email Finder found: ${email} (confidence: ${confidence}, sources: ${sources})`);
     } else {
