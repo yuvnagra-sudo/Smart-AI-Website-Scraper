@@ -23,17 +23,16 @@ const SMTP_PORTS = [25, 587, 465];
 const CONNECT_TIMEOUT_MS = 6_000;
 const CONVERSATION_TIMEOUT_MS = 12_000;
 
+// Only prefixes that actually convert for outreach — ranked by effectiveness.
+// Removed: support, help, hi, mail (rarely forwarded to decision makers)
 const GENERIC_PREFIXES = [
   "info",
   "hello",
   "contact",
-  "team",
-  "hi",
-  "support",
-  "help",
   "office",
   "admin",
-  "mail",
+  "team",
+  "general",
 ];
 
 // ---------------------------------------------------------------------------
@@ -214,5 +213,99 @@ export async function smtpVerifyGenericEmail(
   }
 
   console.log(`[smtpVerify] No generic emails accepted for ${cleanDomain}`);
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Name-based email verification
+// ---------------------------------------------------------------------------
+
+/**
+ * When we have a person's name but no email, generate common email patterns
+ * from their name + domain and SMTP-verify each one until we find a hit.
+ *
+ * Tries the most common corporate formats first:
+ *   firstname.lastname@, firstname@, flastname@, firstnamelastname@, f.lastname@
+ */
+export async function smtpVerifyPersonEmail(
+  firstName: string,
+  lastName: string,
+  domain: string,
+): Promise<SmtpVerifyResult | null> {
+  if (!firstName || !lastName) return null;
+
+  const cleanDomain = domain.replace(/^www\./, "").toLowerCase();
+  const first = firstName.toLowerCase().replace(/[^a-z]/g, "");
+  const last = lastName.toLowerCase().replace(/[^a-z]/g, "");
+
+  if (!first || !last) return null;
+
+  const fi = first[0];
+
+  // Patterns ordered by prevalence in corporate environments
+  const patterns = [
+    `${first}.${last}`,       // john.smith@ — most common globally
+    `${first}`,               // john@ — common at small companies
+    `${fi}${last}`,           // jsmith@ — common at large corps
+    `${first}${last}`,        // johnsmith@ — common alias
+    `${fi}.${last}`,          // j.smith@
+    `${last}.${first}`,       // smith.john@ — finance/legal
+    `${first}_${last}`,       // john_smith@
+    `${first}-${last}`,       // john-smith@
+  ];
+
+  console.log(`[smtpVerify] Probing ${patterns.length} name patterns for ${first} ${last} @ ${cleanDomain}`);
+
+  // DNS MX lookup
+  let mxRecords: Array<{ exchange: string; priority: number }>;
+  try {
+    mxRecords = await dns.resolveMx(cleanDomain);
+  } catch {
+    console.log(`[smtpVerify] No MX records for ${cleanDomain}`);
+    return null;
+  }
+  if (mxRecords.length === 0) return null;
+
+  mxRecords.sort((a, b) => a.priority - b.priority);
+  const mxHost = mxRecords[0].exchange;
+
+  // Find a working port
+  let workingPort: number | null = null;
+  for (const port of SMTP_PORTS) {
+    try {
+      const socket = await connectSmtp(mxHost, port);
+      socket.destroy();
+      workingPort = port;
+      break;
+    } catch {
+      continue;
+    }
+  }
+
+  if (!workingPort) {
+    console.log(`[smtpVerify] Cannot connect to ${mxHost} on any SMTP port`);
+    return null;
+  }
+
+  // Catch-all detection
+  const probeCode = await testAddress(mxHost, workingPort, `zz_probe_noreply_xyz@${cleanDomain}`);
+  if (probeCode === 250) {
+    // Catch-all: return the most common pattern (firstname.lastname@)
+    const email = `${patterns[0]}@${cleanDomain}`;
+    console.log(`[smtpVerify] ${cleanDomain} is catch-all — returning ${email} for ${first} ${last}`);
+    return { email, catchAll: true, mxHost, port: workingPort };
+  }
+
+  // Test each pattern
+  for (const pattern of patterns) {
+    const email = `${pattern}@${cleanDomain}`;
+    const code = await testAddress(mxHost, workingPort, email);
+    if (code === 250) {
+      console.log(`[smtpVerify] Verified person email: ${email} on ${mxHost}:${workingPort}`);
+      return { email, catchAll: false, mxHost, port: workingPort };
+    }
+  }
+
+  console.log(`[smtpVerify] No name-based emails accepted for ${first} ${last} @ ${cleanDomain}`);
   return null;
 }

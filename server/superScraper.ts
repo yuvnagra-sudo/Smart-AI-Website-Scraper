@@ -1725,6 +1725,66 @@ export async function scrapeUrlSuper(
     }
   }
 
+  // ── Step 3: SMTP name-based email probe (last resort) ──────────────────────
+  //  If we have a person's name but no personal email, try SMTP with their
+  //  name patterns (john.smith@, jsmith@, etc.) against the domain's mail server.
+  if (!isCancelled?.()) {
+    try {
+      // Find a DM name field that has a value, and an email field that's empty or generic-only
+      let dmName: string | null = null;
+      let emailSectionKey: string | null = null;
+
+      for (const s of sections) {
+        const combined = (s.key + " " + s.label).toLowerCase();
+        if (/decision.?maker|key.?contact|erp.?contact|primary.?contact|dm\d|contact.?name/i.test(combined) && data[s.key]?.trim()) {
+          // Extract just the name part (strip title/role after comma)
+          const raw = data[s.key].trim();
+          const nameOnly = raw.split(/[,;|–—]/).map((p: string) => p.trim()).find((p: string) => {
+            // Must look like a name (2+ words, no @ or digits-only)
+            return p.split(/\s+/).length >= 2 && !p.includes("@") && !/^\d+$/.test(p) && !p.toLowerCase().startsWith("no ");
+          });
+          if (nameOnly) dmName = nameOnly;
+        }
+        if (/email|contact.?email/i.test(combined)) {
+          emailSectionKey = s.key;
+        }
+      }
+
+      if (dmName && emailSectionKey) {
+        const currentEmail = (fieldResults[emailSectionKey]?.value || "").trim().toLowerCase();
+        const hasPersonalEmail = currentEmail && !currentEmail.startsWith("info@") && !currentEmail.startsWith("contact@")
+          && !currentEmail.startsWith("hello@") && !currentEmail.startsWith("office@") && !currentEmail.startsWith("admin@")
+          && !currentEmail.startsWith("team@") && !currentEmail.startsWith("general@") && !currentEmail.startsWith("sales@")
+          && !currentEmail.startsWith("hr@") && currentEmail.includes("@");
+
+        if (!hasPersonalEmail) {
+          const nameParts = dmName.split(/\s+/).filter((p: string) => p.length > 0);
+          if (nameParts.length >= 2) {
+            const firstName = nameParts[0];
+            const lastName = nameParts[nameParts.length - 1];
+            const { smtpVerifyPersonEmail } = await import("./dataSources/smtpVerify");
+            const personResult = await smtpVerifyPersonEmail(firstName, lastName, _domain);
+
+            if (personResult) {
+              const existing = data[emailSectionKey] || "";
+              const combined = existing ? `${personResult.email}; ${existing}` : personResult.email;
+              fieldResults[emailSectionKey] = {
+                value: combined,
+                confidence: personResult.catchAll ? CONFIDENCE.INFERRED : CONFIDENCE.EXTRACTED,
+                sourceUrl: `smtp://${personResult.mxHost}:${personResult.port}`,
+              };
+              data[emailSectionKey] = combined;
+              console.log(`[superScraper] SMTP name probe: ${dmName} → ${personResult.email} (catch-all: ${personResult.catchAll})`);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn(`[superScraper] SMTP name probe failed (non-fatal):`, err);
+      extractionFailures.push(`SMTP name probe: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
   // ── BUILD FINAL RESULT ─────────────────────────────────────────────────────
 
   const emptyFields = sections.map(s => s.key).filter(k => !data[k] || data[k].trim() === "");
