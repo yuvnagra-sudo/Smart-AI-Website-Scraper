@@ -1,19 +1,19 @@
 /**
  * SMTP Handshake Email Verification
  *
- * Last-resort fallback: connects to the domain's MX server and probes
- * generic email addresses (info@, hello@, contact@) via SMTP RCPT TO.
+ * Probes email addresses via SMTP RCPT TO to check if they're deliverable.
+ * Uses Google DNS-over-HTTPS for MX lookups (Node.js dns.resolveMx() fails
+ * on Railway and many containerized environments due to blocked port 53).
  *
- * Cost: Free (no external API).
+ * Cost: Free (no external API for SMTP; Google DoH is free and unlimited).
  * Timeout: ~6s connect + 12s conversation per domain.
  *
- * Note: Cloud providers like Railway often block port 25. The function
- * gracefully falls back to ports 587 and 465, then returns null.
+ * Catch-all detection: probes 3 random gibberish addresses. If ALL 3 are
+ * accepted (250), the domain is a catch-all and we can't trust RCPT TO.
  */
 
 import * as net from "net";
 import * as dns from "dns/promises";
-import type { AgentSection } from "../agentScraper";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -24,7 +24,6 @@ const CONNECT_TIMEOUT_MS = 6_000;
 const CONVERSATION_TIMEOUT_MS = 12_000;
 
 // Only prefixes that actually convert for outreach — ranked by effectiveness.
-// Removed: support, help, hi, mail (rarely forwarded to decision makers)
 const GENERIC_PREFIXES = [
   "info",
   "hello",
@@ -50,6 +49,49 @@ export interface FieldResult {
   value: string;
   confidence: number;
   sourceUrl?: string;
+}
+
+// ---------------------------------------------------------------------------
+// DNS MX Lookup — Google DoH with Node.js dns fallback
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve MX records using Google DNS-over-HTTPS first (works everywhere),
+ * falling back to Node.js native dns.resolveMx() if Google is unreachable.
+ */
+async function resolveMxRecords(domain: string): Promise<Array<{ exchange: string; priority: number }>> {
+  // Try Google DNS-over-HTTPS first (works on Railway, Docker, etc.)
+  try {
+    const res = await fetch(
+      `https://dns.google/resolve?name=${encodeURIComponent(domain)}&type=MX`,
+      { signal: AbortSignal.timeout(5_000) },
+    );
+    if (res.ok) {
+      const json = (await res.json()) as {
+        Status: number;
+        Answer?: Array<{ name: string; type: number; data: string }>;
+      };
+      if (json.Status === 0 && json.Answer) {
+        const mxAnswers = json.Answer.filter(a => a.type === 15);
+        return mxAnswers.map(a => {
+          // data format: "10 mx1.example.com."
+          const parts = a.data.split(/\s+/);
+          const priority = parseInt(parts[0], 10) || 0;
+          const exchange = (parts[1] || "").replace(/\.$/, ""); // strip trailing dot
+          return { exchange, priority };
+        }).filter(m => m.exchange.length > 0);
+      }
+    }
+  } catch {
+    console.log(`[smtpVerify] Google DoH failed, trying native DNS`);
+  }
+
+  // Fallback to Node.js native (may fail in containers)
+  try {
+    return await dns.resolveMx(domain);
+  } catch {
+    return [];
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -149,26 +191,48 @@ async function testAddress(
 }
 
 // ---------------------------------------------------------------------------
-// Main function
+// Catch-all detection — 3 random probes for reliability
 // ---------------------------------------------------------------------------
 
-export async function smtpVerifyGenericEmail(
+/**
+ * Test 3 random gibberish addresses. If ALL 3 return 250, the domain
+ * accepts anything (catch-all). A single rejection means it's real filtering.
+ */
+async function isCatchAllDomain(
+  mxHost: string,
+  port: number,
   domain: string,
-): Promise<SmtpVerifyResult | null> {
-  const cleanDomain = domain.replace(/^www\./, "").toLowerCase();
+): Promise<boolean> {
+  const probes = [
+    `zz_probe_xk7q2m_${Date.now()}@${domain}`,
+    `zz_probe_j9f3pw_${Date.now() + 1}@${domain}`,
+    `zz_probe_m4v8nt_${Date.now() + 2}@${domain}`,
+  ];
 
-  // DNS MX lookup
-  let mxRecords: Array<{ exchange: string; priority: number }>;
-  try {
-    mxRecords = await dns.resolveMx(cleanDomain);
-  } catch {
-    console.log(`[smtpVerify] No MX records for ${cleanDomain}`);
+  let acceptCount = 0;
+  for (const probe of probes) {
+    const code = await testAddress(mxHost, port, probe);
+    if (code === 250) acceptCount++;
+  }
+
+  const isCatchAll = acceptCount === 3;
+  if (isCatchAll) {
+    console.log(`[smtpVerify] ${domain} is catch-all (${acceptCount}/3 gibberish accepted)`);
+  }
+  return isCatchAll;
+}
+
+// ---------------------------------------------------------------------------
+// Shared SMTP setup (MX lookup + port finding)
+// ---------------------------------------------------------------------------
+
+async function setupSmtp(domain: string): Promise<{ mxHost: string; port: number; catchAll: boolean } | null> {
+  const mxRecords = await resolveMxRecords(domain);
+  if (mxRecords.length === 0) {
+    console.log(`[smtpVerify] No MX records for ${domain}`);
     return null;
   }
 
-  if (mxRecords.length === 0) return null;
-
-  // Sort by priority (lower = preferred)
   mxRecords.sort((a, b) => a.priority - b.priority);
   const mxHost = mxRecords[0].exchange;
 
@@ -190,25 +254,35 @@ export async function smtpVerifyGenericEmail(
     return null;
   }
 
-  // Catch-all detection — probe with a nonsense address
-  const PROBE_PREFIX = "zz_smtp_probe_noreply_xyz";
-  const probeAddress = `${PROBE_PREFIX}@${cleanDomain}`;
-  const probeCode = await testAddress(mxHost, workingPort, probeAddress);
-  const isCatchAll = probeCode === 250;
+  const catchAll = await isCatchAllDomain(mxHost, workingPort, domain);
+  return { mxHost, port: workingPort, catchAll };
+}
 
-  if (isCatchAll) {
+// ---------------------------------------------------------------------------
+// Main function — generic email verification
+// ---------------------------------------------------------------------------
+
+export async function smtpVerifyGenericEmail(
+  domain: string,
+): Promise<SmtpVerifyResult | null> {
+  const cleanDomain = domain.replace(/^www\./, "").toLowerCase();
+
+  const smtp = await setupSmtp(cleanDomain);
+  if (!smtp) return null;
+
+  if (smtp.catchAll) {
     const email = `${GENERIC_PREFIXES[0]}@${cleanDomain}`;
-    console.log(`[smtpVerify] ${cleanDomain} is catch-all — returning ${email}`);
-    return { email, catchAll: true, mxHost, port: workingPort };
+    console.log(`[smtpVerify] Catch-all — returning ${email}`);
+    return { email, catchAll: true, mxHost: smtp.mxHost, port: smtp.port };
   }
 
   // Test generic prefixes in order
   for (const prefix of GENERIC_PREFIXES) {
     const email = `${prefix}@${cleanDomain}`;
-    const code = await testAddress(mxHost, workingPort, email);
+    const code = await testAddress(smtp.mxHost, smtp.port, email);
     if (code === 250) {
-      console.log(`[smtpVerify] Verified: ${email} on ${mxHost}:${workingPort}`);
-      return { email, catchAll: false, mxHost, port: workingPort };
+      console.log(`[smtpVerify] Verified: ${email} on ${smtp.mxHost}:${smtp.port}`);
+      return { email, catchAll: false, mxHost: smtp.mxHost, port: smtp.port };
     }
   }
 
@@ -223,9 +297,6 @@ export async function smtpVerifyGenericEmail(
 /**
  * When we have a person's name but no email, generate common email patterns
  * from their name + domain and SMTP-verify each one until we find a hit.
- *
- * Tries the most common corporate formats first:
- *   firstname.lastname@, firstname@, flastname@, firstnamelastname@, f.lastname@
  */
 export async function smtpVerifyPersonEmail(
   firstName: string,
@@ -256,53 +327,23 @@ export async function smtpVerifyPersonEmail(
 
   console.log(`[smtpVerify] Probing ${patterns.length} name patterns for ${first} ${last} @ ${cleanDomain}`);
 
-  // DNS MX lookup
-  let mxRecords: Array<{ exchange: string; priority: number }>;
-  try {
-    mxRecords = await dns.resolveMx(cleanDomain);
-  } catch {
-    console.log(`[smtpVerify] No MX records for ${cleanDomain}`);
-    return null;
-  }
-  if (mxRecords.length === 0) return null;
+  const smtp = await setupSmtp(cleanDomain);
+  if (!smtp) return null;
 
-  mxRecords.sort((a, b) => a.priority - b.priority);
-  const mxHost = mxRecords[0].exchange;
-
-  // Find a working port
-  let workingPort: number | null = null;
-  for (const port of SMTP_PORTS) {
-    try {
-      const socket = await connectSmtp(mxHost, port);
-      socket.destroy();
-      workingPort = port;
-      break;
-    } catch {
-      continue;
-    }
-  }
-
-  if (!workingPort) {
-    console.log(`[smtpVerify] Cannot connect to ${mxHost} on any SMTP port`);
-    return null;
-  }
-
-  // Catch-all detection
-  const probeCode = await testAddress(mxHost, workingPort, `zz_probe_noreply_xyz@${cleanDomain}`);
-  if (probeCode === 250) {
+  if (smtp.catchAll) {
     // Catch-all: return the most common pattern (firstname.lastname@)
     const email = `${patterns[0]}@${cleanDomain}`;
-    console.log(`[smtpVerify] ${cleanDomain} is catch-all — returning ${email} for ${first} ${last}`);
-    return { email, catchAll: true, mxHost, port: workingPort };
+    console.log(`[smtpVerify] Catch-all — returning ${email} for ${first} ${last}`);
+    return { email, catchAll: true, mxHost: smtp.mxHost, port: smtp.port };
   }
 
   // Test each pattern
   for (const pattern of patterns) {
     const email = `${pattern}@${cleanDomain}`;
-    const code = await testAddress(mxHost, workingPort, email);
+    const code = await testAddress(smtp.mxHost, smtp.port, email);
     if (code === 250) {
-      console.log(`[smtpVerify] Verified person email: ${email} on ${mxHost}:${workingPort}`);
-      return { email, catchAll: false, mxHost, port: workingPort };
+      console.log(`[smtpVerify] Verified person email: ${email} on ${smtp.mxHost}:${smtp.port}`);
+      return { email, catchAll: false, mxHost: smtp.mxHost, port: smtp.port };
     }
   }
 
