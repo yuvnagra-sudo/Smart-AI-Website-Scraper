@@ -181,14 +181,77 @@ async function scoreChunk(
 }
 
 // ---------------------------------------------------------------------------
+// Title-heuristic fallback ranker
+// ---------------------------------------------------------------------------
+
+/**
+ * Deterministic title-based ranker. Used when the user has not provided
+ * an outreach context or target persona — we still want to give them a
+ * "who to call first" answer based on seniority and likely buying role.
+ *
+ * Scores follow the same 0-100 scale as the LLM scorer so downstream
+ * consumers (Excel sort, UI sort) work identically.
+ */
+function scoreByTitleHeuristic(members: TeamMemberInput[]): FitScore[] {
+  const TITLE_RULES: Array<{ re: RegExp; score: number; role: string | null; reason: string }> = [
+    // Top-level decision makers
+    { re: /\bCEO\b|chief executive|\bowner\b|\bpresident\b|\bfounder\b|co[\s-]?founder|managing (partner|director|principal)/i,
+      score: 90, role: "Decision Maker", reason: "Top-level executive — primary outreach target by seniority" },
+    // Financial leadership
+    { re: /\bCFO\b|chief financial|\bcontroller\b|\btreasurer\b|VP\s+(of\s+)?finance|director of finance|finance director|head of finance/i,
+      score: 80, role: "Financial Buyer", reason: "Owns budget — typical financial approver" },
+    // Technical leadership
+    { re: /\bCTO\b|chief technology|\bCIO\b|chief information|VP\s+(of\s+)?(engineering|technology|product|IT)|head of (engineering|technology|product|IT)|director of (engineering|technology|IT)/i,
+      score: 80, role: "Technical Buyer", reason: "Technical leadership — evaluates fit and feasibility" },
+    // Other C-suite
+    { re: /\bCOO\b|chief operating|\bCMO\b|chief marketing|\bCRO\b|chief revenue|\bCSO\b|chief strategy|\bCHRO\b|chief (people|human|hr)|\bCISO\b|chief security|chief [a-z]+ officer/i,
+      score: 80, role: "Decision Maker", reason: "C-suite executive — likely decision maker in their function" },
+    // VP-level
+    { re: /\b(SVP|EVP|VP)\b|vice president|senior vice president|executive vice president/i,
+      score: 70, role: "Decision Maker", reason: "VP-level — typically holds budget for their function" },
+    // Partner (law / consulting / accounting / VC firms)
+    { re: /\bpartner\b/i,
+      score: 70, role: "Decision Maker", reason: "Partner — senior leadership, typically holds budget authority" },
+    // Director / Head of
+    { re: /\bdirector\b|\bhead of\b/i,
+      score: 60, role: "Influencer", reason: "Director-level — strong influencer, often champion" },
+    // Generic / gatekeeper entry
+    { re: /general contact|^info$|^contact$|generic email|reception/i,
+      score: 30, role: "Gatekeeper", reason: "Generic contact — may forward but not the decision maker" },
+    // Manager / Lead
+    { re: /\b(senior )?manager\b|\blead\b|\bteam lead\b|\bprincipal\b/i,
+      score: 45, role: "Influencer", reason: "Mid-level — useful contact but not typical decision maker" },
+    // Senior IC
+    { re: /\bsenior\b|\bstaff\b|\barchitect\b/i,
+      score: 35, role: null, reason: "Senior individual contributor — limited buying authority" },
+  ];
+
+  return members.map((m): FitScore => {
+    const haystack = `${m.title || ""} ${m.jobFunction || ""}`.trim();
+    if (!haystack && (!m.name || /general contact|generic|^info|^contact/i.test(m.name))) {
+      return { name: m.name, score: 30, reasoning: "Generic contact — may forward but not the decision maker", buyingRole: "Gatekeeper" };
+    }
+    for (const rule of TITLE_RULES) {
+      if (rule.re.test(haystack) || rule.re.test(m.name || "")) {
+        return { name: m.name, score: rule.score, reasoning: rule.reason, buyingRole: rule.role };
+      }
+    }
+    return { name: m.name, score: 25, reasoning: "Individual contributor or unspecified role — low priority for outreach", buyingRole: null };
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Main exported function
 // ---------------------------------------------------------------------------
 
 /**
  * Score team members for outreach fit and identify buying committee roles.
  *
- * Returns null on any failure — the pipeline should continue without scores.
- * Returns an array of FitScore objects matched by name to the input members.
+ * If outreach context or target persona is provided, runs the LLM-based scorer.
+ * Otherwise falls back to a deterministic title-based ranker so users always
+ * get a "who to call first" signal.
+ *
+ * Returns null only if the input is empty or the LLM call throws.
  */
 export async function scoreTeamMemberFit(
   members: TeamMemberInput[],
@@ -196,7 +259,9 @@ export async function scoreTeamMemberFit(
   outreach: OutreachContext,
 ): Promise<FitScore[] | null> {
   if (members.length === 0) return null;
-  if (!outreach.context && !outreach.persona) return null;
+  if (!outreach.context && !outreach.persona) {
+    return scoreByTitleHeuristic(members);
+  }
 
   try {
     let allScores: FitScore[] = [];

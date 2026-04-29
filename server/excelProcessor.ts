@@ -304,7 +304,7 @@ export async function parseInputExcel(fileUrl: string, columnMapping?: ColumnMap
 }
 
 import type { InvestmentThesisSummary } from "./investmentThesisAnalyzer";
-import type { AgentSection, DirectoryEntry, ScrapeDiagnostics } from "./agentScraper";
+import type { AgentSection, DirectoryEntry, ScrapeDiagnostics } from "./scraper/agentTypes";
 
 export interface ProcessingSummaryData {
   firmName: string;

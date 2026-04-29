@@ -1,4 +1,4 @@
-import { boolean, decimal, int, mysqlEnum, mysqlTable, text, timestamp, unique, varchar, index } from "drizzle-orm/mysql-core";
+import { boolean, decimal, int, json, mysqlEnum, mysqlTable, text, timestamp, unique, varchar, index } from "drizzle-orm/mysql-core";
 
 /**
  * Core user table backing auth flow.
@@ -95,13 +95,19 @@ export const enrichedFirms = mysqlTable("enrichedFirms", {
   investmentNiches: text("investmentNiches"),
   nichesConfidence: int("nichesConfidence"),
   nichesSourceUrl: text("nichesSourceUrl"),
-  // NEW: Structured firm-level investment mandate fields
-  investmentThesis: text("investmentThesis"), // Investment philosophy/mandate
-  aum: text("aum"), // Assets under management (e.g., "$90B")
-  sectorFocus: text("sectorFocus"), // Detailed sector list (JSON array as string)
-  geographicFocus: text("geographicFocus"), // Geographic preferences (JSON array as string)
-  foundedYear: text("foundedYear"), // Year founded
-  headquarters: text("headquarters"), // HQ location
+  // Universal extracted-data blob — stores the full per-template field map from
+  // the agent pipeline (industry, business_model, products_services, etc.).
+  // Use this for any fields that don't map cleanly to a typed column.
+  extractedData: json("extractedData"),
+  // Legacy investment-mandate fields, kept nullable for backward compatibility
+  // with rows produced by the now-removed VC pipeline. New code should write
+  // type-specific fields into extractedData instead.
+  investmentThesis: text("investmentThesis"),
+  aum: text("aum"),
+  sectorFocus: text("sectorFocus"),
+  geographicFocus: text("geographicFocus"),
+  foundedYear: text("foundedYear"),
+  headquarters: text("headquarters"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 

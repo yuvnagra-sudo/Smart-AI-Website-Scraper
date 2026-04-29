@@ -377,9 +377,9 @@ const LOCAL_TEMPLATE: Template = {
 // ---------------------------------------------------------------------------
 
 export const ALL_TEMPLATES: Template[] = [
-  VC_TEMPLATE,
   B2B_TEMPLATE,
   PEOPLE_TEMPLATE,
+  VC_TEMPLATE,
   HEALTHCARE_TEMPLATE,
   ECOMMERCE_TEMPLATE,
   REALESTATE_TEMPLATE,
@@ -398,6 +398,19 @@ export function getTemplate(id: string): Template {
 export interface AgentSection { key: string; label: string; desc: string; }
 
 export const TEMPLATE_SECTIONS: Record<string, AgentSection[]> = {
+  vc: [
+    { key: "investor_type",        label: "Investor Type",           desc: "Type of investor: VC, angel, family office, accelerator, corporate VC, growth equity, etc." },
+    { key: "investment_stages",    label: "Investment Stages",       desc: "Funding stages they invest in (pre-seed, seed, Series A/B/C, growth)" },
+    { key: "investment_focus",     label: "Sector / Theme Focus",    desc: "Industries, verticals, or themes they invest in (e.g. SaaS, fintech, climate, biotech)" },
+    { key: "check_size",           label: "Check Size",              desc: "Typical investment size or range (e.g. $500K–$5M)" },
+    { key: "aum_fund_size",        label: "AUM / Fund Size",         desc: "Assets under management or current fund size if disclosed" },
+    { key: "geographic_focus",     label: "Geographic Focus",        desc: "Regions or countries where they invest" },
+    { key: "investment_thesis",    label: "Investment Thesis",       desc: "Their stated investment thesis, philosophy, or what they look for in companies" },
+    { key: "portfolio_companies",  label: "Portfolio Companies",     desc: "Notable portfolio companies, ideally with sectors and approximate dates" },
+    { key: "key_partners",         label: "Partners / Decision Makers", desc: "Names and titles of partners, principals, or other investment-decision-makers" },
+    { key: "hq_location",          label: "HQ Location",             desc: "Headquarters city and country" },
+    { key: "founded_year",         label: "Founded Year",            desc: "Year the firm was founded" },
+  ],
   b2b: [
     { key: "industry_vertical",    label: "Industry / Vertical",     desc: "What industry or vertical does this company operate in? (e.g. SaaS, Fintech, Healthcare IT)" },
     { key: "business_model",       label: "Business Model",          desc: "How does the company make money? (SaaS, services, marketplace, agency, etc.)" },
@@ -475,6 +488,7 @@ export const TEMPLATE_SECTIONS: Record<string, AgentSection[]> = {
 };
 
 export const TEMPLATE_SYSTEM_PROMPTS: Record<string, string> = {
+  vc:         "You are an investment research analyst. For each VC firm or investor website, extract the requested fields about their investment focus, fund details, partners, and portfolio. Pull stated facts, not inferences. Return ONLY valid JSON with one key per requested field.",
   b2b:        "You are a B2B business intelligence analyst. For each company website, extract the requested fields. Focus on business model, product offering, target market, team leadership, and customer evidence. Be specific and concrete — avoid vague summaries. Return ONLY valid JSON with one key per requested field.",
   people:     "You are a professional profile researcher. For each person's profile page, bio, or LinkedIn, extract the requested fields. Focus on concrete facts: titles, companies, achievements. Return ONLY valid JSON with one key per requested field.",
   healthcare: "You are a healthcare market researcher. For each provider website, extract the requested fields about the facility, clinical specialties, staff, and patient services. Be factual and specific. Return ONLY valid JSON with one key per requested field.",

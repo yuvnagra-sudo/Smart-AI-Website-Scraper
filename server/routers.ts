@@ -11,7 +11,7 @@ import { getDb } from "./db";
 import { enrichedFirms, teamMembers, portfolioCompanies, investmentThesis } from "../drizzle/schema";
 import { eq, and, like, count } from "drizzle-orm";
 import { parseInputExcel, parseInputHeaders, createOutputExcel, createAgentOutputExcel, type EnrichedVCData, type TeamMemberData, type PortfolioCompanyData, type ProcessingSummaryData, type FileHeaders } from "./excelProcessor";
-import { scrapeUrl, type AgentSection, type DirectoryEntry as AgentDirectoryEntry, type ScrapeStats, type ScrapeDiagnostics } from "./agentScraper";
+import type { AgentSection, DirectoryEntry as AgentDirectoryEntry, ScrapeStats, ScrapeDiagnostics } from "./scraper/agentTypes";
 import { scrapeUrlSuper } from "./superScraper";
 import { generateInvestmentThesisSummaries } from "./investmentThesisAnalyzer";
 import { generateResultsFile } from "./generateResultsService";
@@ -29,10 +29,9 @@ import { saveFirmImmediately, getProcessedFirms } from "./incrementalSave";
 import { scoreTeamMemberFit } from "./personFitScorer";
 import { isJobCancelled, isJobPaused } from "./_core/jobCancellation";
 
-// Feature flag: set USE_SUPER_SCRAPER=true in Railway env to activate the 5-phase super scraper.
-// Falls back to the original agent loop when unset or false.
-const USE_SUPER_SCRAPER = process.env.USE_SUPER_SCRAPER === "true";
-const activeScraper = USE_SUPER_SCRAPER ? scrapeUrlSuper : scrapeUrl;
+// All agent jobs run through the super scraper (5-phase pipeline). The legacy
+// agentScraper.ts / scrapeUrl path was removed.
+const activeScraper = scrapeUrlSuper;
 
 export const appRouter = router({
     // if you need to use socket.io, read and register route in server/_core/index.ts, all api should start with '/api/' so that the gateway can route correctly
@@ -238,7 +237,7 @@ export const appRouter = router({
           tierFilter: input.tierFilter || "all",
           deepTeamProfileScraping: input.deepTeamProfileScraping !== false,
           maxTeamProfiles: input.maxTeamProfiles || 200,
-          template: input.template || "vc",
+          template: input.template || "b2b",
           estimatedCostUSD: String(estimate.totalCost),
           sectionsJson: input.sectionsJson,
           systemPrompt: input.systemPrompt,
@@ -516,17 +515,15 @@ Return ONLY valid JSON (no markdown, no code fences):
           });
         }
 
-        // Prepare job for resume
+        // Prepare job for resume — sets status back to "pending".
+        // The worker will pick it up within ~5 seconds (POLL_INTERVAL).
+        // Do NOT invoke processAgentJob directly here — that causes dual processing
+        // when the worker also claims the job.
         await prepareJobForResume(input.jobId);
-
-        // Restart processing
-        processEnrichmentJob(input.jobId).catch((error) => {
-          console.error(`Error resuming job ${input.jobId}:`, error);
-        });
 
         const progress = await getResumeProgress(input.jobId);
         return {
-          message: "Job resumed successfully",
+          message: "Job resumed — worker will continue within 5s",
           ...progress,
         };
       }),
@@ -689,332 +686,22 @@ Return ONLY valid JSON (no markdown, no code fences):
   }),
 });
 
-// Background job processor
-export async function processEnrichmentJob(jobId: number) {
-  // Start database keep-alive for long-running job
-  const keepAlive = new ConnectionKeepAlive();
-  keepAlive.start();
-  
-  try {
-    await updateEnrichmentJob(jobId, { status: "processing" });
-
-    const job = await getEnrichmentJob(jobId);
-    if (!job) throw new Error("Job not found");
-
-    // Parse input file (with column mapping if user overrode defaults)
-    const columnMapping = job.columnMappingJson ? JSON.parse(job.columnMappingJson) : undefined;
-    const allFirms = await parseInputExcel(job.inputFileUrl, columnMapping);
-    
-    // Get list of already-processed firms from processedFirms table
-    const processedFirmNames = await getProcessedFirms(jobId);
-    console.log(`[Job ${jobId}] Found ${processedFirmNames.length} already-processed firms in database`);
-    
-    // Filter out already-processed firms to enable true resumption
-    const firms = allFirms.filter(firm => !processedFirmNames.includes(firm.companyName));
-    
-    if (processedFirmNames.length > 0) {
-      console.log(`[Job ${jobId}] Resuming job: ${processedFirmNames.length} firms already completed, ${firms.length} remaining`);
-    } else {
-      console.log(`[Job ${jobId}] Starting fresh with ${allFirms.length} firms`);
-    }
-
-    // Initialize enrichment service
-    const enricher = new VCEnrichmentService();
-
-    const enrichedFirmsData: EnrichedVCData[] = [];
-    const allTeamMembers: TeamMemberData[] = [];
-    const allPortfolioCompanies: PortfolioCompanyData[] = [];
-
-    // Concurrent worker queue — processes up to CONCURRENCY firms simultaneously.
-    // Node.js is single-threaded so queue.shift() and Set mutations are race-free.
-    const CONCURRENCY = 20;
-    const firmQueue = [...firms];
-    const activeFirms = new Set<string>();
-    let parallelProcessedCount = 0;
-
-    const processFirm = async (firm: typeof firms[number]) => {
-      const result = await enricher.enrichVCFirm(
-        firm.companyName,
-        firm.websiteUrl,
-        firm.description,
-        undefined,
-        {
-          deepTeamProfileScraping: job.deepTeamProfileScraping !== false,
-          maxTeamProfiles: job.maxTeamProfiles || 200,
-        }
-      );
-
-      // AI fit scoring + buying committee identification (if outreach context provided)
-      let fitScores = null;
-      if (job.outreachContext || job.targetPersona) {
-        try {
-          fitScores = await scoreTeamMemberFit(
-            result.teamMembers,
-            { companyName: result.companyName, description: result.description },
-            {
-              context: job.outreachContext || "",
-              persona: job.targetPersona || "",
-              exclusions: job.exclusionCriteria || "",
-            },
-          );
-        } catch (err) {
-          console.error(`[Job ${jobId}] Fit scoring failed for "${result.companyName}" (non-fatal):`, err);
-        }
-      }
-
-      // INCREMENTAL SAVE: persist to DB immediately
-      console.log(`[Job ${jobId}] 💾 Saving "${result.companyName}"...`);
-      const firmId = await saveFirmImmediately(jobId, result, job.tierFilter || "all", fitScores);
-      if (!firmId) {
-        console.error(`[Job ${jobId}] ❌ Failed to save "${result.companyName}"`);
-        return;
-      }
-      console.log(`[Job ${jobId}] ✅ Saved "${result.companyName}" (ID: ${firmId}) with ${result.teamMembers.length} members`);
-
-      // Keep in-memory copies for investment thesis generation
-      if (!enrichedFirmsData.find(f => f.companyName === result.companyName)) {
-        enrichedFirmsData.push({
-          companyName: result.companyName,
-          websiteUrl: result.websiteUrl,
-          description: result.description,
-          websiteVerified: result.websiteVerified ? "Yes" : "No",
-          verificationMessage: result.verificationMessage,
-          investorType: result.investorType.join(", "),
-          investorTypeConfidence: result.investorTypeConfidence,
-          investorTypeSourceUrl: result.investorTypeSourceUrl,
-          investmentStages: result.investmentStages.join(", "),
-          investmentStagesConfidence: result.investmentStagesConfidence,
-          investmentStagesSourceUrl: result.investmentStagesSourceUrl,
-          investmentNiches: result.investmentNiches.join(", "),
-          nichesConfidence: result.nichesConfidence,
-          nichesSourceUrl: result.nichesSourceUrl,
-        });
-      }
-
-      const tierFilter = job.tierFilter || "all";
-      for (const member of result.teamMembers) {
-        const tierClassification = classifyDecisionMakerTier(member.title);
-        const include =
-          (tierFilter === "tier1" && tierClassification.tier === "Tier 1") ||
-          (tierFilter === "tier1-2" && ["Tier 1", "Tier 2", "Tier 3"].includes(tierClassification.tier)) ||
-          tierFilter === "all";
-        if (include) {
-          allTeamMembers.push({
-            vcFirm: result.companyName,
-            name: member.name,
-            title: member.title,
-            jobFunction: member.jobFunction,
-            specialization: member.specialization,
-            linkedinUrl: member.linkedinUrl,
-            email: member.email || "",
-            portfolioCompanies: member.portfolioCompanies || "",
-            investmentFocus: member.investmentFocus || "",
-            stagePreference: member.stagePreference || "",
-            checkSizeRange: member.checkSizeRange || "",
-            geographicFocus: member.geographicFocus || "",
-            investmentThesis: member.investmentThesis || "",
-            notableInvestments: member.notableInvestments || "",
-            yearsExperience: member.yearsExperience || "",
-            background: member.background || "",
-            dataSourceUrl: member.dataSourceUrl,
-            confidenceScore: member.confidenceScore,
-            decisionMakerTier: tierClassification.tier,
-            tierPriority: tierClassification.priority,
-          });
-        }
-      }
-
-      for (const company of result.portfolioCompanies) {
-        const { score, category } = calculateRecencyScore(company.investmentDate);
-        allPortfolioCompanies.push({
-          vcFirm: result.companyName,
-          portfolioCompany: company.companyName,
-          investmentDate: company.investmentDate,
-          websiteUrl: company.websiteUrl,
-          investmentNiche: company.investmentNiche.join(", "),
-          dataSourceUrl: company.dataSourceUrl,
-          confidenceScore: company.confidenceScore,
-          recencyScore: score,
-          recencyCategory: category,
-        });
-      }
-    };
-
-    const runWorker = async (): Promise<void> => {
-      while (true) {
-        const firm = firmQueue.shift();
-        if (!firm) break;
-
-        activeFirms.add(firm.companyName);
-        try {
-          await processFirm(firm);
-          parallelProcessedCount++;
-        } catch (err) {
-          parallelProcessedCount++;
-          console.error(`[Job ${jobId}] Error enriching "${firm.companyName}":`, err);
-        } finally {
-          activeFirms.delete(firm.companyName);
-          const activeFirmsList = [...activeFirms];
-          const currentStats = getOpenAIStats();
-          await incrementJobProcessedCountSafely(jobId);
-          await updateJobProgressSafely(jobId, {
-            currentFirmName: activeFirmsList[0] ?? null,
-            currentTeamMemberCount: null,
-            activeFirmsJson: activeFirmsList.length > 0 ? JSON.stringify(activeFirmsList) : null,
-            totalCostUSD:       Math.round((currentStats.totalCost - costBaseline) * 10000) / 10000,
-            totalInputTokens:   currentStats.totalInputTokens  - inputBaseline,
-            totalOutputTokens:  currentStats.totalOutputTokens - outputBaseline,
-          });
-          console.log(`[Job ${jobId}] Progress: ${parallelProcessedCount}/${allFirms.length} (${activeFirms.size} active)`);
-        }
-      }
-    };
-
-    // Snapshot LLM stats before processing so we can compute job-specific cost delta
-    const statsBaseline = getOpenAIStats();
-    const costBaseline   = statsBaseline.totalCost;
-    const inputBaseline  = statsBaseline.totalInputTokens;
-    const outputBaseline = statsBaseline.totalOutputTokens;
-
-    console.log(`[Job ${jobId}] Starting parallel enrichment: ${firms.length} firms, ${CONCURRENCY} concurrent`);
-    await Promise.allSettled(
-      Array.from({ length: Math.min(CONCURRENCY, firms.length) }, runWorker)
-    );
-
-    // Generate investment thesis summaries
-    const investmentThesisSummaries = generateInvestmentThesisSummaries(
-      enrichedFirmsData,
-      allTeamMembers,
-      allPortfolioCompanies
-    );
-
-    // Generate processing summary
-    const processingSummaryData: ProcessingSummaryData[] = enrichedFirmsData.map(firm => {
-      const firmTeamMembers = allTeamMembers.filter(m => m.vcFirm === firm.companyName);
-      const tier1Count = firmTeamMembers.filter(m => m.decisionMakerTier === "Tier 1").length;
-      const tier2Count = firmTeamMembers.filter(m => m.decisionMakerTier === "Tier 2").length;
-      const tier3Count = firmTeamMembers.filter(m => m.decisionMakerTier === "Tier 3").length;
-      const portfolioCount = allPortfolioCompanies.filter(p => p.vcFirm === firm.companyName).length;
-      
-      // Determine status and error message
-      let status = "Success";
-      let errorMessage = "";
-      let dataCompleteness = "Complete";
-      
-      if (firm.websiteVerified === "No") {
-        status = "Warning";
-        errorMessage = firm.verificationMessage || "Website verification failed";
-        dataCompleteness = "Partial - Website not accessible";
-      } else if (firmTeamMembers.length === 0 && portfolioCount === 0) {
-        status = "Warning";
-        errorMessage = "No team members or portfolio companies found";
-        dataCompleteness = "Minimal";
-      } else if (firmTeamMembers.length === 0) {
-        status = "Warning";
-        errorMessage = "No team members found";
-        dataCompleteness = "Partial - Missing team data";
-      } else if (portfolioCount === 0) {
-        status = "Warning";
-        errorMessage = "No portfolio companies found";
-        dataCompleteness = "Partial - Missing portfolio data";
-      }
-      
-      return {
-        firmName: firm.companyName,
-        website: firm.websiteUrl,
-        status,
-        errorMessage,
-        teamMembersFound: firmTeamMembers.length,
-        tier1Count,
-        tier2Count,
-        tier3Count,
-        portfolioCompaniesFound: portfolioCount,
-        dataCompleteness,
-      };
-    });
-
-    // All firms/team members/portfolio companies were already saved incrementally
-    // by saveFirmImmediately() during processing. Only save investment thesis here,
-    // since it requires aggregating data across all firms first.
-    console.log(`[processEnrichmentJob] Saving investment thesis summaries for ${investmentThesisSummaries.length} firms...`);
-    const db = await getDb();
-    if (!db) throw new Error("Database connection failed");
-
-    for (const firmThesis of investmentThesisSummaries) {
-      // Check if already saved
-      const existingThesis = await db.select().from(investmentThesis)
-        .where(and(
-          eq(investmentThesis.jobId, jobId),
-          eq(investmentThesis.vcFirm, firmThesis.vcFirm)
-        ))
-        .limit(1);
-
-      if (existingThesis.length > 0) {
-        console.log(`[processEnrichmentJob] ⏭️  Skipping duplicate investment thesis for ${firmThesis.vcFirm}`);
-        continue;
-      }
-
-      // Look up the firmId from the already-saved enrichedFirms row
-      const [savedFirm] = await db.select({ id: enrichedFirms.id })
-        .from(enrichedFirms)
-        .where(and(
-          eq(enrichedFirms.jobId, jobId),
-          eq(enrichedFirms.companyName, firmThesis.vcFirm)
-        ))
-        .limit(1);
-
-      if (!savedFirm) {
-        console.warn(`[processEnrichmentJob] No saved firm found for thesis: ${firmThesis.vcFirm}, skipping`);
-        continue;
-      }
-
-      await db.insert(investmentThesis).values({
-        jobId,
-        firmId: savedFirm.id,
-        vcFirm: firmThesis.vcFirm,
-        websiteUrl: firmThesis.websiteUrl || null,
-        investorType: firmThesis.investorType || null,
-        primaryFocusAreas: firmThesis.primaryFocusAreas || null,
-        emergingInterests: firmThesis.emergingInterests || null,
-        preferredStages: firmThesis.preferredStages || null,
-        averageCheckSize: firmThesis.averageCheckSize || null,
-        recentInvestmentPace: firmThesis.recentInvestmentPace || null,
-        keyDecisionMakers: firmThesis.keyDecisionMakers || null,
-        totalTeamSize: typeof firmThesis.totalTeamSize === 'number' ? firmThesis.totalTeamSize : null,
-        tier1Count: typeof firmThesis.tier1Count === 'number' ? firmThesis.tier1Count : null,
-        tier2Count: typeof firmThesis.tier2Count === 'number' ? firmThesis.tier2Count : null,
-        portfolioSize: typeof firmThesis.portfolioSize === 'number' ? firmThesis.portfolioSize : null,
-        recentPortfolioCount: typeof firmThesis.recentPortfolioCount === 'number' ? firmThesis.recentPortfolioCount : null,
-        talkingPoints: firmThesis.talkingPoints || null,
-      });
-      console.log(`[processEnrichmentJob] ✓ Saved investment thesis for ${firmThesis.vcFirm}`);
-    }
-
-    console.log(`[processEnrichmentJob] ✅ Investment thesis saved. Job complete.`);
-    
-    // Mark job as completed (file generation happens on-demand when user clicks download)
-    console.log(`[processEnrichmentJob] Job ${jobId} completed. Processed ${enrichedFirmsData.length} firms with ${allTeamMembers.length} team members.`);
-    console.log(`[processEnrichmentJob] File will be generated on-demand when user requests download.`);
-    
-    const finalStats = getOpenAIStats();
-    await updateEnrichmentJob(jobId, {
-      status: "completed",
-      completedAt: new Date(),
-      totalCostUSD:       String(Math.round((finalStats.totalCost - costBaseline) * 10000) / 10000),
-      totalInputTokens:   finalStats.totalInputTokens  - inputBaseline,
-      totalOutputTokens:  finalStats.totalOutputTokens - outputBaseline,
-    });
-  } catch (error) {
-    console.error(`Error processing job ${jobId}:`, error);
-    await updateEnrichmentJob(jobId, {
-      status: "failed",
-      errorMessage: error instanceof Error ? error.message : String(error),
-    });
-  } finally {
-    // Stop keep-alive when job completes or fails
-    keepAlive.stop();
-  }
+/**
+ * @deprecated The legacy hardcoded VC enrichment pipeline. All jobs now flow
+ * through processAgentJob — the worker hydrates missing sectionsJson with
+ * b2b defaults so even legacy jobs route generically. This stub is kept so
+ * any unexpected caller fails loudly instead of silently running stale logic.
+ */
+export async function processEnrichmentJob(jobId: number): Promise<never> {
+  const msg = `processEnrichmentJob is deprecated and no longer runs. Job ${jobId} should be routed through processAgentJob.`;
+  console.error(`[processEnrichmentJob] ${msg}`);
+  await updateEnrichmentJob(jobId, {
+    status: "failed",
+    errorMessage: msg,
+  });
+  throw new Error(msg);
 }
+
 
 // ---------------------------------------------------------------------------
 // Error classifier for job logs
@@ -1137,34 +824,33 @@ export async function processAgentJob(jobId: number) {
             console.log(`[processAgentJob] Directory expanded: ${result.entries.length} entries queued for scraping`);
             insertJobLog({ jobId, url: firm.websiteUrl, companyName: firm.companyName, status: "success", fieldsTotal: 0, fieldsFilled: 0, durationMs: Date.now() - startMs }).catch(() => {});
           } else {
-            // AI fit scoring for agent pipeline (if outreach context provided)
-            if (job.outreachContext || job.targetPersona) {
-              try {
-                // Find DM-like fields in the extracted data
-                const dmFields = Object.entries(result.data).filter(([k]) =>
-                  /contact|decision.?maker|dm|erp|person|name/i.test(k) && !/email|phone|linkedin/i.test(k)
+            // Fit scoring for agent pipeline. Always runs — falls back to a
+            // title-based heuristic when outreach context is not provided.
+            try {
+              // Find DM-like fields in the extracted data
+              const dmFields = Object.entries(result.data).filter(([k]) =>
+                /contact|decision.?maker|dm|erp|person|name/i.test(k) && !/email|phone|linkedin/i.test(k)
+              );
+              const dmValue = dmFields.find(([, v]) => v?.trim())?.[1] || "";
+              // Extract name part (before comma/dash that indicates title)
+              const namePart = dmValue.split(/[,;|–—]/).map(p => p.trim()).find(p =>
+                p.split(/\s+/).length >= 2 && !p.includes("@") && !/^\d/.test(p) && !p.toLowerCase().startsWith("no ")
+              );
+              if (namePart && namePart.length > 2) {
+                const titlePart = dmValue.replace(namePart, "").replace(/^[,;|–— ]+/, "").trim();
+                const fitScores = await scoreTeamMemberFit(
+                  [{ name: namePart, title: titlePart }],
+                  { companyName: firm.companyName },
+                  { context: job.outreachContext || "", persona: job.targetPersona || "", exclusions: job.exclusionCriteria || "" },
                 );
-                const dmValue = dmFields.find(([, v]) => v?.trim())?.[1] || "";
-                // Extract name part (before comma/dash that indicates title)
-                const namePart = dmValue.split(/[,;|–—]/).map(p => p.trim()).find(p =>
-                  p.split(/\s+/).length >= 2 && !p.includes("@") && !/^\d/.test(p) && !p.toLowerCase().startsWith("no ")
-                );
-                if (namePart && namePart.length > 2) {
-                  const titlePart = dmValue.replace(namePart, "").replace(/^[,;|–— ]+/, "").trim();
-                  const fitScores = await scoreTeamMemberFit(
-                    [{ name: namePart, title: titlePart }],
-                    { companyName: firm.companyName },
-                    { context: job.outreachContext || "", persona: job.targetPersona || "", exclusions: job.exclusionCriteria || "" },
-                  );
-                  if (fitScores?.[0]) {
-                    result.data["fit_score"] = String(fitScores[0].score);
-                    result.data["buying_role"] = fitScores[0].buyingRole || "";
-                    result.data["fit_reasoning"] = fitScores[0].reasoning;
-                  }
+                if (fitScores?.[0]) {
+                  result.data["fit_score"] = String(fitScores[0].score);
+                  result.data["buying_role"] = fitScores[0].buyingRole || "";
+                  result.data["fit_reasoning"] = fitScores[0].reasoning;
                 }
-              } catch (err) {
-                console.warn(`[processAgentJob] Fit scoring failed for ${firm.companyName} (non-fatal):`, err);
               }
+            } catch (err) {
+              console.warn(`[processAgentJob] Fit scoring failed for ${firm.companyName} (non-fatal):`, err);
             }
 
             profileResults.push({
@@ -1180,7 +866,10 @@ export async function processAgentJob(jobId: number) {
               });
             }
 
-            // Save to database for queryability (agent pipeline was previously S3-only)
+            // Save to database for queryability. The full per-template field map
+            // is stored in `extractedData` (JSON). A few common keys are also mirrored
+            // into typed columns so existing list/search queries still work without a
+            // JSON-aware where-clause.
             try {
               const db = await (await import("./db")).getDb();
               if (db) {
@@ -1189,11 +878,25 @@ export async function processAgentJob(jobId: number) {
                   jobId,
                   companyName: firm.companyName,
                   websiteUrl: firm.websiteUrl,
-                  description: result.data["business_activities"] || result.data["business_does"] || result.data["company_overview"] || null,
                   websiteVerified: "Yes",
-                  investorType: result.data["business_type"] || result.data["organization_type"] || null,
-                  investmentNiches: result.data["short_business_summary"] || result.data["specialties"] || null,
-                  headquarters: result.data["location"] || result.data["hq_location"] || null,
+                  // Mirror a handful of common fields into typed columns for searchability.
+                  description:
+                    result.data["description"] ||
+                    result.data["company_overview"] ||
+                    result.data["business_activities"] ||
+                    result.data["business_does"] ||
+                    null,
+                  headquarters:
+                    result.data["hq_location"] ||
+                    result.data["location"] ||
+                    result.data["headquarters"] ||
+                    null,
+                  foundedYear:
+                    result.data["founded_year"] ||
+                    result.data["founded"] ||
+                    null,
+                  // Full extracted blob — every field the agent pipeline produced.
+                  extractedData: result.data,
                 });
               }
             } catch (dbErr) {

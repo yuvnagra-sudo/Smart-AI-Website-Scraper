@@ -9,22 +9,34 @@ import { eq, and } from "drizzle-orm";
 import { classifyDecisionMakerTier } from './decisionMakerTiers';
 import { calculateRecencyScore } from './portfolioIntelligence';
 import { findFitScore, type FitScore } from './personFitScorer';
+import { insertJobLog } from "./enrichmentDb";
 import type { EnrichmentResult } from "./vcEnrichment";
 
+export type SaveFirmOutcome = { firmId: number } | { error: string };
+
 /**
- * Save a single firm's enrichment results immediately to the database
- * Returns the firm ID for reference
+ * Save a single firm's enrichment results immediately to the database.
+ * On failure, also writes a `failed` entry to jobLogs so the UI surfaces the error.
  */
 export async function saveFirmImmediately(
   jobId: number,
   result: EnrichmentResult,
   tierFilter: string = "all",
   fitScores?: FitScore[] | null,
-): Promise<number | null> {
+): Promise<SaveFirmOutcome> {
   const db = await getDb();
   if (!db) {
-    console.error(`[incrementalSave] Database connection failed`);
-    return null;
+    const error = "Database connection unavailable";
+    console.error(`[incrementalSave] ${error}`);
+    await insertJobLog({
+      jobId,
+      url: result.websiteUrl ?? null,
+      companyName: result.companyName,
+      status: "failed",
+      errorReason: "db_unavailable",
+      errorDetail: error,
+    }).catch(() => {});
+    return { error };
   }
 
   try {
@@ -181,16 +193,17 @@ export async function saveFirmImmediately(
         eq(processedFirms.firmName, result.companyName)
       ));
 
-    return firmId;
+    return { firmId };
   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
     console.error(`[incrementalSave] Error saving firm "${result.companyName}":`, error);
-    
+
     // Mark firm as failed in processedFirms table
     try {
       await db.update(processedFirms)
         .set({
           status: "failed",
-          errorMessage: error instanceof Error ? error.message : String(error),
+          errorMessage,
         })
         .where(and(
           eq(processedFirms.jobId, jobId),
@@ -199,8 +212,18 @@ export async function saveFirmImmediately(
     } catch (updateError) {
       console.error(`[incrementalSave] Failed to update processedFirms status:`, updateError);
     }
-    
-    return null;
+
+    // Surface to job log so the UI shows this firm as failed.
+    await insertJobLog({
+      jobId,
+      url: result.websiteUrl ?? null,
+      companyName: result.companyName,
+      status: "failed",
+      errorReason: "db_save_error",
+      errorDetail: errorMessage.slice(0, 1000),
+    }).catch(() => {});
+
+    return { error: errorMessage };
   }
 }
 

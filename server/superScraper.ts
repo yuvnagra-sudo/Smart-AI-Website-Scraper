@@ -59,7 +59,7 @@ import { queuedLLMCall } from "./_core/llmQueue";
 import { detectTeamMemberProfileLinks } from "./deepTeamProfileScraper";
 import { generateStandardURLs, discoverRelevantURLs } from "./multiUrlDiscovery";
 import { CONFIDENCE } from "./confidenceLevels";
-import type { AgentSection, AgentScrapeResult, ScrapeStats, ScrapeDiagnostics } from "./agentScraper";
+import type { AgentSection, AgentScrapeResult, ScrapeStats, ScrapeDiagnostics } from "./scraper/agentTypes";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -608,12 +608,14 @@ FORMATTING RULES:
 - Ignore navigation menus, cookie banners, footer boilerplate, and third-party content.
 
 CONTACT SELECTION PRIORITY (when picking a contact person/email):
-1. PREFER: Owner, President, CEO, COO, CFO, VP, Director, Founder, Operations Manager, General Manager, Plant Manager, Principal
-2. ACCEPTABLE: Department heads, Managers (non-sales), Engineers (if technical context)
-3. LAST RESORT: Sales reps, BDRs, Account Executives, "Sales" or "Sales Manager" titles
-4. AVOID: HR, Marketing, PR (unless specifically requested)
-- A generic email (info@, contact@) is BETTER than a sales rep for most outreach.
-- If the only person on the page is a sales rep, return the generic email and leave the contact name empty rather than picking the sales rep.
+1. PREFER (in order): Owner, Founder, Co-Founder, CEO, President, Managing Partner / Managing Director
+2. NEXT TIER: Other C-suite (CFO, COO, CTO, CMO, CRO, etc.), VPs, SVPs
+3. ACCEPTABLE: Directors, Heads of (function), Department leads, senior managers
+4. LAST RESORT: Sales reps, BDRs, Account Executives, "Sales" or "Sales Manager" titles
+5. AVOID: HR, recruiting, PR (unless those are specifically the target)
+- A generic email (info@, contact@, hello@) is BETTER than a sales rep for most outreach — it can be forwarded to the right person.
+- If the only person listed is a sales rep, return the generic email and leave the contact name empty rather than picking the sales rep.
+- Match seniority to the company size: at a small business the Owner is the right contact; at a large enterprise a VP or Director of the relevant function is more realistic to reach.
 
 Already found: ${alreadyFoundBrief || "(nothing yet)"}
 

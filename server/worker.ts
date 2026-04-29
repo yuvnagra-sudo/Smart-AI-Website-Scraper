@@ -14,8 +14,14 @@ import { drizzle } from 'drizzle-orm/mysql2';
 import mysql from 'mysql2/promise';
 import { enrichmentJobs } from '../drizzle/schema';
 import { eq, and, or, lt, isNull } from 'drizzle-orm';
-import { processEnrichmentJob, processAgentJob } from './routers';
+import { processAgentJob } from './routers';
 import { markJobCancelled, clearJobCancelled, markJobPaused, clearJobPaused } from './_core/jobCancellation';
+import { updateEnrichmentJob } from './enrichmentDb';
+import {
+  DEFAULT_AGENT_SECTIONS,
+  DEFAULT_AGENT_SYSTEM_PROMPT,
+  DEFAULT_AGENT_OBJECTIVE,
+} from './_core/defaultAgentConfig';
 
 // Prevent unhandled promise rejections from crashing the worker process.
 // puppeteer-extra-plugin-stealth fires internal events that can reject outside
@@ -256,12 +262,18 @@ async function processJob(job: any) {
   startCancellationPoller(job.id);
 
   try {
-    // Route to correct processor: agent jobs have sectionsJson, VC jobs do not
-    if (job.sectionsJson) {
-      await processAgentJob(job.id);
-    } else {
-      await processEnrichmentJob(job.id);
+    // All jobs flow through the generic agent pipeline. If a job arrived without
+    // sectionsJson (legacy VC jobs, direct DB inserts, future API callers), hydrate
+    // it with the b2b defaults so the agent pipeline has something to extract.
+    if (!job.sectionsJson) {
+      console.log(`[Worker] Job ${job.id} has no sectionsJson — hydrating with default b2b agent config`);
+      await updateEnrichmentJob(job.id, {
+        sectionsJson: JSON.stringify(DEFAULT_AGENT_SECTIONS),
+        systemPrompt: job.systemPrompt || DEFAULT_AGENT_SYSTEM_PROMPT,
+        objective: job.objective || DEFAULT_AGENT_OBJECTIVE,
+      });
     }
+    await processAgentJob(job.id);
 
     console.log(`\n[Worker] ✅ Job ${job.id} completed successfully!`);
   } catch (error: any) {

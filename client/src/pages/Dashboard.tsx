@@ -170,9 +170,8 @@ export default function Dashboard() {
   const [pendingFileKey, setPendingFileKey] = useState("");
 
   // Template mode state
-  const [selectedTemplate, setSelectedTemplate] = useState<string>("vc");
-  const [tierFilter, setTierFilter] = useState<"tier1" | "tier1-2" | "all">("all");
-  const [templateSections, setTemplateSections] = useState<TemplateAgentSection[]>([]);
+  const [selectedTemplate, setSelectedTemplate] = useState<string>("b2b");
+  const [templateSections, setTemplateSections] = useState<TemplateAgentSection[]>(() => TEMPLATE_SECTIONS["b2b"] ?? []);
 
   const [viewResultsJob, setViewResultsJob] = useState<{ id: number; template: string; sectionsJson?: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -343,7 +342,7 @@ export default function Dashboard() {
   const handleConfirmEnrichment = () => {
     if (!previewData) return;
     const isAgentMode = wizardMode === "ai" && wizardSections.length > 0;
-    const isTemplateAgentMode = wizardMode === "template" && selectedTemplate !== "vc";
+    const isTemplateAgentMode = wizardMode === "template" && templateSections.length > 0;
 
     const extraFields = isAgentMode
       ? { sectionsJson: JSON.stringify(wizardSections), systemPrompt: wizardSystemPrompt, objective: wizardObjective }
@@ -369,7 +368,7 @@ export default function Dashboard() {
       fileUrl: previewData.fileUrl,
       fileKey: previewData.fileKey,
       firmCount: previewData.firmCount,
-      tierFilter: selectedTemplate === "vc" ? tierFilter : "all",
+      tierFilter: "all",
       template: selectedTemplate,
       avgDescriptionLength: previewData.avgDescriptionLength,
       columnMapping,
@@ -1060,7 +1059,7 @@ export default function Dashboard() {
                   </div>
 
                   {/* Editable sections for non-VC templates */}
-                  {selectedTemplate !== "vc" && templateSections.length > 0 && (
+                  {templateSections.length > 0 && (
                     <div className="space-y-3">
                       <div className="flex items-center justify-between">
                         <Label className="text-sm font-semibold">Extraction Sections <span className="font-normal text-muted-foreground">(edit to customize)</span></Label>
@@ -1092,28 +1091,6 @@ export default function Dashboard() {
                         ))}
                       </div>
                       <AddSectionRow onAdd={(s) => setTemplateSections([...templateSections, s])} />
-                    </div>
-                  )}
-
-                  {/* Team Coverage — VC template only */}
-                  {selectedTemplate === "vc" && (
-                    <div className="space-y-3">
-                      <Label className="text-sm font-semibold">Team Coverage</Label>
-                      <RadioGroup value={tierFilter} onValueChange={(v: any) => setTierFilter(v)}>
-                        {[
-                          { value: "tier1",   label: "Decision Makers Only", desc: "Managing Partners, GPs, Investment Partners" },
-                          { value: "tier1-2", label: "Decision Makers + Influencers (Recommended)", desc: "Partners, Principals, Senior Associates" },
-                          { value: "all",     label: "Full Team", desc: "All investment-facing team members" },
-                        ].map((opt) => (
-                          <div key={opt.value} className="flex items-start space-x-3 space-y-0">
-                            <RadioGroupItem value={opt.value} id={opt.value} />
-                            <Label htmlFor={opt.value} className="font-normal cursor-pointer">
-                              <p className="font-medium">{opt.label}</p>
-                              <p className="text-sm text-muted-foreground">{opt.desc}</p>
-                            </Label>
-                          </div>
-                        ))}
-                      </RadioGroup>
                     </div>
                   )}
 
@@ -1185,11 +1162,6 @@ export default function Dashboard() {
                   <p className="text-sm font-semibold">
                     Template: {getTemplate(selectedTemplate).name}
                   </p>
-                  {selectedTemplate === "vc" && (
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      Team coverage: {tierFilter === "tier1" ? "Decision makers only" : tierFilter === "tier1-2" ? "Decision makers + influencers" : "Full team"}
-                    </p>
-                  )}
                 </div>
               )}
 

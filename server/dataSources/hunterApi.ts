@@ -13,7 +13,7 @@
  * threshold AND HUNTER_API_KEY is set.
  */
 
-import type { AgentSection } from "../agentScraper";
+import type { AgentSection } from "../scraper/agentTypes";
 
 // ---------------------------------------------------------------------------
 // Config
