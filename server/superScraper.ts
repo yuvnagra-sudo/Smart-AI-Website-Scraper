@@ -1576,6 +1576,23 @@ export async function scrapeUrlSuper(
     const hunterResult = hunterSettled.status === "fulfilled" ? hunterSettled.value : null;
     const allHunterEmails = hunterResult?.allEmails ?? [];
 
+    // Initialize the all-employees list — populated by every source
+    if (!(diag as any).allEmployees) (diag as any).allEmployees = [];
+    const allEmployeesList = (diag as any).allEmployees as Array<{
+      name: string; title: string; email: string; linkedinUrl: string; source: string; selected?: boolean
+    }>;
+
+    // Add every Hunter contact (full list, not just bestMatch)
+    for (const he of allHunterEmails) {
+      allEmployeesList.push({
+        name: `${he.firstName || ""} ${he.lastName || ""}`.trim(),
+        title: he.position || he.seniority || "",
+        email: he.value || "",
+        linkedinUrl: he.linkedinUrl || "",
+        source: "Hunter",
+      });
+    }
+
     if (allHunterEmails.length > 0) {
       console.log(`[superScraper] Hunter found ${allHunterEmails.length} contacts at ${_domain}`);
       for (const he of allHunterEmails) {
@@ -1728,6 +1745,15 @@ Return JSON:
         let resolvedName = person.name;
         let resolvedLinkedin: string | null = null;
 
+        // Add Apollo person to the all-employees list
+        allEmployeesList.push({
+          name: person.name,
+          title: person.title || "",
+          email: "",
+          linkedinUrl: "",
+          source: "Apollo",
+        });
+
         // If Apollo returned an obfuscated last name (contains *), resolve via SERP
         const hasObfuscatedLast = person.lastName.includes("*") || person.lastName.length <= 2;
         if (hasObfuscatedLast && serperAvailable && resolveLinkedInFn && person.firstName) {
@@ -1849,6 +1875,13 @@ Return JSON:
               const result = await vayneScrapeCompanyEmployees(linkedinCompanyUrl);
               for (const p of result.people) {
                 vaynePeople.push({ name: p.fullName, title: p.title, linkedinUrl: p.linkedinUrl });
+                ((diag as any).allEmployees ||= []).push({
+                  name: p.fullName,
+                  title: p.title || "",
+                  email: "",
+                  linkedinUrl: p.linkedinUrl || "",
+                  source: "Vayne",
+                });
               }
               if (result.skippedReason) {
                 console.log(`[superScraper] Vayne skipped: ${result.skippedReason}`);
@@ -1869,6 +1902,13 @@ Return JSON:
             for (const p of found) {
               if (p.name) {
                 vaynePeople.push({ name: p.name, title: p.title || "", linkedinUrl: p.linkedinUrl });
+                ((diag as any).allEmployees ||= []).push({
+                  name: p.name,
+                  title: p.title || "",
+                  email: "",
+                  linkedinUrl: p.linkedinUrl,
+                  source: "Serper",
+                });
               }
             }
             if (found.length > 0) {
@@ -2093,6 +2133,34 @@ Return JSON: {"name": "Full Name", "title": "Title", "email": "email or empty", 
       extractionFailures.push(`SMTP name probe: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+
+  // ── Mark the SELECTED employee in the all-employees list ─────────────────
+  try {
+    const employees = (diag as any).allEmployees as Array<{
+      name: string; title: string; email: string; linkedinUrl: string; source: string; selected?: boolean;
+    }> | undefined;
+    if (employees && employees.length > 0) {
+      // Find the chosen contact name + email from the final data
+      const chosenContactValue = sections
+        .filter(s => /decision.?maker|dm\d|contact|person|erp/i.test(s.key + " " + s.label) && !/email|phone|linkedin/i.test(s.key))
+        .map(s => data[s.key]).find(v => v && v.trim());
+      const chosenEmailValue = sections
+        .filter(s => /email/i.test(s.key + " " + s.label))
+        .map(s => data[s.key]).find(v => v && v.trim());
+
+      const chosenName = chosenContactValue?.split(/[,;|–—]/)[0].trim().toLowerCase() || "";
+      const chosenEmail = chosenEmailValue?.split(/[;,]/)[0].trim().toLowerCase() || "";
+
+      for (const emp of employees) {
+        const empName = emp.name.toLowerCase();
+        const empEmail = emp.email.toLowerCase();
+        if ((chosenName && empName && empName === chosenName) ||
+            (chosenEmail && empEmail && empEmail === chosenEmail)) {
+          emp.selected = true;
+        }
+      }
+    }
+  } catch { /* non-fatal */ }
 
   // ── BUILD FINAL RESULT ─────────────────────────────────────────────────────
 

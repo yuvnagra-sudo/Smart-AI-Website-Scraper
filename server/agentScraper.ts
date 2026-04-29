@@ -52,6 +52,16 @@ export interface ScrapeDiagnostics {
   softDeleted: string[];         // soft-404 URLs
   topPagePreview: string;        // first 500 chars of best-scoring page
   failures?: string[];           // non-fatal extraction failures for visibility
+  // All employees found across all sources (website, Hunter, Vayne, Serper)
+  // Each entry: { name, title, email, linkedinUrl, source }
+  allEmployees?: Array<{
+    name: string;
+    title: string;
+    email: string;
+    linkedinUrl: string;
+    source: string;
+    selected?: boolean;
+  }>;
 }
 
 export type AgentScrapeResult =

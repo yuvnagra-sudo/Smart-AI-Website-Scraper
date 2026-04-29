@@ -440,7 +440,41 @@ export function createAgentOutputExcel(
     XLSX.utils.book_append_sheet(workbook, urlSheet, "Collected URLs");
   }
 
-  // Sheet 3: Diagnostics — raw scrape data per company for debugging
+  // Sheet 3: All Employees — every person found per company across all sources
+  if (diagnosticResults && diagnosticResults.length > 0) {
+    const employeeRows: Record<string, string>[] = [];
+    for (const d of diagnosticResults) {
+      const employees = (d.diagnostics as any).allEmployees as Array<{
+        name: string; title: string; email: string; linkedinUrl: string; source: string; selected?: boolean;
+      }> | undefined;
+      if (!employees || employees.length === 0) continue;
+      // Sort: selected first, then by source
+      const sorted = [...employees].sort((a, b) => {
+        if (a.selected && !b.selected) return -1;
+        if (!a.selected && b.selected) return 1;
+        return a.source.localeCompare(b.source);
+      });
+      for (const emp of sorted) {
+        employeeRows.push({
+          "Company": d.companyName,
+          "Website": d.websiteUrl,
+          "Selected": emp.selected ? "✓" : "",
+          "Name": emp.name,
+          "Title": emp.title,
+          "Email": emp.email,
+          "LinkedIn URL": emp.linkedinUrl,
+          "Source": emp.source,
+        });
+      }
+    }
+    if (employeeRows.length > 0) {
+      const sanitized = sanitizeForExcel(employeeRows);
+      const sheet = XLSX.utils.json_to_sheet(sanitized);
+      XLSX.utils.book_append_sheet(workbook, sheet, "All Employees");
+    }
+  }
+
+  // Sheet 4: Diagnostics — raw scrape data per company for debugging
   if (diagnosticResults && diagnosticResults.length > 0) {
     const diagRows = diagnosticResults.map((d) => {
       const diag = d.diagnostics as any; // extended diagnostics may have extra fields
