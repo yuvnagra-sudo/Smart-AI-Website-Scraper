@@ -1,17 +1,23 @@
 /**
  * Vayne.io API Client
  *
- * Scrapes LinkedIn company pages for employees with names + titles + LinkedIn URLs.
- * Used as a fallback when Hunter returns thin results — adds candidates the website
- * doesn't show.
+ * Scrapes LinkedIn company pages for employees — LIGHTWEIGHT mode that
+ * returns name + title only, NOT full profile data.
  *
- * Pricing: Free tier 200/month. Starter $49/mo for 20,000 profiles ($0.0025/profile).
+ * Vayne has two products:
+ * - "Leads & Companies scraper" (lightweight, list mode) — ~$0.0025/lead
+ * - "Profiles scraper" (heavy, full bio/about/experience) — same per-profile cost
+ *
+ * We only need name + title to feed the LLM re-eval, so we use list mode and
+ * cap at 10 employees per company by default (configurable).
+ *
  * Auth: Bearer token via VAYNE_API_KEY env var.
- *
- * Flow: company LinkedIn URL → Vayne → list of employees
  */
 
 const VAYNE_BASE_URL = "https://api.vayne.io/v1";
+
+// Cap to control cost — can be raised via env var
+const VAYNE_MAX_EMPLOYEES = parseInt(process.env.VAYNE_MAX_EMPLOYEES ?? "10", 10);
 
 function getApiKey(): string {
   return process.env.VAYNE_API_KEY ?? "";
@@ -74,6 +80,8 @@ export async function vayneScrapeCompanyEmployees(
 
   try {
     // Vayne uses an order-based async API. Submit the order first, then poll for results.
+    // Use "list" mode — returns name + title only, NOT full profile scrapes.
+    // This is the cheap "Leads & Companies scraper" path, not "Profiles scraper".
     const submitRes = await fetch(`${VAYNE_BASE_URL}/orders`, {
       method: "POST",
       headers: {
@@ -82,7 +90,12 @@ export async function vayneScrapeCompanyEmployees(
       },
       body: JSON.stringify({
         type: "company_employees",
-        input: { url: linkedinCompanyUrl, max_employees: 25 },
+        input: {
+          url: linkedinCompanyUrl,
+          max_employees: VAYNE_MAX_EMPLOYEES,
+          mode: "list",          // lightweight: name + title only, no profile scraping
+          enrich_profiles: false, // do NOT scrape each individual's full profile
+        },
       }),
       signal: AbortSignal.timeout(15_000),
     });
