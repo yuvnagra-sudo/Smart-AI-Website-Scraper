@@ -1,0 +1,158 @@
+/**
+ * Vayne.io API Client
+ *
+ * Scrapes LinkedIn company pages for employees with names + titles + LinkedIn URLs.
+ * Used as a fallback when Hunter returns thin results — adds candidates the website
+ * doesn't show.
+ *
+ * Pricing: Free tier 200/month. Starter $49/mo for 20,000 profiles ($0.0025/profile).
+ * Auth: Bearer token via VAYNE_API_KEY env var.
+ *
+ * Flow: company LinkedIn URL → Vayne → list of employees
+ */
+
+const VAYNE_BASE_URL = "https://api.vayne.io/v1";
+
+function getApiKey(): string {
+  return process.env.VAYNE_API_KEY ?? "";
+}
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface VaynePerson {
+  fullName: string;
+  firstName: string;
+  lastName: string;
+  title: string;
+  linkedinUrl: string;
+  location: string | null;
+  headline: string | null;
+}
+
+export interface VayneCompanyResult {
+  people: VaynePerson[];
+  totalEmployees: number;
+  companyName: string | null;
+  skippedReason?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Gating
+// ---------------------------------------------------------------------------
+
+export function isVayneAvailable(): boolean {
+  return !!getApiKey();
+}
+
+// ---------------------------------------------------------------------------
+// Submit a company-employees scrape job
+// ---------------------------------------------------------------------------
+
+/**
+ * Scrape a LinkedIn company page for employees via Vayne.
+ * Returns up to 25 employees with names, titles, and LinkedIn URLs.
+ *
+ * Returns empty result with skippedReason if:
+ * - VAYNE_API_KEY not set
+ * - LinkedIn URL not provided
+ * - API call fails
+ * - Vayne rate limited / out of credits
+ */
+export async function vayneScrapeCompanyEmployees(
+  linkedinCompanyUrl: string,
+): Promise<VayneCompanyResult> {
+  if (!getApiKey()) {
+    return { people: [], totalEmployees: 0, companyName: null, skippedReason: "VAYNE_API_KEY not set" };
+  }
+  if (!linkedinCompanyUrl || !linkedinCompanyUrl.includes("linkedin.com/company/")) {
+    return { people: [], totalEmployees: 0, companyName: null, skippedReason: "Invalid LinkedIn company URL" };
+  }
+
+  console.log(`[vayneApi] Scraping employees for: ${linkedinCompanyUrl}`);
+
+  try {
+    // Vayne uses an order-based async API. Submit the order first, then poll for results.
+    const submitRes = await fetch(`${VAYNE_BASE_URL}/orders`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${getApiKey()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        type: "company_employees",
+        input: { url: linkedinCompanyUrl, max_employees: 25 },
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    if (submitRes.status === 401 || submitRes.status === 403) {
+      return { people: [], totalEmployees: 0, companyName: null, skippedReason: `Auth error ${submitRes.status}` };
+    }
+    if (submitRes.status === 429) {
+      return { people: [], totalEmployees: 0, companyName: null, skippedReason: "Rate limited" };
+    }
+    if (!submitRes.ok) {
+      return { people: [], totalEmployees: 0, companyName: null, skippedReason: `HTTP ${submitRes.status}` };
+    }
+
+    const submitJson = (await submitRes.json()) as { id?: string; order_id?: string };
+    const orderId = submitJson.id || submitJson.order_id;
+    if (!orderId) {
+      return { people: [], totalEmployees: 0, companyName: null, skippedReason: "No order ID returned" };
+    }
+
+    // Poll for completion (up to 60s)
+    let result: any = null;
+    for (let i = 0; i < 12; i++) {
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      const pollRes = await fetch(`${VAYNE_BASE_URL}/orders/${orderId}`, {
+        headers: { "Authorization": `Bearer ${getApiKey()}` },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!pollRes.ok) continue;
+      result = await pollRes.json();
+      if (result.status === "completed" || result.status === "done" || result.results) break;
+      if (result.status === "failed" || result.status === "error") {
+        return { people: [], totalEmployees: 0, companyName: null, skippedReason: `Order failed: ${result.error || "unknown"}` };
+      }
+    }
+
+    if (!result || (result.status !== "completed" && result.status !== "done" && !result.results)) {
+      return { people: [], totalEmployees: 0, companyName: null, skippedReason: "Order timed out" };
+    }
+
+    // Track cost — ~$0.0025 per profile on Starter plan
+    try {
+      const { addExternalCost } = await import("../_core/openaiLLM");
+      const employeeCount = (result.results || result.employees || []).length;
+      addExternalCost(0.0025 * employeeCount, `vayne.io company employees (${employeeCount})`);
+    } catch { /* non-fatal */ }
+
+    const rawPeople = result.results || result.employees || [];
+    const people: VaynePerson[] = rawPeople.map((p: any) => ({
+      fullName: p.full_name || `${p.first_name || ""} ${p.last_name || ""}`.trim(),
+      firstName: p.first_name || "",
+      lastName: p.last_name || "",
+      title: p.title || p.headline || "",
+      linkedinUrl: p.linkedin_url || p.url || "",
+      location: p.location || null,
+      headline: p.headline || null,
+    })).filter((p: VaynePerson) => p.fullName.length > 1);
+
+    console.log(`[vayneApi] Found ${people.length} employees at ${linkedinCompanyUrl}`);
+    if (people.length > 0) {
+      console.log(`  Top: ${people[0].fullName} — ${people[0].title}`);
+    }
+
+    return {
+      people,
+      totalEmployees: people.length,
+      companyName: result.company_name || null,
+    };
+  } catch (err) {
+    console.warn(`[vayneApi] Company scrape failed for ${linkedinCompanyUrl}:`, err);
+    return { people: [], totalEmployees: 0, companyName: null, skippedReason: String(err) };
+  }
+}

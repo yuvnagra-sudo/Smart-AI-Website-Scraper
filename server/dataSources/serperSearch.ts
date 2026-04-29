@@ -159,6 +159,85 @@ export async function resolveLinkedInViaSERP(
 }
 
 // ---------------------------------------------------------------------------
+// Find a company's LinkedIn URL via Serper
+// ---------------------------------------------------------------------------
+
+/**
+ * Find a company's LinkedIn page URL via Google search.
+ * Returns null if Serper unavailable or no LinkedIn company page found.
+ */
+export async function findCompanyLinkedInUrl(
+  companyName: string,
+  domain?: string,
+): Promise<string | null> {
+  if (!getApiKey()) return null;
+  if (!companyName) return null;
+
+  // Build a search query that prefers exact company name + domain
+  const domainPart = domain ? ` "${domain.replace(/\.(com|io|co|org|net|ca)$/, "")}"` : "";
+  const query = `"${companyName}"${domainPart} site:linkedin.com/company/`;
+
+  console.log(`[serperSearch] Find company LinkedIn: ${query}`);
+  const results = await serperSearch(query, 3);
+  const companyResults = results.filter(r =>
+    r.link.includes("linkedin.com/company/") &&
+    !r.link.includes("/posts/") &&
+    !r.link.includes("/jobs/")
+  );
+
+  if (companyResults.length === 0) {
+    console.log(`[serperSearch] No LinkedIn company page found for ${companyName}`);
+    return null;
+  }
+
+  console.log(`[serperSearch] Found LinkedIn company: ${companyResults[0].link}`);
+  return companyResults[0].link;
+}
+
+/**
+ * Find people at a company by specific role via Serper.
+ * Used when we want to find e.g. "Operations Manager at Define Metal Fabrication".
+ *
+ * Returns up to N LinkedIn /in/ profile URLs with snippet info.
+ */
+export async function findPeopleByRole(
+  companyName: string,
+  roles: string[],
+  domain?: string,
+  limit: number = 5,
+): Promise<Array<{ name: string | null; title: string | null; linkedinUrl: string; snippet: string }>> {
+  if (!getApiKey()) return [];
+  if (!companyName || roles.length === 0) return [];
+
+  // Build OR query for roles
+  const rolesPart = roles.map(r => `"${r}"`).join(" OR ");
+  const domainPart = domain ? ` "${domain.replace(/\.(com|io|co|org|net|ca)$/, "")}"` : "";
+  const query = `(${rolesPart}) "${companyName}"${domainPart} site:linkedin.com/in/`;
+
+  console.log(`[serperSearch] Find people by role: ${query}`);
+  const results = await serperSearch(query, limit);
+  const profileResults = results.filter(r =>
+    r.link.includes("linkedin.com/in/") &&
+    !r.link.includes("/posts/") &&
+    !r.link.includes("/pulse/")
+  );
+
+  return profileResults.map(r => {
+    // Extract name from title (usually "John Smith - VP Operations - Acme | LinkedIn")
+    const nameMatch = r.title.match(/^([A-Za-zÀ-ɏ\s.'-]+?)(?:\s*[-–—|])/);
+    const name = nameMatch ? nameMatch[1].trim() : null;
+    const titleMatch = r.title.match(/[-–—]\s*([^|]+?)\s*[-–—|]/);
+    const title = titleMatch ? titleMatch[1].trim() : null;
+    return {
+      name,
+      title,
+      linkedinUrl: r.link,
+      snippet: r.snippet,
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Gating
 // ---------------------------------------------------------------------------
 

@@ -601,11 +601,19 @@ FIELD TYPES:
 FORMATTING RULES:
 - Return plain text values only. Do NOT use markdown links like [text](url).
 - Do NOT include HTML tags, URL encoding (%C3%A9), or HTML entities (&amp;).
-- For person/name fields: return the person's full name and title (e.g. "Jane Doe, CEO"). Do NOT put email addresses in name fields.
+- For person/name fields: return the person's full name and title (e.g. "Jane Doe, CEO"). Do NOT put email addresses in name fields. If you don't have a person's name, return empty string — do NOT put an email or company name there.
 - For contact/email fields: return email addresses and phone numbers as plain text (e.g. "jane@company.com; +1 555-1234").
 - For data fields: if a field cannot be determined from the content, return an empty string "". Do NOT guess or hallucinate.
 - For analysis fields: provide a brief, evidence-based assessment. Be specific — cite what you observed on the page.
 - Ignore navigation menus, cookie banners, footer boilerplate, and third-party content.
+
+CONTACT SELECTION PRIORITY (when picking a contact person/email):
+1. PREFER: Owner, President, CEO, COO, CFO, VP, Director, Founder, Operations Manager, General Manager, Plant Manager, Principal
+2. ACCEPTABLE: Department heads, Managers (non-sales), Engineers (if technical context)
+3. LAST RESORT: Sales reps, BDRs, Account Executives, "Sales" or "Sales Manager" titles
+4. AVOID: HR, Marketing, PR (unless specifically requested)
+- A generic email (info@, contact@) is BETTER than a sales rep for most outreach.
+- If the only person on the page is a sales rep, return the generic email and leave the contact name empty rather than picking the sales rep.
 
 Already found: ${alreadyFoundBrief || "(nothing yet)"}
 
@@ -1779,6 +1787,192 @@ Return JSON:
       }
     } else if (apolloResult?.skippedReason) {
       console.log(`[superScraper] Apollo skipped: ${apolloResult.skippedReason}`);
+    }
+  }
+
+  // ── Step 1c: Vayne LinkedIn company employees + Serper specialized search ──
+  //  Fires when contact field is still weak (empty, only sales rep, or generic email)
+  //  Uses website LinkedIn URL → Vayne company scrape → Serper fallback
+  if (!isCancelled?.()) {
+    try {
+      // Determine if current contact is "thin" (no person, or only a sales rep)
+      const contactSection = sections.find(s =>
+        /decision.?maker|dm\d|contact|person|erp/i.test(s.key + " " + s.label) &&
+        !/email|phone|linkedin/i.test(s.key)
+      );
+      const currentContactValue = contactSection ? (data[contactSection.key] || "").trim() : "";
+      const SALES_RX = /\bsales\b|\bbdr\b|account exec/i;
+      const contactIsThin = !currentContactValue || SALES_RX.test(currentContactValue) || currentContactValue.includes("@");
+
+      if (contactIsThin && contactSection) {
+        // Use the company name we extracted from URL
+        const derivedCompanyName = (
+          Object.entries(data).find(([k]) => /company|firm|business|organization/i.test(k))?.[1] ||
+          companyName ||
+          _domain.split(".")[0]
+        );
+
+        // Find LinkedIn company URL — try fieldResults first (from Phase 2 raw HTML scan), then Serper
+        let linkedinCompanyUrl: string | null = null;
+        for (const s of sections) {
+          const v = fieldResults[s.key]?.value;
+          if (v && v.includes("linkedin.com/company/")) {
+            const match = v.match(/https?:\/\/(?:www\.)?linkedin\.com\/company\/[a-zA-Z0-9_-]+/);
+            if (match) { linkedinCompanyUrl = match[0]; break; }
+          }
+        }
+
+        // Fallback: scan all pages' raw HTML for any linkedin.com/company URL
+        if (!linkedinCompanyUrl) {
+          for (const p of allPages) {
+            const html = p.rawHtml || p.content;
+            const match = html?.match(/https?:\/\/(?:www\.)?linkedin\.com\/company\/[a-zA-Z0-9_-]+/);
+            if (match) { linkedinCompanyUrl = match[0]; break; }
+          }
+        }
+
+        // Fallback: ask Serper to find the company's LinkedIn page
+        if (!linkedinCompanyUrl && derivedCompanyName) {
+          try {
+            const { findCompanyLinkedInUrl } = await import("./dataSources/serperSearch");
+            linkedinCompanyUrl = await findCompanyLinkedInUrl(derivedCompanyName, _domain);
+          } catch { /* non-fatal */ }
+        }
+
+        // Try Vayne to get company employees
+        const vaynePeople: { name: string; title: string; linkedinUrl: string }[] = [];
+        if (linkedinCompanyUrl) {
+          try {
+            const { vayneScrapeCompanyEmployees, isVayneAvailable } = await import("./dataSources/vayneApi");
+            if (isVayneAvailable()) {
+              console.log(`[superScraper] Vayne fallback for ${derivedCompanyName} → ${linkedinCompanyUrl}`);
+              const result = await vayneScrapeCompanyEmployees(linkedinCompanyUrl);
+              for (const p of result.people) {
+                vaynePeople.push({ name: p.fullName, title: p.title, linkedinUrl: p.linkedinUrl });
+              }
+              if (result.skippedReason) {
+                console.log(`[superScraper] Vayne skipped: ${result.skippedReason}`);
+              }
+            }
+          } catch (err) {
+            console.warn(`[superScraper] Vayne failed (non-fatal):`, err);
+            extractionFailures.push(`Vayne: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+
+        // If still nothing, try Serper specialized search for ops/exec roles
+        if (vaynePeople.length === 0 && derivedCompanyName) {
+          try {
+            const { findPeopleByRole } = await import("./dataSources/serperSearch");
+            const opsRoles = ["Owner", "President", "CEO", "COO", "Operations Manager", "Operations Director", "General Manager", "Plant Manager", "Founder"];
+            const found = await findPeopleByRole(derivedCompanyName, opsRoles, _domain, 5);
+            for (const p of found) {
+              if (p.name) {
+                vaynePeople.push({ name: p.name, title: p.title || "", linkedinUrl: p.linkedinUrl });
+              }
+            }
+            if (found.length > 0) {
+              console.log(`[superScraper] Serper found ${found.length} ops/exec people for ${derivedCompanyName}`);
+            }
+          } catch (err) {
+            console.warn(`[superScraper] Serper specialized search failed (non-fatal):`, err);
+          }
+        }
+
+        // Save to diagnostics
+        if (vaynePeople.length > 0) {
+          (diag as any).vaynePeople = vaynePeople.map(p => `${p.name} | ${p.title} | ${p.linkedinUrl}`);
+
+          // Re-evaluate contact selection using Vayne candidates
+          // (already inside the contactSection branch)
+          {
+            try {
+              const allCandidates = vaynePeople.map(vp => ({
+                source: "Vayne/Serper",
+                name: vp.name,
+                title: vp.title,
+                email: "",
+                linkedin: vp.linkedinUrl,
+              }));
+
+              const candidateList = allCandidates.map((c, i) =>
+                `${i + 1}. [${c.source}] ${c.name} | Title: ${c.title} | Email: ${c.email || "(none)"} | LinkedIn: ${c.linkedin || "(none)"}`
+              ).join("\n");
+
+              const currentContact = data[contactSection.key] || "(none found)";
+              const reEvalResp = await queuedLLMCall({
+                model: MODEL_NANO,
+                messages: [{
+                  role: "user",
+                  content: `Pick the best contact person for this outreach.
+
+CRITERIA:
+${contactSection.desc}
+
+CURRENT SELECTION: ${currentContact}
+
+ALL CANDIDATES:
+${candidateList}
+
+Sales reps are LAST RESORT. Pick operations/executive/ownership over sales whenever possible.
+
+Return JSON: {"name": "Full Name", "title": "Title", "email": "email or empty", "linkedinUrl": "url or empty", "reasoning": "why"}`,
+                }],
+                response_format: {
+                  type: "json_schema",
+                  json_schema: {
+                    name: "best_contact_v2",
+                    strict: true,
+                    schema: {
+                      type: "object",
+                      properties: {
+                        name: { type: "string" },
+                        title: { type: "string" },
+                        email: { type: "string" },
+                        linkedinUrl: { type: "string" },
+                        reasoning: { type: "string" },
+                      },
+                      required: ["name", "title", "email", "linkedinUrl", "reasoning"],
+                      additionalProperties: false,
+                    },
+                  },
+                },
+              });
+
+              const raw = reEvalResp.choices[0]?.message?.content ?? "{}";
+              const pick = JSON.parse(typeof raw === "string" ? raw : "{}");
+              if (pick.name) {
+                const contactValue = pick.title ? `${pick.name}, ${pick.title}` : pick.name;
+                fieldResults[contactSection.key] = { value: contactValue, confidence: CONFIDENCE.VERIFIED, sourceUrl: "vayne+serper+llm" };
+                data[contactSection.key] = contactValue;
+                if (pick.email) {
+                  for (const s of sections) {
+                    if (/email/i.test(s.key + " " + s.label)) {
+                      fieldResults[s.key] = { value: pick.email, confidence: CONFIDENCE.VERIFIED, sourceUrl: "vayne+serper" };
+                      data[s.key] = pick.email;
+                    }
+                  }
+                }
+                if (pick.linkedinUrl) {
+                  for (const s of sections) {
+                    const kl = s.key.toLowerCase();
+                    if (/linkedin/i.test(kl) && !/company/i.test(kl)) {
+                      fieldResults[s.key] = { value: pick.linkedinUrl, confidence: CONFIDENCE.VERIFIED, sourceUrl: "vayne+serper" };
+                      data[s.key] = pick.linkedinUrl;
+                    }
+                  }
+                }
+                console.log(`[superScraper] Vayne+Serper re-eval: ${pick.name} (${pick.title}) — ${pick.reasoning}`);
+                (diag as any).vayneReEval = `${pick.name} <${pick.email}> — ${pick.reasoning}`;
+              }
+            } catch (err) {
+              console.warn(`[superScraper] Vayne+Serper re-eval failed (non-fatal):`, err);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.warn(`[superScraper] Vayne+Serper fallback step failed (non-fatal):`, err);
     }
   }
 
