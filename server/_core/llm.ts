@@ -69,6 +69,8 @@ export type InvokeParams = {
   response_format?: ResponseFormat;
   /** Override the default model for this call (e.g. "gpt-5.4-nano" for cheap calls). */
   model?: string;
+  /** Abort the underlying HTTP request when this signal fires (used for job cancellation). */
+  signal?: AbortSignal;
 };
 
 export type ToolCall = {

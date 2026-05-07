@@ -802,7 +802,10 @@ export async function processAgentJob(jobId: number) {
             sections,
             resolvedPrompt,
             5,
-            () => isJobCancelled(jobId),
+            // Pause and cancel BOTH abort the in-flight scrape. The outer
+            // processAgentJob check below differentiates pause (saves partial,
+            // resumable) vs cancel (saves partial, terminates).
+            () => isJobCancelled(jobId) || isJobPaused(jobId),
           );
 
           if (result.type === "directory") {
@@ -922,6 +925,23 @@ export async function processAgentJob(jobId: number) {
             }).catch(() => {});
           }
         } catch (err) {
+          // If the user cancelled/paused mid-scrape, the abort signal fires and the
+          // underlying fetch throws AbortError. Don't log it as a per-firm failure —
+          // the outer pause/cancel handlers below will save partial results and exit.
+          const errMsg = err instanceof Error ? err.message : String(err);
+          const isAbort =
+            (err as any)?.name === "AbortError" ||
+            errMsg === "JOB_CANCELLED" ||
+            isJobCancelled(jobId) ||
+            isJobPaused(jobId);
+          if (isAbort) {
+            console.log(`[processAgentJob] Aborted mid-scrape for ${firm.websiteUrl} — pause/cancel detected`);
+            // Return the firm to the front of the queue if paused so it can be
+            // retried on resume; on cancel it doesn't matter.
+            if (isJobPaused(jobId)) firmQueue.unshift(firm);
+            break;
+          }
+
           console.error(`[processAgentJob] Error processing ${firm.websiteUrl}:`, err);
           insertJobLog({
             jobId,
@@ -929,7 +949,7 @@ export async function processAgentJob(jobId: number) {
             companyName: firm.companyName,
             status: "failed",
             errorReason: classifyAgentError(err),
-            errorDetail: err instanceof Error ? err.message.slice(0, 500) : String(err).slice(0, 500),
+            errorDetail: errMsg.slice(0, 500),
             durationMs: Date.now() - startMs,
           }).catch(() => {});
           // Add empty row on error so we don't lose the firm from the output

@@ -37,6 +37,10 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
   }
 
   const { messages, tools, response_format, temperature, model: modelOverride } = params;
+  // Default the abort signal from the running job's context so cancellation
+  // kills in-flight LLM calls without each caller having to thread the signal.
+  const { getJobSignal } = await import("./jobContext");
+  const signal = params.signal ?? getJobSignal();
   const activeModel = modelOverride ?? LLM_MODEL_DEFAULT;
 
   // Build request payload
@@ -68,6 +72,7 @@ export async function invokeLLM(params: InvokeParams): Promise<InvokeResult> {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(payload),
+      signal,
     });
 
     if (!response.ok) {

@@ -157,7 +157,8 @@ export async function hunterDomainSearch(
     `&api_key=${getApiKey()}`;
 
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+    const { withJobSignal } = await import("../_core/jobContext");
+    const res = await fetch(url, { signal: withJobSignal(AbortSignal.timeout(15_000)) });
 
     // Rate limiting
     if (res.status === 429) {
@@ -249,7 +250,8 @@ export async function hunterEmailFinder(
     `&api_key=${getApiKey()}`;
 
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(10_000) });
+    const { withJobSignal } = await import("../_core/jobContext");
+    const res = await fetch(url, { signal: withJobSignal(AbortSignal.timeout(10_000)) });
 
     if (res.status === 429) {
       return { email: null, confidence: 0, sources: 0, skippedReason: "Rate limited" };

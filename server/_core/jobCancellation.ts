@@ -54,3 +54,37 @@ export function markJobPaused(jobId: number): void {
 export function clearJobPaused(jobId: number): void {
   pausedJobs.delete(jobId);
 }
+
+// ---------------------------------------------------------------------------
+// AbortController registry — one controller per running job so that
+// in-flight HTTP fetches (Jina, Puppeteer, OpenAI, Hunter, Apollo) can be
+// aborted instantly when the user clicks Cancel.
+//
+// Lifecycle: the worker creates a controller via registerJobAbortController()
+// at job start, calls abortJob() when cancellation is detected, and
+// cleanupJobAbortController() after the job has fully stopped.
+// ---------------------------------------------------------------------------
+
+const jobAbortControllers = new Map<number, AbortController>();
+
+/** Create + register a fresh controller for the given job. Returns it. */
+export function registerJobAbortController(jobId: number): AbortController {
+  const ctrl = new AbortController();
+  jobAbortControllers.set(jobId, ctrl);
+  return ctrl;
+}
+
+/** Abort the registered controller for this job (no-op if none registered). */
+export function abortJob(jobId: number): void {
+  jobAbortControllers.get(jobId)?.abort();
+}
+
+/** Get the AbortSignal for the running job, if one is registered. */
+export function getJobAbortSignal(jobId: number): AbortSignal | undefined {
+  return jobAbortControllers.get(jobId)?.signal;
+}
+
+/** Remove the controller after the job has stopped. */
+export function cleanupJobAbortController(jobId: number): void {
+  jobAbortControllers.delete(jobId);
+}

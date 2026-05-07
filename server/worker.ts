@@ -15,7 +15,12 @@ import mysql from 'mysql2/promise';
 import { enrichmentJobs } from '../drizzle/schema';
 import { eq, and, or, lt, isNull } from 'drizzle-orm';
 import { processAgentJob } from './routers';
-import { markJobCancelled, clearJobCancelled, markJobPaused, clearJobPaused } from './_core/jobCancellation';
+import {
+  markJobCancelled, clearJobCancelled,
+  markJobPaused, clearJobPaused,
+  registerJobAbortController, abortJob, cleanupJobAbortController,
+} from './_core/jobCancellation';
+import { jobContext } from './_core/jobContext';
 import { updateEnrichmentJob } from './enrichmentDb';
 import {
   DEFAULT_AGENT_SECTIONS,
@@ -39,7 +44,7 @@ process.on("unhandledRejection", (reason) => {
 const POLL_INTERVAL = 5000; // Check for new jobs every 5 seconds
 const HEARTBEAT_INTERVAL = 30000; // Send heartbeat every 30 seconds
 const STALE_THRESHOLD = 5 * 60 * 1000; // 5 minutes without heartbeat = stale
-const CANCEL_CHECK_INTERVAL = 5000; // Poll DB for cancellation every 5 seconds
+const CANCEL_CHECK_INTERVAL = 1500; // Poll DB for cancel/pause every 1.5s — fast path for user clicks
 
 let currentJobId: number | null = null;
 let heartbeatTimer: NodeJS.Timeout | null = null;
@@ -216,13 +221,15 @@ function startCancellationPoller(jobId: number) {
         .where(eq(enrichmentJobs.id, jobId))
         .limit(1);
       if (rows[0]?.status === 'cancelled') {
-        console.log(`[Worker] Detected cancellation for job ${jobId} — flagging in-process`);
+        console.log(`[Worker] Detected cancellation for job ${jobId} — flagging in-process and aborting in-flight requests`);
         markJobCancelled(jobId);
+        abortJob(jobId); // kills in-flight HTTP fetches + LLM calls immediately
         clearInterval(cancellationTimer!);
         cancellationTimer = null;
       } else if (rows[0]?.status === 'paused') {
-        console.log(`[Worker] Detected pause for job ${jobId} — flagging in-process`);
+        console.log(`[Worker] Detected pause for job ${jobId} — flagging in-process and aborting in-flight requests`);
         markJobPaused(jobId);
+        abortJob(jobId); // pause also aborts in-flight work; processAgentJob saves partial + flips to paused
         clearInterval(cancellationTimer!);
         cancellationTimer = null;
       }
@@ -257,6 +264,10 @@ async function processJob(job: any) {
   }
   console.log(`${'='.repeat(60)}\n`);
   
+  // Register an AbortController for this job so the cancellation poller can
+  // abort any in-flight HTTP fetch, LLM call, or third-party API request.
+  const jobController = registerJobAbortController(job.id);
+
   // Start sending heartbeats and cancellation poller
   startHeartbeat(job.id);
   startCancellationPoller(job.id);
@@ -273,7 +284,13 @@ async function processJob(job: any) {
         objective: job.objective || DEFAULT_AGENT_OBJECTIVE,
       });
     }
-    await processAgentJob(job.id);
+    // Run the job inside an AsyncLocalStorage context so every nested helper
+    // (LLM calls, Jina fetches, Hunter/Apollo API calls) can read the abort
+    // signal via getJobSignal() without it being threaded through every
+    // function signature.
+    await jobContext.run({ jobId: job.id, signal: jobController.signal }, () =>
+      processAgentJob(job.id)
+    );
 
     console.log(`\n[Worker] ✅ Job ${job.id} completed successfully!`);
   } catch (error: any) {
@@ -300,6 +317,7 @@ async function processJob(job: any) {
     stopCancellationPoller();
     clearJobCancelled(job.id);
     clearJobPaused(job.id);
+    cleanupJobAbortController(job.id);
     currentJobId = null;
   }
 }

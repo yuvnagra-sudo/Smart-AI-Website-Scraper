@@ -79,6 +79,7 @@ export async function vayneScrapeCompanyEmployees(
   console.log(`[vayneApi] Scraping employees for: ${linkedinCompanyUrl}`);
 
   try {
+    const { withJobSignal, getJobSignal } = await import("../_core/jobContext");
     // Vayne uses an order-based async API. Submit the order first, then poll for results.
     // Use "list" mode — returns name + title only, NOT full profile scrapes.
     // This is the cheap "Leads & Companies scraper" path, not "Profiles scraper".
@@ -97,7 +98,7 @@ export async function vayneScrapeCompanyEmployees(
           enrich_profiles: false, // do NOT scrape each individual's full profile
         },
       }),
-      signal: AbortSignal.timeout(15_000),
+      signal: withJobSignal(AbortSignal.timeout(15_000)),
     });
 
     if (submitRes.status === 401 || submitRes.status === 403) {
@@ -116,13 +117,18 @@ export async function vayneScrapeCompanyEmployees(
       return { people: [], totalEmployees: 0, companyName: null, skippedReason: "No order ID returned" };
     }
 
-    // Poll for completion (up to 60s)
+    // Poll for completion (up to 60s). Bail immediately if the job is cancelled
+    // so we don't keep paying for Vayne polls after the user clicks Cancel.
     let result: any = null;
     for (let i = 0; i < 12; i++) {
       await new Promise(resolve => setTimeout(resolve, 5000));
+      const sig = getJobSignal();
+      if (sig?.aborted) {
+        return { people: [], totalEmployees: 0, companyName: null, skippedReason: "Cancelled mid-poll" };
+      }
       const pollRes = await fetch(`${VAYNE_BASE_URL}/orders/${orderId}`, {
         headers: { "Authorization": `Bearer ${getApiKey()}` },
-        signal: AbortSignal.timeout(10_000),
+        signal: withJobSignal(AbortSignal.timeout(10_000)),
       });
       if (!pollRes.ok) continue;
       result = await pollRes.json();

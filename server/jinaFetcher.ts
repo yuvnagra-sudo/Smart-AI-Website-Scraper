@@ -19,7 +19,7 @@ interface JinaFetchResult {
  * Fetch website content via Jina AI Reader API
  * Returns clean markdown content
  */
-export async function fetchViaJina(url: string): Promise<JinaFetchResult | null> {
+export async function fetchViaJina(url: string, signal?: AbortSignal): Promise<JinaFetchResult | null> {
   const startTime = Date.now();
   const apiKey = process.env.JINA_API_KEY;
 
@@ -28,9 +28,20 @@ export async function fetchViaJina(url: string): Promise<JinaFetchResult | null>
     return null;
   }
 
+  // Default to the running job's signal so cancellation aborts in-flight Jina calls.
+  if (!signal) {
+    const { getJobSignal } = await import('./_core/jobContext');
+    signal = getJobSignal();
+  }
+
+  // Pre-flight check — don't queue a request behind the rate limiter if we're
+  // already aborted.
+  if (signal?.aborted) return null;
+
   try {
     // Acquire a rate-limiter token before making the request
     await jinaLimiter.acquire();
+    if (signal?.aborted) return null;
 
     console.log(`[Jina] Fetching ${url}`);
 
@@ -43,6 +54,7 @@ export async function fetchViaJina(url: string): Promise<JinaFetchResult | null>
         'Accept': 'text/markdown',
       },
       timeout: 15000, // 15 second timeout
+      signal,
     });
 
     if (response.status === 200 && response.data) {
@@ -115,9 +127,28 @@ function isCloudflareChallenge(content: string): boolean {
  */
 export async function fetchWebsiteContentHybrid(
   url: string,
-  puppeteerFallback: () => Promise<string | null>
+  puppeteerFallback: () => Promise<string | null>,
+  signal?: AbortSignal,
 ): Promise<JinaFetchResult> {
   const startTime = Date.now();
+
+  // Default the abort signal from the running job's context so cancellation
+  // aborts the Jina + Puppeteer race without each caller threading the signal.
+  if (!signal) {
+    const { getJobSignal } = await import('./_core/jobContext');
+    signal = getJobSignal();
+  }
+
+  if (signal?.aborted) {
+    return {
+      success: false,
+      content: null,
+      format: 'html',
+      source: 'puppeteer',
+      error: 'aborted',
+      duration: 0,
+    };
+  }
 
   const validateJina = (r: JinaFetchResult | null): JinaFetchResult | null => {
     if (!r?.success || !r.content) return null;
@@ -134,15 +165,20 @@ export async function fetchWebsiteContentHybrid(
   };
 
   // Jina starts immediately
-  const jinaPromise: Promise<JinaFetchResult | null> = fetchViaJina(url)
+  const jinaPromise: Promise<JinaFetchResult | null> = fetchViaJina(url, signal)
     .then(validateJina)
     .catch(() => null);
 
-  // Puppeteer starts after 4s delay — won't launch at all for fast Jina pages
+  // Puppeteer starts after 4s delay — won't launch at all for fast Jina pages.
+  // The signal short-circuits the wait + the fallback call so an aborted job
+  // doesn't kick off a Puppeteer browser.
   const puppeteerPromise: Promise<JinaFetchResult | null> = new Promise<void>(
     resolve => setTimeout(resolve, 4000)
   )
-    .then(() => puppeteerFallback())
+    .then(() => {
+      if (signal?.aborted) return null;
+      return puppeteerFallback();
+    })
     .then(content => {
       if (!content || content.trim().length < 200) return null;
       const duration = Date.now() - startTime;

@@ -113,6 +113,7 @@ export async function apolloPeopleSearch(
     // Apollo docs show both X-Api-Key and Authorization: Bearer in different pages.
     // Send both headers to maximize compatibility.
     const apiKey = getApiKey();
+    const { withJobSignal } = await import("../_core/jobContext");
     const res = await fetch(`${APOLLO_BASE_URL}/mixed_people/api_search`, {
       method: "POST",
       headers: {
@@ -122,7 +123,7 @@ export async function apolloPeopleSearch(
         "Cache-Control": "no-cache",
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(15_000),
+      signal: withJobSignal(AbortSignal.timeout(15_000)),
     });
 
     if (res.status === 429) {

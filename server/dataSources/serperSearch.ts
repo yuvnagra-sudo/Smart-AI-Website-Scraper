@@ -44,6 +44,7 @@ async function serperSearch(query: string, num: number = 5): Promise<SerperSearc
   if (!apiKey) return [];
 
   try {
+    const { withJobSignal } = await import("../_core/jobContext");
     const res = await fetch(`${SERPER_API_URL}/search`, {
       method: "POST",
       headers: {
@@ -51,7 +52,7 @@ async function serperSearch(query: string, num: number = 5): Promise<SerperSearc
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ q: query, num }),
-      signal: AbortSignal.timeout(10_000),
+      signal: withJobSignal(AbortSignal.timeout(10_000)),
     });
 
     if (!res.ok) {
