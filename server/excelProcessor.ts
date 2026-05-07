@@ -474,7 +474,46 @@ export function createAgentOutputExcel(
     }
   }
 
-  // Sheet 4: Diagnostics — raw scrape data per company for debugging
+  // Sheet 4: Quality Audit — structural validation issues + LLM judge scores per company.
+  // Sorted by overall LLM score ascending so the worst firms appear at the top.
+  if (diagnosticResults && diagnosticResults.length > 0) {
+    type QA = NonNullable<ScrapeDiagnostics["qualityAudit"]>;
+    const auditRows: Record<string, string | number>[] = [];
+    for (const d of diagnosticResults) {
+      const qa = (d.diagnostics as ScrapeDiagnostics).qualityAudit as QA | undefined;
+      if (!qa) continue;
+      const errCount = qa.validationIssues.filter(i => i.severity === "error").length;
+      const warnCount = qa.validationIssues.filter(i => i.severity === "warning").length;
+      auditRows.push({
+        "Company": d.companyName,
+        "Website": d.websiteUrl,
+        "LLM Score (0-100)": qa.llmOverallScore ?? "",
+        "LLM Summary": qa.llmReasoning,
+        "Structural Errors": errCount,
+        "Structural Warnings": warnCount,
+        "Validation Issues": qa.validationIssues
+          .map(i => `[${i.severity.toUpperCase()}] ${i.field}: ${i.message}`)
+          .join("\n") || "(none)",
+        "Per-Field Scores": qa.llmFieldScores
+          .map(f => `${f.field} = ${f.score}: ${f.reasoning}`)
+          .join("\n") || "(none)",
+      });
+    }
+    if (auditRows.length > 0) {
+      // Sort lowest scores first — worst firms surface at the top
+      auditRows.sort((a, b) => {
+        const av = typeof a["LLM Score (0-100)"] === "number" ? (a["LLM Score (0-100)"] as number) : 999;
+        const bv = typeof b["LLM Score (0-100)"] === "number" ? (b["LLM Score (0-100)"] as number) : 999;
+        if (av !== bv) return av - bv;
+        return (b["Structural Errors"] as number) - (a["Structural Errors"] as number);
+      });
+      const sanitized = sanitizeForExcel(auditRows as Record<string, string>[]);
+      const sheet = XLSX.utils.json_to_sheet(sanitized);
+      XLSX.utils.book_append_sheet(workbook, sheet, "Quality Audit");
+    }
+  }
+
+  // Sheet 5: Diagnostics — raw scrape data per company for debugging
   if (diagnosticResults && diagnosticResults.length > 0) {
     const diagRows = diagnosticResults.map((d) => {
       const diag = d.diagnostics as any; // extended diagnostics may have extra fields

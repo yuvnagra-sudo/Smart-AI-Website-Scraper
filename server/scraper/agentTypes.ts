@@ -39,7 +39,7 @@ export interface ScrapeDiagnostics {
   softDeleted: string[];         // soft-404 URLs
   topPagePreview: string;        // first 500 chars of best-scoring page
   failures?: string[];           // non-fatal extraction failures for visibility
-  // All employees found across all sources (website, Hunter, Vayne, Serper)
+  // All employees found across all sources (Website, Hunter, Apollo, Vayne, Serper)
   allEmployees?: Array<{
     name: string;
     title: string;
@@ -48,6 +48,13 @@ export interface ScrapeDiagnostics {
     source: string;
     selected?: boolean;
   }>;
+  // Per-firm quality audit (structural validation + LLM judge)
+  qualityAudit?: {
+    validationIssues: Array<{ field: string; severity: "error" | "warning"; message: string }>;
+    llmFieldScores: Array<{ field: string; score: number; reasoning: string }>;
+    llmOverallScore: number | null;
+    llmReasoning: string;
+  };
 }
 
 export type AgentScrapeResult =

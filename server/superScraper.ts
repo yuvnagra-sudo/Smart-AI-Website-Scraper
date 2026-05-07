@@ -393,11 +393,13 @@ function extractPhones(content: string, rawHtml?: string): string[] {
   return [...new Set(filtered)].slice(0, 5);
 }
 
-/** Run all deterministic extractors and return a partial FieldResultMap. */
+/** Run all deterministic extractors and return a partial FieldResultMap.
+ *  Also returns the dedup'd page-extracted emails so the caller can attribute
+ *  them to source: "Website" in the All Employees diagnostic list. */
 function deterministicExtract(
   pages: FetchedPage[],
   sections: AgentSection[],
-): FieldResultMap {
+): { result: FieldResultMap; uniqueEmails: string[] } {
   const result: FieldResultMap = {};
 
   // Aggregate all emails, LinkedIn URLs, phones, JSON-LD across all pages
@@ -486,7 +488,7 @@ function deterministicExtract(
     // Location, hours, services, etc. — also leave for LLM
   }
 
-  return result;
+  return { result, uniqueEmails };
 }
 
 /** Merge two FieldResultMaps, keeping the higher-confidence value per field. */
@@ -1286,8 +1288,22 @@ export async function scrapeUrlSuper(
   if (isCancelled?.()) throw new Error("JOB_CANCELLED");
   console.log(`[superScraper] Phase 2: Deterministic extraction`);
 
-  const deterministicResults = deterministicExtract(allPages, sections);
+  const { result: deterministicResults, uniqueEmails: websiteEmails } = deterministicExtract(allPages, sections);
   fieldResults = mergeFieldResults(fieldResults, deterministicResults);
+
+  // Surface every email regex-found on the site into the All Employees list
+  // with source: "Website". Name/title/linkedin are blank because the regex
+  // can't attribute ownership — these rows let the user manually reconcile
+  // website emails against Hunter/Apollo results in the same sheet.
+  if (websiteEmails.length > 0) {
+    if (!(diag as any).allEmployees) (diag as any).allEmployees = [];
+    const employeesList = (diag as any).allEmployees as Array<{
+      name: string; title: string; email: string; linkedinUrl: string; source: string; selected?: boolean;
+    }>;
+    for (const email of websiteEmails) {
+      employeesList.push({ name: "", title: "", email, linkedinUrl: "", source: "Website" });
+    }
+  }
 
   const phase2Filled = sections.filter(s => (fieldResults[s.key]?.confidence ?? 0) >= CONFIDENCE_THRESHOLD).length;
   diag.phase2FieldsFilled = phase2Filled;
@@ -2239,6 +2255,31 @@ Return JSON: {"name": "Full Name", "title": "Title", "email": "email or empty", 
     personCount: extractedPersonCount,
     hasData: sections.length - emptyFields.length > 0,
   };
+
+  // ── QUALITY AUDIT ────────────────────────────────────────────────────────
+  // Per-firm structural validation + LLM judge against the fetched pages.
+  // Non-fatal — failures don't block the result.
+  if (!isCancelled?.() && stats.hasData) {
+    try {
+      const { runQualityAudit } = await import("./qualityAudit");
+      // Sort pages by content length (largest first) for the LLM judge sample
+      const pageContents = [...allPages]
+        .sort((a, b) => (b.content?.length ?? 0) - (a.content?.length ?? 0))
+        .slice(0, 2)
+        .map(p => p.content || "");
+      const audit = await runQualityAudit(data, sections, pageContents);
+      (diag as any).qualityAudit = audit;
+      const errCount = audit.validationIssues.filter(i => i.severity === "error").length;
+      const warnCount = audit.validationIssues.filter(i => i.severity === "warning").length;
+      console.log(
+        `[superScraper] QA: structural ${errCount} errors / ${warnCount} warnings; ` +
+        `LLM score ${audit.llmOverallScore ?? "n/a"}`,
+      );
+    } catch (err) {
+      console.warn(`[superScraper] Quality audit failed (non-fatal):`, err);
+      extractionFailures.push(`Quality audit: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
   const durationSec = ((Date.now() - startMs) / 1000).toFixed(1);
 
